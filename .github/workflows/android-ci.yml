@@ -30,6 +30,8 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install Android SDK Platform 37
         run: sdkmanager "platforms;android-37"
@@ -41,12 +43,13 @@ jobs:
         run: ./gradlew :app:assembleRelease --console=plain
 
       - name: Run unit tests and Release APK contracts
+        id: unit_tests
         env:
           DOUAI_VERIFY_RELEASE_APK: ${{ github.workspace }}/app/build/outputs/apk/release/app-release-unsigned.apk
         run: ./gradlew :app:testDebugUnitTest --console=plain
 
       - name: Report host DEX integration coverage
-        if: always()
+        if: always() && steps.unit_tests.outcome != 'skipped'
         shell: bash
         run: |
           python3 - <<'PY'
