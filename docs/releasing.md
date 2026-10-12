@@ -45,3 +45,17 @@ Windows 路径在 properties 中使用正斜杠。私钥和密码仅在本机保
 收录申请：https://github.com/Xposed-Modules-Repo/submission/issues/2133
 
 官方模块仓库按官方要求仅上传模块介绍和 APK，源码托管在个人 GitHub 仓库。正式 APK 两处使用同一产物，官方 Release 标签必须为 `versionCode-versionName`，本版为 `47-0.1.46`。
+
+## 0.1.46 验证结果
+
+- 591 项测试通过，0 失败、0 错误、0 跳过，包括抖音 40.6.0 全 DEX 规则扫描、正式包名的权限/诊断、重启组件、启动器和宿主资源检查。
+- Release Lint：0 错误、41 警告。
+- 正式包未开启调试；APK v3 签名校验通过，适用于本项目最低版本 Android 9。
+- APK 内含 GitHub、LSPosed 和 Miuix 地址以及 libxposed 模块元数据。
+- 未进行真机安装、真实账号网络调用或实际评论/回复发送验证。
+
+正式 APK：`DouAi-0.1.46-release.apk`，25,390,227 字节。
+
+APK SHA-256：`95C71D4F4397634BBBC0BC1802C148208E55FFCF21FF01EEBD78C62AD482343F`
+
+签名证书 SHA-256：`FAE67C134F4C4FA73B8E34487C47A8C7F3E7C34B840BC245AFAC51585B7DFD47`
