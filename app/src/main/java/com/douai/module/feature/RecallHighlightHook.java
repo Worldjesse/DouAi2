@@ -77,6 +77,8 @@ public final class RecallHighlightHook implements AutoCloseable {
         catch (RuntimeException ignored) { return Color.parseColor("#2051BA55"); }
     }
 
+    public boolean isActive() { return !closed && registration.isActive(); }
+
     public void setOptions(LocalOptions options) {
         this.options = options;
         if (!options.enabled("prevent_message_recall")) main.post(this::restoreAll);

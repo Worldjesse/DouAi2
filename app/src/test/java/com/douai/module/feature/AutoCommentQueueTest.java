@@ -149,6 +149,27 @@ public final class AutoCommentQueueTest {
         assertEquals(List.of("first account", "second account"), calls);
     }
 
+    @Test public void cancelLatestUsesAcceptedQueueTailAfterDuplicateOffer() {
+        Clock clock = new Clock();
+        List<String> outcomes = new ArrayList<>();
+        List<String> cancellationHooks = new ArrayList<>();
+        AutoCommentQueue<String> queue = new AutoCommentQueue<>(clock, (work, attempt, result) -> { },
+                (work, status, attempts) -> outcomes.add(work + ':' + status));
+        queue.offer("work", "work", 0);
+        queue.cancelLatest(cancellationHooks::add);
+        assertEquals(List.of("work:cancelled"), outcomes);
+
+        queue.offer("other", "other", 0);
+        queue.offer("work", "duplicate", 0);
+        queue.cancelLatest(cancellationHooks::add);
+
+        assertEquals(List.of("work", "other"), cancellationHooks);
+        assertEquals(List.of("work:cancelled", "other:cancelled"), outcomes);
+        while (!clock.tasks.isEmpty()) clock.next();
+        assertEquals(List.of("work:cancelled", "other:cancelled"), outcomes);
+        assertTrue(clock.tasks.isEmpty());
+    }
+
     @Test public void queueStateAppearsBeforeProcessingAndCancellationKeepsTheNextCountCorrect() {
         Clock clock = new Clock();
         List<String> states = new ArrayList<>();

@@ -16,7 +16,7 @@ import java.util.Set;
 
 public final class HostRuleSet {
     public static final int CURRENT_FORMAT_VERSION = 1;
-    private static final String EXPECTED_PACKAGE = "com.ss.android.ugc.aweme";
+    private static final String EXPECTED_PACKAGE = HostAdaptation.TARGET_PACKAGE;
     private static final String HEADER = "id\tfeature\tkind\tclass_descriptor\tclass_strings"
             + "\tmethod_name\tmethod_descriptor\tmethod_strings\tinvoke_owners\tfield_owners\topcodes"
             + "\texact_method_count\texact_field_count\tfield_types\tfield_names";

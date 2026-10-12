@@ -133,6 +133,38 @@ public final class ChatCompletionClientTest {
         }
     }
 
+    @Test public void cancellingModelCatalogReleasesBlockedConnectionAndWorker() throws Exception {
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            server.enqueue(json("{\"data\":[{\"id\":\"next-model\"}]}"));
+            server.start();
+            AiModelConfig profile = AiModelConfig.fromJson(config(server, AiModelConfig.CHAT, true)
+                    .put("timeoutSeconds", 30));
+            ChatCompletionClient.ModelCatalogRequest request = new ChatCompletionClient.ModelCatalogRequest();
+            Future<java.util.List<String>> pending = worker.submit(() -> request.fetch(profile));
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            request.cancel();
+            try { pending.get(2, TimeUnit.SECONDS); fail("Cancelled catalog must fail"); }
+            catch (ExecutionException expected) { assertTrue(expected.getCause() instanceof CancellationException); }
+            assertEquals(Collections.singletonList("next-model"),
+                    worker.submit(() -> ChatCompletionClient.fetchModels(profile)).get(2, TimeUnit.SECONDS));
+        } finally { worker.shutdownNow(); }
+    }
+
+    @Test public void cancellingModelCatalogBeforeStartDoesNotReachProvider() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            AiModelConfig profile = AiModelConfig.fromJson(config(server, AiModelConfig.CHAT, true));
+            ChatCompletionClient.ModelCatalogRequest request = new ChatCompletionClient.ModelCatalogRequest();
+            request.cancel();
+            request.cancel();
+            try { request.fetch(profile); fail("Cancelled catalog must not start"); }
+            catch (CancellationException expected) { }
+            assertEquals(0, server.getRequestCount());
+        }
+    }
+
     @Test public void localHttpNeedsExplicitOptInAndRemoteHttpIsRejected() throws Exception {
         JSONObject local = config("http://127.0.0.1:11434/v1", AiModelConfig.CHAT, false)
                 .toJson().put("allowInsecureHttp", false);

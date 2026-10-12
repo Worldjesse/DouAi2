@@ -2,7 +2,7 @@
 
 抖音增强模块，面向抖音 `com.ss.android.ugc.aweme` 40.6.0，使用 libxposed API 102。
 
-作者：**yudigaga**。当前正式版：**0.1.46** / versionCode **47**。
+作者：**yudigaga**。当前正式版：**0.1.47** / versionCode **48**。
 
 - [源码仓库](https://github.com/yudigaga/DouAi)
 - [正式版下载](https://github.com/yudigaga/DouAi/releases)

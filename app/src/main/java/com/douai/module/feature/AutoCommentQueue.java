@@ -101,12 +101,25 @@ final class AutoCommentQueue<T> implements AutoCloseable {
             Job<T> selected = null;
             for (Job<T> job : jobs) if (job.target == target) { selected = job; break; }
             if (selected == null || closed) return;
-            boolean current = jobs.peek() == selected;
-            jobs.remove(selected);
-            observer.finished(selected.target, "cancelled", selected.attempts);
-            if (current && !jobs.isEmpty()) schedule(jobs.peek(), jobs.peek().delay);
-            else notifyState();
+            cancel(selected);
         });
+    }
+
+    void cancelLatest(Consumer<T> beforeCancel) {
+        scheduler.post(() -> {
+            if (closed || jobs.isEmpty()) return;
+            Job<T> selected = jobs.peekLast();
+            if (beforeCancel != null) beforeCancel.accept(selected.target);
+            cancel(selected);
+        });
+    }
+
+    private void cancel(Job<T> selected) {
+        boolean current = jobs.peek() == selected;
+        jobs.remove(selected);
+        observer.finished(selected.target, "cancelled", selected.attempts);
+        if (current && !jobs.isEmpty()) schedule(jobs.peek(), jobs.peek().delay);
+        else notifyState();
     }
 
     private void notifyState() {

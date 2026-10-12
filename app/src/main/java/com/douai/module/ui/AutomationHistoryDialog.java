@@ -5,39 +5,67 @@ import android.app.AlertDialog;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.graphics.Color;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.View;
-import android.widget.LinearLayout;
-import android.widget.ScrollView;
-import android.widget.TextView;
 import android.view.ViewGroup;
+import android.widget.BaseAdapter;
+import android.widget.ListView;
+import android.widget.TextView;
 
 import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.AutomationHistoryStore.Entry;
+import com.douai.module.ui.miuix.HostComposeContext;
+import com.douai.module.ui.miuix.MiuixDialogBuilder;
+import com.douai.module.ui.miuix.MiuixSettingsViews;
 
 import java.text.DateFormat;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
-import com.douai.module.ui.miuix.HostComposeContext;
-import com.douai.module.ui.miuix.MiuixSettingsViews;
-import com.douai.module.ui.miuix.MiuixDialogBuilder;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
 
 /** Read-only records independent of the model's in-memory conversation context. */
 final class AutomationHistoryDialog {
+    private static final ExecutorService IO = Executors.newSingleThreadExecutor(new ThreadFactory() {
+        @Override public Thread newThread(Runnable task) {
+            Thread thread = new Thread(task, "DouAi-history");
+            thread.setDaemon(true);
+            return thread;
+        }
+    });
+
     private final Context context;
     private final Context rowContext;
     private final AutomationHistoryStore store;
     private final String kind;
     private final boolean miuix;
-    private final LinearLayout rows;
+    private final ListView rows;
+    private final Rows adapter;
     private final AlertDialog dialog;
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final ExecutorService worker;
     private AlertDialog detail;
+    private Future<?> work;
+    private int generation;
 
     AutomationHistoryDialog(Context context, String kind) {
         this(context, kind, false);
     }
 
     AutomationHistoryDialog(Context context, String kind, boolean miuix) {
+        this(context, kind, miuix, IO);
+    }
+
+    AutomationHistoryDialog(Context context, String kind, boolean miuix, ExecutorService io) {
         this.context = context;
         this.kind = kind;
+        if (io == null) throw new IllegalArgumentException("History executor is required");
+        worker = io;
         Activity owner = ownerActivity(context);
         Context styledContext = context;
         boolean styled = false;
@@ -52,53 +80,74 @@ final class AutomationHistoryDialog {
         rowContext = styledContext;
         this.miuix = styled;
         store = new AutomationHistoryStore(context);
-        rows = new LinearLayout(context);
+        adapter = new Rows();
+        rows = new ListView(context);
         rows.setTag("automation.history");
-        rows.setOrientation(LinearLayout.VERTICAL);
-        rows.setPadding(this.miuix ? 0 : dp(16), dp(8), this.miuix ? 0 : dp(16), dp(8));
-        ScrollView scroll = new ScrollView(context);
-        scroll.addView(rows);
+        rows.setDividerHeight(dp(1));
+        rows.setAdapter(adapter);
         dialog = new MiuixDialogBuilder(context, this.miuix)
                 .setTitle(AutomationHistoryStore.REPLY.equals(kind) ? "回复历史记录" : "评论历史记录")
-                .setView(scroll).setNegativeButton("关闭", null).setNeutralButton("清空记录", null).create();
+                .setView(rows).setNegativeButton("关闭", null).setNeutralButton("清空记录", null).create();
         if (owner != null) dialog.setOwnerActivity(owner);
-        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(view -> {
-            store.clear(kind);
+        dialog.setOnShowListener(ignored -> {
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(view -> clear());
             refresh();
-        }));
-        dialog.setOnDismissListener(ignored -> closeDetails());
-        refresh();
+        });
+        dialog.setOnDismissListener(ignored -> {
+            invalidateWork();
+            closeDetails();
+        });
     }
 
     AlertDialog dialog() { return dialog; }
 
     private void refresh() {
-        rows.removeAllViews();
-        for (Entry entry : store.read(kind)) {
-            if (miuix) {
-                MiuixSettingsViews.Option option = new MiuixSettingsViews.Option(rowContext,
-                        entry.targetName + " · " + status(entry.status),
-                        DateFormat.getDateTimeInstance().format(new Date(entry.createdAt)),
-                        entry.output, true, () -> showDetail(entry));
-                View row = option.getView();
-                row.setTag("automation.history." + entry.id);
-                rows.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT));
-                continue;
-            }
-            TextView row = label(entry.targetName + " · " + status(entry.status) + "\n"
-                    + DateFormat.getDateTimeInstance().format(new Date(entry.createdAt)) + "\n" + entry.output);
-            row.setTag("automation.history." + entry.id);
-            row.setMaxLines(5);
-            row.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            row.setPadding(0, dp(12), 0, dp(12));
-            row.setOnClickListener(ignored -> showDetail(entry));
-            rows.addView(row);
-            android.view.View line = new android.view.View(context);
-            line.setBackgroundColor(Color.rgb(226, 231, 232));
-            rows.addView(line, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
-        }
-        if (rows.getChildCount() == 0) rows.addView(label("暂无记录"));
+        int ticket = nextGeneration();
+        adapter.setState("正在读取…");
+        work = worker.submit(() -> {
+            List<Entry> result = read();
+            main.post(() -> {
+                if (!isCurrent(ticket)) return;
+                work = null;
+                adapter.setEntries(result);
+            });
+        });
+    }
+
+    private void clear() {
+        int ticket = nextGeneration();
+        adapter.setState("正在清空…");
+        worker.execute(() -> {
+            try { store.clear(kind); }
+            catch (RuntimeException ignored) { }
+            List<Entry> result = read();
+            main.post(() -> {
+                if (!isCurrent(ticket)) return;
+                work = null;
+                adapter.setEntries(result);
+            });
+        });
+    }
+
+    private List<Entry> read() {
+        try { return store.read(kind); }
+        catch (RuntimeException failure) { return Collections.emptyList(); }
+    }
+
+    private int nextGeneration() {
+        if (work != null) work.cancel(true);
+        work = null;
+        return ++generation;
+    }
+
+    private boolean isCurrent(int ticket) {
+        return ticket == generation && dialog.isShowing();
+    }
+
+    private void invalidateWork() {
+        generation++;
+        if (work != null) work.cancel(true);
+        work = null;
     }
 
     private void showDetail(Entry entry) {
@@ -109,7 +158,7 @@ final class AutomationHistoryDialog {
                 + "\n\n原内容\n" + entry.input + "\n\n生成内容\n" + entry.output);
         text.setTextIsSelectable(true);
         text.setPadding(dp(16), dp(12), dp(16), dp(12));
-        ScrollView scroll = new ScrollView(context);
+        android.widget.ScrollView scroll = new android.widget.ScrollView(context);
         scroll.addView(text);
         AlertDialog next = new MiuixDialogBuilder(context, miuix).setTitle("历史详情").setView(scroll)
                 .setNegativeButton("关闭", null).create();
@@ -121,6 +170,7 @@ final class AutomationHistoryDialog {
 
     /** Also use as the parent's dismiss callback when its owner replaces the listener. */
     void closeDetails() {
+        invalidateWork();
         AlertDialog child = detail;
         detail = null;
         if (child != null) child.dismiss();
@@ -156,5 +206,53 @@ final class AutomationHistoryDialog {
             current = next;
         }
         return current instanceof Activity ? (Activity) current : null;
+    }
+
+    private final class Rows extends BaseAdapter {
+        private List<Entry> entries = Collections.emptyList();
+        private String state = "暂无记录";
+
+        void setState(String value) {
+            entries = Collections.emptyList();
+            state = value;
+            notifyDataSetChanged();
+        }
+
+        void setEntries(List<Entry> value) {
+            entries = value == null ? Collections.emptyList() : new ArrayList<>(value);
+            state = entries.isEmpty() ? "暂无记录" : null;
+            notifyDataSetChanged();
+        }
+
+        @Override public int getCount() { return entries.isEmpty() ? 1 : entries.size(); }
+        @Override public Entry getItem(int position) { return entries.isEmpty() ? null : entries.get(position); }
+        @Override public long getItemId(int position) { return getItem(position) == null ? -1 : position; }
+        @Override public View getView(int position, View recycled, ViewGroup parent) {
+            Entry entry = getItem(position);
+            if (entry == null) {
+                TextView empty = recycled instanceof TextView ? (TextView) recycled : label("");
+                empty.setTag("automation.history.empty");
+                empty.setText(state);
+                empty.setOnClickListener(null);
+                empty.setPadding(dp(16), dp(20), dp(16), dp(20));
+                return empty;
+            }
+            String title = entry.targetName + " · " + status(entry.status);
+            String date = DateFormat.getDateTimeInstance().format(new Date(entry.createdAt));
+            if (miuix) {
+                View row = new MiuixSettingsViews.Option(rowContext, title, date, entry.output, true,
+                        () -> showDetail(entry)).getView();
+                row.setTag("automation.history." + entry.id);
+                return row;
+            }
+            TextView row = recycled instanceof TextView ? (TextView) recycled : label("");
+            row.setTag("automation.history." + entry.id);
+            row.setText(title + "\n" + date + "\n" + entry.output);
+            row.setMaxLines(5);
+            row.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            row.setPadding(dp(16), dp(12), dp(16), dp(12));
+            row.setOnClickListener(ignored -> showDetail(entry));
+            return row;
+        }
     }
 }

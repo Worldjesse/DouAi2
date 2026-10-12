@@ -41,6 +41,7 @@ import java.util.function.Consumer;
 public final class FeedUiHideHook implements Application.ActivityLifecycleCallbacks, AutoCloseable {
     private static final int MAX_TREE_NODES = 4096;
     private static final int MAX_TREE_DEPTH = 64;
+    private static final int MAX_CUSTOM_RETRIES = 8;
     private static final String VIEW_FINDER_TAG = "douai.view_finder";
     private static final Map<Component, int[]> COMPONENT_IDS = componentIds();
     private static final int WIDGET_CONTAINER_ID = 2131362267;
@@ -71,6 +72,8 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     private final Map<View, Set<View>> customTargets = new WeakHashMap<>();
     private final Map<View, String> customSignatures = new WeakHashMap<>();
     private final Map<View, Integer> customResolvedCounts = new WeakHashMap<>();
+    private final Map<View, Integer> customRetryCounts = new WeakHashMap<>();
+    private final Set<Integer> resourceMismatches = new HashSet<>();
     private final Set<View> activeCards = Collections.newSetFromMap(new WeakHashMap<>());
     private final Set<View> knownCards = Collections.newSetFromMap(new WeakHashMap<>());
     private final Set<View> windowRoots = Collections.newSetFromMap(new WeakHashMap<>());
@@ -78,9 +81,11 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     private final AtomicInteger selectedCallbacks = new AtomicInteger();
     private final AtomicInteger cardScans = new AtomicInteger();
     private final AtomicInteger preDrawRechecks = new AtomicInteger();
+    private final AtomicInteger viewSearches = new AtomicInteger();
     private final AtomicInteger hiddenViews = new AtomicInteger();
     private final AtomicInteger hostStateResets = new AtomicInteger();
     private final Consumer<String> log;
+    private final boolean validateResourceNames;
     private volatile boolean enabled;
     private volatile int actionAlphaPercent;
     private volatile ComponentHideSettings components;
@@ -91,12 +96,15 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     private String selectedAid;
     private Application application;
     private volatile boolean closed;
+    private volatile boolean videoLifecycleInstalled;
+    private volatile boolean imageLifecycleInstalled;
 
-    private FeedUiHideHook(ExtendedSettings settings, Consumer<String> log) {
+    private FeedUiHideHook(ExtendedSettings settings, Consumer<String> log, boolean validateResourceNames) {
         this.enabled = settings != null && settings.hideInterface;
         this.actionAlphaPercent = settings == null ? 100 : settings.videoRightAlpha;
         this.components = settings == null ? null : settings.components;
         this.log = log;
+        this.validateResourceNames = validateResourceNames;
         this.handles = new ArrayList<>();
     }
 
@@ -109,7 +117,8 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     public static FeedUiHideHook install(XposedInterface framework, HostScanReport report,
                                          ClassLoader loader, Context context, ExtendedSettings settings,
                                          Consumer<String> log) throws Exception {
-        FeedUiHideHook hook = new FeedUiHideHook(settings, log == null ? ignored -> { } : log);
+        FeedUiHideHook hook = new FeedUiHideHook(settings, log == null ? ignored -> { } : log,
+                context != null);
         try {
             hook.installHolder(framework, report, loader, "feed_holder", "feed_holder_main_root",
                     "w", "Video");
@@ -261,7 +270,11 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     @SuppressLint("ResourceType") // IDs belong to the verified host APK, not module resources.
     private void openComments(View root) {
         View container = root.findViewById(2131371412);
-        if (container == null) container = root.findViewById(2131371297);
+        if (container != null && !resourceMatches(container, 2131371412)) container = null;
+        if (container == null) {
+            container = root.findViewById(2131371297);
+            if (container != null && !resourceMatches(container, 2131371297)) container = null;
+        }
         if (container == null || !container.isShown()) {
             safeLog("Component show: current comment control unavailable");
             return;
@@ -301,7 +314,11 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     }
 
     public int getPreDrawRechecks() { return preDrawRechecks.get(); }
+    public int getViewSearches() { return viewSearches.get(); }
+    public int getResourceMismatchCount() { return resourceMismatches.size(); }
     public int getHostStateResets() { return hostStateResets.get(); }
+    public boolean isVideoLifecycleInstalled() { return !closed && videoLifecycleInstalled; }
+    public boolean isImageLifecycleInstalled() { return !closed && imageLifecycleInstalled; }
 
     private void installHolder(XposedInterface framework, HostScanReport report, ClassLoader loader,
                                String rulePrefix, String rootRule, String rootFieldName,
@@ -314,6 +331,8 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                     rootFieldName, "DouAi.FeedUi." + holderName + "Resume", false);
             installTarget(framework, report, loader, rulePrefix + "_pause", rootRule,
                     rootFieldName, "DouAi.FeedUi." + holderName + "Pause", true);
+            if ("Video".equals(holderName)) videoLifecycleInstalled = true;
+            else if ("Image".equals(holderName)) imageLifecycleInstalled = true;
         } catch (Exception failure) {
             for (int index = handles.size() - 1; index >= firstHandle; index--) {
                 try {
@@ -406,6 +425,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     }
 
     private int hideMatchingViews(View root) {
+        viewSearches.incrementAndGet();
         ComponentHideSettings current = components;
         if (current != null && current.configured) return applyComponents(root, current);
         Map<View, Integer> targets = new LinkedHashMap<>();
@@ -419,11 +439,32 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         collectFallbackTargets(root, root, targets, rightRegions.isEmpty());
         Map<View, TargetStyle> styles = new WeakHashMap<>();
         for (Map.Entry<View, Integer> target : targets.entrySet()) {
-            styles.put(target.getKey(), new TargetStyle(target.getValue(), false));
+            styles.put(target.getKey(), new TargetStyle(target.getValue(), false, target.getKey()));
         }
         fixedTargets.put(root, styles);
         refreshCustomTargets(root.getRootView(), false);
         return reconcileTargets();
+    }
+
+    private int reapplyCachedTargets(View root) {
+        if (root == null) return 0;
+        int changed = 0;
+        Map<View, TargetStyle> fixed = fixedTargets.get(root);
+        if (fixed != null) {
+            for (Map.Entry<View, TargetStyle> target : fixed.entrySet()) {
+                if (target.getKey() == null || isFinderView(target.getKey())) continue;
+                TargetStyle style = target.getValue();
+                changed += style.component ? applyComponentTarget(target.getKey(), style.alpha)
+                        : applyTarget(target.getKey(), style.alpha);
+            }
+        }
+        Set<View> custom = customTargets.get(root.getRootView());
+        if (custom != null) {
+            for (View view : custom) {
+                if (view != null && !isFinderView(view)) changed += applyComponentTarget(view, -2);
+            }
+        }
+        return changed;
     }
 
     private int applyComponents(View root, ComponentHideSettings current) {
@@ -439,7 +480,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         }
         Map<View, TargetStyle> styles = new WeakHashMap<>();
         for (Map.Entry<View, Integer> target : targets.entrySet()) {
-            styles.put(target.getKey(), new TargetStyle(target.getValue(), true));
+            styles.put(target.getKey(), new TargetStyle(target.getValue(), true, target.getKey()));
         }
         fixedTargets.put(root, styles);
         refreshCustomTargets(root.getRootView(), false);
@@ -474,6 +515,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                 customTargets.remove(root);
                 customSignatures.remove(root);
                 customResolvedCounts.remove(root);
+                customRetryCounts.remove(root);
             }
         }
     }
@@ -487,6 +529,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             customTargets.remove(windowRoot);
             customSignatures.remove(windowRoot);
             customResolvedCounts.remove(windowRoot);
+            customRetryCounts.remove(windowRoot);
             return;
         }
         ComponentHideSettings current = components;
@@ -495,14 +538,19 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             signature.append(locator.identityKey()).append('\n');
         }
         String nextSignature = signature.toString();
+        String previousSignature = customSignatures.get(windowRoot);
         Set<View> previous = customTargets.get(windowRoot);
-        if (!force && nextSignature.equals(customSignatures.get(windowRoot))
+        if (!force && nextSignature.equals(previousSignature)
                 && previous != null
                 && customResolvedCounts.getOrDefault(windowRoot, 0) == current.customViews.size()) {
             boolean attached = true;
             for (View target : previous) attached &= target.isAttachedToWindow();
             if (attached) return;
         }
+        if (!force && nextSignature.equals(previousSignature)
+                && customResolvedCounts.getOrDefault(windowRoot, 0) < current.customViews.size()
+                && customRetryCounts.getOrDefault(windowRoot, 0) >= MAX_CUSTOM_RETRIES) return;
+        viewSearches.incrementAndGet();
         Set<View> targets = Collections.newSetFromMap(new WeakHashMap<>());
         int resolvedCount = 0;
         for (CustomViewLocator locator : current.customViews) {
@@ -527,15 +575,24 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             if (resolved) resolvedCount++;
         }
         customTargets.put(windowRoot, targets);
+        WindowMonitor monitor = windowMonitors.get(windowRoot);
+        if (monitor != null) monitor.captureTargets(targets);
         customSignatures.put(windowRoot, nextSignature);
         customResolvedCounts.put(windowRoot, resolvedCount);
+        if (force || !nextSignature.equals(previousSignature)) {
+            customRetryCounts.put(windowRoot, 1);
+        } else if (resolvedCount == current.customViews.size()) {
+            customRetryCounts.remove(windowRoot);
+        } else {
+            customRetryCounts.put(windowRoot, customRetryCounts.getOrDefault(windowRoot, 0) + 1);
+        }
     }
 
     private int reconcileTargets() {
         Map<View, TargetStyle> targets = new LinkedHashMap<>();
         for (Map<View, TargetStyle> values : fixedTargets.values()) targets.putAll(values);
         for (Set<View> values : customTargets.values()) {
-            for (View view : values) targets.put(view, new TargetStyle(-2, true));
+            for (View view : values) targets.put(view, new TargetStyle(-2, true, view));
         }
         for (View view : new ArrayList<>(originalStates.keySet())) {
             if (!targets.containsKey(view)) {
@@ -562,17 +619,17 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         return false;
     }
 
-    private static void collectComponents(View view, View root, Map<View, Component> matches) {
+    private void collectComponents(View view, View root, Map<View, Component> matches) {
         collectComponents(view, root, matches, new int[]{MAX_TREE_NODES}, 0);
     }
 
-    private static void collectComponents(View view, View root, Map<View, Component> matches,
-                                          int[] remaining, int depth) {
+    private void collectComponents(View view, View root, Map<View, Component> matches,
+                                   int[] remaining, int depth) {
         if (view == null || remaining[0]-- <= 0 || depth > MAX_TREE_DEPTH || isFinderView(view)) return;
         Component component = null;
         for (Map.Entry<Component, int[]> entry : COMPONENT_IDS.entrySet()) {
             for (int id : entry.getValue()) {
-                if (view.getId() == id) {
+                if (view.getId() == id && resourceMatches(view, id)) {
                     component = entry.getKey();
                     break;
                 }
@@ -664,23 +721,24 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         return Collections.unmodifiableMap(ids);
     }
 
-    private static void collectRegions(View view, View root, List<View> widgets, List<View> right) {
+    private void collectRegions(View view, View root, List<View> widgets, List<View> right) {
         collectRegions(view, root, widgets, right, new int[]{MAX_TREE_NODES}, 0);
     }
 
-    private static void collectRegions(View view, View root, List<View> widgets, List<View> right,
-                                       int[] remaining, int depth) {
+    private void collectRegions(View view, View root, List<View> widgets, List<View> right,
+                                int[] remaining, int depth) {
         if (view == null || remaining[0]-- <= 0 || depth > MAX_TREE_DEPTH || isFinderView(view)) return;
         if (view != root && view instanceof ViewGroup
-                && (view.getId() == WIDGET_CONTAINER_ID || hasClass(view, WIDGET_CLASS))) {
+                && (resourceMatches(view, WIDGET_CONTAINER_ID)
+                || hasClass(view, WIDGET_CLASS))) {
             widgets.add(view);
         }
-        if (view != root && view.getId() == RIGHT_MENU_ID) right.add(view);
+        if (view != root && resourceMatches(view, RIGHT_MENU_ID)) right.add(view);
         if (view != root && hasClass(view, RIGHT_SCALE_CLASS)) {
             View target = view;
             if (view.getParent() instanceof ViewGroup) {
                 View parent = (View) view.getParent();
-                if (parent != root && parent.getId() != WIDGET_CONTAINER_ID
+                if (parent != root && !resourceMatches(parent, WIDGET_CONTAINER_ID)
                         && !hasClass(parent, WIDGET_CLASS)) target = parent;
             }
             right.add(target);
@@ -727,7 +785,8 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         if (view == null || remaining[0]-- <= 0 || depth > MAX_TREE_DEPTH || isFinderView(view)) return;
         boolean match = false;
         if (view.getId() != View.NO_ID) {
-            match = isHiddenResourceId(view.getId());
+            match = isHiddenResourceId(view.getId())
+                    && resourceMatches(view, view.getId());
             try {
                 if (!match) {
                     String name = view.getResources().getResourceEntryName(view.getId())
@@ -753,9 +812,10 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         }
     }
 
-    private static boolean isAuthor(View view) {
+    private boolean isAuthor(View view) {
         int id = view.getId();
-        if (id == 2131398470 || id == 2131401779 || id == 2131410329) return true;
+        if ((id == 2131398470 || id == 2131401779 || id == 2131410329)
+                && resourceMatches(view, id)) return true;
         CharSequence description = view.getContentDescription();
         if (description != null) {
             String text = description.toString().toLowerCase(java.util.Locale.ROOT);
@@ -801,6 +861,13 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         return HIDDEN_RESOURCE_IDS.contains(resourceId);
     }
 
+    private boolean resourceMatches(View view, int resourceId) {
+        if (view.getId() != resourceId) return false;
+        if (!validateResourceNames || HostResourceCatalog.matches(resourceId, view.getResources())) return true;
+        resourceMismatches.add(resourceId);
+        return false;
+    }
+
     static boolean matchesDescription(CharSequence value) {
         if (value == null || value.length() == 0) return false;
         String normalized = value.toString().toLowerCase(java.util.Locale.ROOT).trim();
@@ -832,10 +899,11 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         }
     }
 
-    private final class HideMonitor implements ViewTreeObserver.OnPreDrawListener,
+    private final class HideMonitor implements ViewTreeObserver.OnPreDrawListener, ViewTreeObserver.OnGlobalLayoutListener,
             View.OnAttachStateChangeListener {
         private final java.lang.ref.WeakReference<View> rootReference;
         private ViewTreeObserver observer;
+        private boolean targetsDirty;
 
         HideMonitor(View root) {
             this.rootReference = new java.lang.ref.WeakReference<>(root);
@@ -850,10 +918,22 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             }
             if (hasAnyEffect() && !closed && activeCards.contains(root)) {
                 preDrawRechecks.incrementAndGet();
-                hiddenViews.addAndGet(hideMatchingViews(root));
+                Map<View, TargetStyle> targets = fixedTargets.get(root);
+                if (!targetsDirty && targets != null) {
+                    for (Map.Entry<View, TargetStyle> target : targets.entrySet()) {
+                        if (!target.getValue().identity.matches(target.getKey())) { targetsDirty = true; break; }
+                    }
+                }
+                if (targetsDirty) {
+                    targetsDirty = false;
+                    refreshCustomTargets(root.getRootView(), true);
+                    hiddenViews.addAndGet(hideMatchingViews(root));
+                } else hiddenViews.addAndGet(reapplyCachedTargets(root));
             }
             return true;
         }
+
+        @Override public void onGlobalLayout() { targetsDirty = true; }
 
         void remove() {
             View root = rootReference.get();
@@ -867,11 +947,16 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             detachObserver();
             observer = next;
             observer.addOnPreDrawListener(this);
+            observer.addOnGlobalLayoutListener(this);
         }
 
         void detachObserver() {
-            if (observer != null && observer.isAlive()) observer.removeOnPreDrawListener(this);
+            if (observer != null && observer.isAlive()) {
+                observer.removeOnPreDrawListener(this);
+                observer.removeOnGlobalLayoutListener(this);
+            }
             observer = null;
+            targetsDirty = false;
         }
 
         @Override
@@ -890,10 +975,12 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         }
     }
 
-    private final class WindowMonitor implements ViewTreeObserver.OnPreDrawListener,
+    private final class WindowMonitor implements ViewTreeObserver.OnPreDrawListener, ViewTreeObserver.OnGlobalLayoutListener,
             View.OnAttachStateChangeListener {
         private final WeakReference<View> rootReference;
         private ViewTreeObserver observer;
+        private final Map<View, TargetIdentity> identities = new WeakHashMap<>();
+        private boolean targetsDirty;
 
         WindowMonitor(View root) { rootReference = new WeakReference<>(root); }
 
@@ -905,10 +992,35 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                 return true;
             }
             if (hasCustomEffect()) {
-                refreshCustomTargets(root, false);
-                hiddenViews.addAndGet(reconcileTargets());
+                if (!targetsDirty) {
+                    for (Map.Entry<View, TargetIdentity> entry : identities.entrySet()) {
+                        if (!entry.getValue().matches(entry.getKey())) { targetsDirty = true; break; }
+                    }
+                }
+                boolean unresolved = customResolvedCounts.getOrDefault(root, 0) < components.customViews.size()
+                        && customRetryCounts.getOrDefault(root, 0) < MAX_CUSTOM_RETRIES;
+                if (targetsDirty || unresolved) {
+                    boolean force = targetsDirty;
+                    targetsDirty = false;
+                    refreshCustomTargets(root, force);
+                    hiddenViews.addAndGet(reconcileTargets());
+                }
+                Set<View> targets = customTargets.get(root);
+                if (targets == null || targets.isEmpty()) return true;
+                int changed = 0;
+                for (View target : targets) {
+                    if (target != null && !isFinderView(target)) changed += applyComponentTarget(target, -2);
+                }
+                hiddenViews.addAndGet(changed);
             }
             return true;
+        }
+
+        @Override public void onGlobalLayout() { targetsDirty = true; }
+
+        void captureTargets(Set<View> targets) {
+            identities.clear();
+            for (View target : targets) identities.put(target, new TargetIdentity(target));
         }
 
         void attachObserver(View root) {
@@ -917,11 +1029,17 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             detachObserver();
             observer = next;
             observer.addOnPreDrawListener(this);
+            observer.addOnGlobalLayoutListener(this);
         }
 
         void detachObserver() {
-            if (observer != null && observer.isAlive()) observer.removeOnPreDrawListener(this);
+            if (observer != null && observer.isAlive()) {
+                observer.removeOnPreDrawListener(this);
+                observer.removeOnGlobalLayoutListener(this);
+            }
             observer = null;
+            targetsDirty = false;
+            identities.clear();
         }
 
         void remove() {
@@ -940,6 +1058,9 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         @Override public void onViewDetachedFromWindow(View view) {
             detachObserver();
             customTargets.remove(view);
+            customSignatures.remove(view);
+            customResolvedCounts.remove(view);
+            customRetryCounts.remove(view);
             hiddenViews.addAndGet(reconcileTargets());
         }
     }
@@ -964,6 +1085,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         customTargets.remove(root);
         customSignatures.remove(root);
         customResolvedCounts.remove(root);
+        customRetryCounts.remove(root);
         for (View feedRoot : new ArrayList<>(knownCards)) {
             if (feedRoot.getRootView() != root) continue;
             knownCards.remove(feedRoot);
@@ -1015,11 +1137,35 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     private static final class TargetStyle {
         final int alpha;
         final boolean component;
+        final TargetIdentity identity;
 
-        TargetStyle(int alpha, boolean component) {
+        TargetStyle(int alpha, boolean component, View view) {
             this.alpha = alpha;
             this.component = component;
+            identity = new TargetIdentity(view);
         }
+    }
+
+    private static final class TargetIdentity {
+        final int id;
+        final String description;
+        final String text;
+        final WeakReference<Object> parent;
+
+        TargetIdentity(View view) {
+            id = view.getId();
+            description = value(view.getContentDescription());
+            text = view instanceof TextView ? value(((TextView) view).getText()) : "";
+            parent = new WeakReference<>(view.getParent());
+        }
+
+        boolean matches(View view) {
+            return view != null && view.isAttachedToWindow() && id == view.getId()
+                    && parent.get() == view.getParent() && description.equals(value(view.getContentDescription()))
+                    && text.equals(view instanceof TextView ? value(((TextView) view).getText()) : "");
+        }
+
+        private static String value(CharSequence value) { return value == null ? "" : value.toString(); }
     }
 
     @Override
@@ -1036,6 +1182,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             customTargets.clear();
             customSignatures.clear();
             customResolvedCounts.clear();
+            customRetryCounts.clear();
             restoreAll();
             activeCards.clear();
             knownCards.clear();

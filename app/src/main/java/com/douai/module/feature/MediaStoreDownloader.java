@@ -17,13 +17,16 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /** User-initiated media saving through MediaStore, with DownloadManager fallback before API 29. */
 public final class MediaStoreDownloader {
-    private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(2);
+    private static final ThreadPoolExecutor EXECUTOR = new ThreadPoolExecutor(2, 2, 0L,
+            TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(16));
+    private static final BoundedMediaQueue QUEUE = new BoundedMediaQueue(EXECUTOR);
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final long MAX_DOWNLOAD_BYTES = 512L * 1024L * 1024L;
 
@@ -73,7 +76,12 @@ public final class MediaStoreDownloader {
         Context context = sourceContext.getApplicationContext();
         if (context == null) context = sourceContext;
         Context targetContext = context;
-        EXECUTOR.execute(() -> save(targetContext, url, fileName, mimeType, directory, collection, log));
+        String key = url + '\n' + fileName + '\n' + collection;
+        if (!QUEUE.submit(key, () -> save(targetContext, url, fileName, mimeType, directory, collection, log))) {
+            safeLog(log, "Media save request was deduplicated or the queue is full");
+            toast(sourceContext, "媒体正在保存或下载队列已满");
+            return false;
+        }
         toast(sourceContext, "正在保存媒体");
         return true;
     }

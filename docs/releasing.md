@@ -8,6 +8,8 @@ LSPosed 模块仓库：https://github.com/Xposed-Modules-Repo/io.github.yudigaga
 
 正式包名：`io.github.yudigaga.douai`。Java namespace 保持 `com.douai.module`，Xposed 入口使用完整 Java 类名。
 
+当前版本 `0.1.47 / 48`，本次递增版本号；[更新与验证记录](release-0.1.47.md) 包含最终 APK 大小、校验值和签名指纹。
+
 ## 环境
 
 需要 JDK 21、Android SDK Platform 37。Gradle Wrapper 为 9.3.1。
@@ -36,7 +38,18 @@ Windows 路径在 properties 中使用正斜杠。私钥和密码仅在本机保
 .\gradlew.bat :app:assembleRelease --console=plain
 ```
 
-签名 APK 位于 `app/build/outputs/apk/release/app-release.apk`。Release 关闭调试，保留反射与 Xposed 入口所需类名，不开启代码混淆。
+签名 APK 位于 `app/build/outputs/apk/release/app-release.apk`。Release 关闭调试，启用 R8 代码压缩与依赖优化，资源裁剪关闭。`app/proguard-release.pro` 保留模块类和成员、Xposed 入口，以及媒体选择器反射宿主 AndroidX ActivityResult 所需的类名和成员；其余依赖允许优化和改名。
+
+用户于 2026-10-12 反馈 R8 试验包已测试且没有问题，随后将同一保留配置用于正式 Release。具体设备和覆盖场景未提供，真实发送与性能测量结果仍单独记录。`r8Experiment` 保留为兼容构建名，继承正式 Release 的压缩配置；正式 mapping 位于 `app/build/outputs/mapping/release/`。
+
+构建后执行正式 APK 契约检查：
+
+```powershell
+$env:DOUAI_VERIFY_RELEASE_APK = (Resolve-Path 'app/build/outputs/apk/release/app-release.apk').Path
+.\gradlew.bat :app:testDebugUnitTest --tests com.douai.module.scan.ApkArtifactContractTest --console=plain
+```
+
+CI 在构建未签名 Release 后提供该路径并运行测试。未配置路径时本地测试可跳过；配置了不存在或不可读的路径应失败。检查覆盖模块元数据、源码规则资产、入口签名、宿主反射名称及 compileOnly API 不被打包。
 
 此前 Debug 版本使用 `com.douai.module` 和另一把签名密钥。切换到正式版时卸载旧模块，再安装并在 LSPosed 启用新的模块，避免两份模块同时作用于抖音。抖音私有目录中保存的宿主功能配置不属于模块应用数据。
 
@@ -44,9 +57,22 @@ Windows 路径在 properties 中使用正斜杠。私钥和密码仅在本机保
 
 收录申请：https://github.com/Xposed-Modules-Repo/submission/issues/2133
 
-官方模块仓库按官方要求仅上传模块介绍和 APK，源码托管在个人 GitHub 仓库。正式 APK 两处使用同一产物，官方 Release 标签必须为 `versionCode-versionName`，本版为 `47-0.1.46`。
+官方模块仓库按官方要求仅上传模块介绍和 APK，源码托管在个人 GitHub 仓库。正式 APK 两处使用同一产物，官方 Release 标签必须为 `versionCode-versionName`，本版为 `48-0.1.47`。
 
-## 0.1.46 验证结果
+## R8 正式配置验证记录
+
+2026-10-13：沿用用户测试通过的 R8 试验配置，正式 Release 启用代码压缩，资源裁剪关闭。版本仍为 0.1.46 / 47，本次为本地构建，未重新发布。
+
+- 659 项测试通过，0 失败、0 错误、0 跳过，包含本地抖音 40.6.0 全 DEX 扫描及正式 Release APK 契约检查。
+- Release Lint：0 错误、44 警告；Release 构建通过。
+- APK 为 `app/build/outputs/apk/release/app-release.apk`，3,811,746 字节，比同轮未压缩基线 25,455,763 字节小 85.03%。
+- APK SHA-256：`1224002D8C094C967701EAAB0D02864F73F4ECF306425937A18B6C05380CD8D8`。
+- APK v3 签名验证通过，证书 SHA-256 为 `FAE67C134F4C4FA73B8E34487C47A8C7F3E7C34B840BC245AFAC51585B7DFD47`，与既有发布证书一致。
+- 用户反馈试验包测试无问题；代理完成构建和静态契约验证。具体设备测试场景、真实发送与性能测量未补充记录。
+
+产物测试允许 R8 合法扩大 Activity 生命周期方法访问权限、改名 AndroidX 依赖，仍验证 Activity 继承链以及 Xposed 回调的公开权限、非静态属性与完整签名。
+
+## 0.1.46 原发布验证结果
 
 - 591 项测试通过，0 失败、0 错误、0 跳过，包括抖音 40.6.0 全 DEX 规则扫描、正式包名的权限/诊断、重启组件、启动器和宿主资源检查。
 - Release Lint：0 错误、41 警告。

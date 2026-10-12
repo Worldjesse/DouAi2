@@ -167,6 +167,65 @@ public final class AutomationCommentMediaTest {
         } finally { Thread.interrupted(); }
     }
 
+    @Test public void cancellingBlockedImageHeadersOrBodyDisconnectsAndReleasesWorker() throws Exception {
+        for (boolean headers : new boolean[]{true, false}) {
+            BlockingMediaConnection connection = new BlockingMediaConnection(headers);
+            MediaReadCancellation cancellation = new MediaReadCancellation(60_000, System::nanoTime, uri -> connection);
+            java.util.concurrent.ExecutorService worker = java.util.concurrent.Executors.newSingleThreadExecutor();
+            try {
+                java.util.concurrent.Future<?> future = worker.submit(() -> {
+                    try {
+                        AutomationCommentMedia.load(RuntimeEnvironment.getApplication(),
+                                work("{\"images\":[{\"url_list\":[\"https://p.byteimg.com/image.jpg\"]}]}"),
+                                options(true, false), cancellation);
+                        throw new AssertionError("Cancelled media returned a result");
+                    } catch (java.util.concurrent.CancellationException expected) {
+                        return;
+                    } catch (Exception failure) { throw new AssertionError(failure); }
+                });
+                assertTrue(connection.blocked.await(2, java.util.concurrent.TimeUnit.SECONDS));
+                cancellation.cancel();
+                future.get(2, java.util.concurrent.TimeUnit.SECONDS);
+                assertTrue(connection.disconnected);
+                worker.submit(() -> assertFalse(Thread.currentThread().isInterrupted()))
+                        .get(2, java.util.concurrent.TimeUnit.SECONDS);
+            } finally { cancellation.cancel(); worker.shutdownNow(); }
+        }
+    }
+
+    @Test public void cancellingVideoTransferDeletesItsPartialCacheFile() throws Exception {
+        android.content.Context context = RuntimeEnvironment.getApplication();
+        BlockingMediaConnection connection = new BlockingMediaConnection(false);
+        MediaReadCancellation cancellation = new MediaReadCancellation(60_000, System::nanoTime, uri -> connection);
+        java.util.Set<String> before = temporaryVideos(context);
+        java.util.concurrent.ExecutorService worker = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            java.util.concurrent.Future<?> future = worker.submit(() -> {
+                try {
+                    AutomationCommentMedia.load(context,
+                            work("{\"video\":{\"play_addr\":{\"url_list\":[\"https://v.douyinvod.com/video.mp4\"]}}}"),
+                            options(false, true), cancellation);
+                    throw new AssertionError("Cancelled video returned a result");
+                } catch (java.util.concurrent.CancellationException expected) {
+                    return;
+                } catch (Exception failure) { throw new AssertionError(failure); }
+            });
+            assertTrue(connection.blocked.await(2, java.util.concurrent.TimeUnit.SECONDS));
+            assertEquals(before.size() + 1, temporaryVideos(context).size());
+            cancellation.cancel();
+            future.get(2, java.util.concurrent.TimeUnit.SECONDS);
+            assertTrue(connection.disconnected);
+            assertEquals(before, temporaryVideos(context));
+        } finally { cancellation.cancel(); worker.shutdownNow(); }
+    }
+
+    private static java.util.Set<String> temporaryVideos(android.content.Context context) {
+        java.io.File[] files = context.getCacheDir().listFiles((directory, name) -> name.startsWith("douai-comment-video-"));
+        java.util.Set<String> names = new java.util.HashSet<>();
+        if (files != null) for (java.io.File file : files) names.add(file.getName());
+        return names;
+    }
+
     private static LocalOptions options(boolean images, boolean video) {
         return new LocalOptions(Map.of(AutomationCommentMedia.RECOGNIZE_IMAGES, images,
                 AutomationCommentMedia.RECOGNIZE_VIDEO, video));

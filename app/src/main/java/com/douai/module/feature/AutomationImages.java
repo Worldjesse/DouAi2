@@ -28,22 +28,29 @@ public final class AutomationImages {
     }
 
     public static List<ChatImage> load(List<String> urls) throws Exception {
+        return load(urls, new MediaReadCancellation());
+    }
+
+    static List<ChatImage> load(List<String> urls, MediaReadCancellation cancellation) throws Exception {
+        cancellation.check();
         if (urls.size() > ChatCompletionClient.MAX_IMAGES_PER_MESSAGE) throw new IllegalArgumentException("图片最多 4 张");
         List<ChatImage> images = new ArrayList<>();
-        for (String source : urls) images.add(fetch(source));
+        for (String source : urls) images.add(fetch(source, cancellation));
         return images;
     }
 
     static ChatImage fetch(String source) throws Exception {
+        return fetch(source, new MediaReadCancellation());
+    }
+
+    private static ChatImage fetch(String source, MediaReadCancellation cancellation) throws Exception {
         String current = source;
         for (int redirect = 0; redirect < 4; redirect++) {
-            if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
+            cancellation.check();
             if (!isMediaUrl(current)) throw new IllegalArgumentException("图片地址不属于受支持的抖音媒体域名");
-            HttpURLConnection connection = (HttpURLConnection) URI.create(current).toURL().openConnection();
-            connection.setConnectTimeout(10_000);
-            connection.setReadTimeout(10_000);
-            connection.setInstanceFollowRedirects(false);
+            HttpURLConnection connection = cancellation.open(URI.create(current));
             try {
+                cancellation.check();
                 int status = connection.getResponseCode();
                 if (status >= 300 && status < 400) {
                     String location = connection.getHeaderField("Location");
@@ -54,9 +61,16 @@ public final class AutomationImages {
                 if (status != 200) throw new IllegalStateException("图片下载失败");
                 if (connection.getContentLengthLong() > 16L * 1024 * 1024) throw new IllegalArgumentException("图片超过 16 MB");
                 try (InputStream input = connection.getInputStream()) {
-                    return ChatImageLoader.decode(ChatImageLoader.read(input));
+                    ChatImage image = ChatImageLoader.decode(ChatImageLoader.read(input, cancellation), cancellation);
+                    cancellation.check();
+                    return image;
                 }
-            } finally { connection.disconnect(); }
+            } catch (Exception failure) {
+                cancellation.check();
+                throw failure;
+            } finally {
+                cancellation.close(connection);
+            }
         }
         throw new IllegalStateException("图片地址跳转次数过多");
     }

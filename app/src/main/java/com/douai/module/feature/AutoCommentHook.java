@@ -20,11 +20,12 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /** Queues original works and publishes through the host's permission checks. */
 public final class AutoCommentHook implements Application.ActivityLifecycleCallbacks, AutoCloseable {
@@ -33,14 +34,15 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
     private final ClassLoader loader;
     private final AutomationDispatcher dispatcher;
     private final Consumer<String> log;
+    private final Supplier<MediaReadCancellation> mediaReads;
     private final Handler main = new Handler(Looper.getMainLooper());
+    private static final long GENERATION_TIMEOUT_MILLIS = 120_000;
     private final ScheduledThreadPoolExecutor worker = new ScheduledThreadPoolExecutor(1);
     private final ChatCompletionClient ai = new ChatCompletionClient(null,
             message -> safeLog("Automatic comment AI " + message));
     private final List<XposedInterface.HookHandle> handles = new ArrayList<>();
     private final Map<String, String> inFlight = new java.util.HashMap<>();
-    private final LinkedHashMap<String, Task> queuedTasks = new LinkedHashMap<>();
-    private volatile Task runningTask;
+    private volatile GenerationAttempt activeGeneration;
     private final AtomicLong generation = new AtomicLong();
     private final AutoCommentQueue<Task> queue;
     private final NativeCommentPublisher publisher;
@@ -56,7 +58,8 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
 
     private AutoCommentHook(Context context, ClassLoader loader, LocalOptions options,
                             AutomationDispatcher dispatcher, Field holderRoot, Method holderAweme,
-                            Field imageRoot, Method imageAweme, NativeCommentPublisher publisher, Consumer<String> log) {
+                            Field imageRoot, Method imageAweme, NativeCommentPublisher publisher, Consumer<String> log,
+                            Supplier<MediaReadCancellation> mediaReads) {
         this.context = context.getApplicationContext();
         application = (Application) this.context;
         this.loader = loader;
@@ -68,6 +71,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         this.imageAweme = imageAweme;
         this.publisher = publisher;
         this.log = log;
+        this.mediaReads = mediaReads;
         queue = new AutoCommentQueue<>(new AutoCommentQueue.Scheduler() {
             @Override public void post(Runnable action) {
                 if (Looper.myLooper() == Looper.getMainLooper()) action.run(); else main.post(action);
@@ -85,6 +89,12 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
     public static AutoCommentHook install(XposedInterface framework, HostScanReport report,
                                           ClassLoader loader, Context context, LocalOptions options,
                                           AutomationDispatcher dispatcher, Consumer<String> log) throws Exception {
+        return install(framework, report, loader, context, options, dispatcher, log, MediaReadCancellation::new);
+    }
+
+    static AutoCommentHook install(XposedInterface framework, HostScanReport report, ClassLoader loader,
+                                    Context context, LocalOptions options, AutomationDispatcher dispatcher,
+                                    Consumer<String> log, Supplier<MediaReadCancellation> mediaReads) throws Exception {
         Consumer<String> logger = log == null ? ignored -> { } : log;
         Method selected = HostTargets.method(report, "feed_holder_selected", loader);
         Method imageSelected = HostTargets.method(report, "image_holder_page_selected", loader);
@@ -96,7 +106,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                 || aweme.getReturnType() != photoAweme.getReturnType()) throw new IllegalStateException("Comment holder contract changed");
         NativeCommentPublisher publisher = NativeCommentPublisher.install(framework, report, loader, logger);
         AutoCommentHook hook = new AutoCommentHook(context, loader, options, dispatcher, root, aweme,
-                photoRoot, photoAweme, publisher, logger);
+                photoRoot, photoAweme, publisher, logger, mediaReads);
         try {
             for (Method target : new Method[]{selected, imageSelected}) {
                 XposedInterface.HookHandle handle = framework.hook(target).setId("DouAi.AutoComment." + target.getName())
@@ -146,6 +156,8 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                     || !before.text(key, "").equals(next.text(key, ""))
                     || "comment_delay_seconds".equals(key) && before.integer(key, 3) != next.integer(key, 3)) {
                 generation.incrementAndGet();
+                GenerationAttempt active = activeGeneration;
+                if (active != null) markCancelled(active.task);
                 ai.cancelCurrentRequest();
                 worker.getQueue().clear();
                 queue.reset();
@@ -191,9 +203,6 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                 safeLog("Automatic comment skipped by author scope");
                 return;
             }
-            synchronized (queuedTasks) {
-                if (!queuedTasks.containsKey(identity)) queuedTasks.put(identity, task);
-            }
             queue.offer(identity, task, Math.max(2, Math.min(3600, options.integer("comment_delay_seconds", 3))) * 1000L);
         } catch (ReflectiveOperationException | RuntimeException failure) {
             safeLog("Automatic comment selection unavailable: " + failure.getClass().getSimpleName());
@@ -216,14 +225,24 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         safeLog("Automatic comment attempt=" + attempt + "/3 stage=" + (task.approved ? "publish" : "generate"));
         if (task.approved) { prepare(task, result); return; }
         dispatcher.commentStage(task.id, "generating");
-        worker.execute(() -> {
-            runningTask = task;
+        GenerationAttempt operation = new GenerationAttempt(task, attempt, result);
+        task.generationAttempt = operation;
+        activeGeneration = operation;
+        main.postDelayed(operation.timeout, GENERATION_TIMEOUT_MILLIS);
+        worker.execute(operation.future);
+    }
+
+    private void generate(Task task, int attempt, Consumer<String> result, GenerationAttempt operation) {
             try {
-                if (task.text == null) {
+                operation.check();
+                if (!valid(task)) { result.accept("cancelled"); return; }
+                String text = task.text;
+                if (text == null) {
                     if ("ai".equals(task.options.text("comment_mode", "ai"))) {
                         AiModelSettings models = AiModelSettings.read(task.options);
                         task.model = models.selected().modelName;
-                        List<ChatImage> images = AutomationCommentMedia.load(context, task.work, task.options);
+                        List<ChatImage> images = AutomationCommentMedia.load(context, task.work, task.options,
+                                operation.mediaCancellation);
                         if (!valid(task)) { result.accept("cancelled"); return; }
                         if (!hasWorkContent(task.work) && images.isEmpty()) {
                             safeLog("Automatic comment skipped: captured work has no usable content");
@@ -233,24 +252,32 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                         safeLog("Automatic comment model request started; images=" + images.size());
                         // Comments are independent tasks, even if the model has conversation rounds configured.
                         ai.clearHistory();
+                        operation.check();
                         String output = ai.reply(task.identity, task.input, images, models,
                                 CommentOutputPolicy.task(task.options.text("comment_prompt",
                                         "根据当前作品自然地写一条评论。")), false);
+                        operation.check();
                         String comment = CommentOutputPolicy.parse(output);
                         if (comment.isEmpty()) {
                             safeLog("Automatic comment skipped: model returned an empty comment");
                             result.accept("cancelled");
                             return;
                         }
-                        task.text = comment;
-                    } else task.text = task.options.text("auto_comment_text", "").trim();
+                        text = comment;
+                    } else text = task.options.text("auto_comment_text", "").trim();
                 }
                 if (!valid(task)) { result.accept("cancelled"); return; }
-                if (task.text.isEmpty() || task.text.length() > 1000) {
-                    task.text = null; throw new IllegalArgumentException("Comment text is empty or too long");
+                if (text.isEmpty() || text.length() > 1000) {
+                    throw new IllegalArgumentException("Comment text is empty or too long");
                 }
-                safeLog("Automatic comment generation completed; preview prepared for original work");
-                prepare(task, result);
+                synchronized (operation) {
+                    operation.check();
+                    task.text = text;
+                    operation.generated = true;
+                    main.removeCallbacks(operation.timeout);
+                    safeLog("Automatic comment generation completed; preview prepared for original work");
+                    prepare(task, result);
+                }
             } catch (Exception failure) {
                 String http = "";
                 java.util.regex.Matcher status = java.util.regex.Pattern.compile("HTTP ([0-9]{3})").matcher(String.valueOf(failure.getMessage()));
@@ -258,9 +285,9 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                 safeLog("Automatic comment generation failed: " + failure.getClass().getSimpleName() + http + "; attempt=" + attempt + "/3");
                 result.accept(valid(task) ? "failed" : "cancelled");
             } finally {
-                if (runningTask == task) runningTask = null;
+                main.removeCallbacks(operation.timeout);
+                operation.release();
             }
-        });
     }
 
     private void prepare(Task task, Consumer<String> result) {
@@ -277,17 +304,19 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
 
     private void cancelTask(Task task) {
         if (task == null || task.terminal) return;
-        task.cancelled = true;
-        if (runningTask == task) ai.cancelCurrentRequest();
+        markCancelled(task);
         queue.cancel(task);
     }
 
     private void cancelLatestTask() {
-        Task latest = null;
-        synchronized (queuedTasks) {
-            for (Task task : queuedTasks.values()) latest = task;
-        }
-        cancelTask(latest);
+        queue.cancelLatest(this::markCancelled);
+    }
+
+    private void markCancelled(Task task) {
+        if (task == null || task.terminal) return;
+        task.cancelled = true;
+        GenerationAttempt operation = task.generationAttempt;
+        if (operation != null) operation.cancel();
     }
 
     private void publish(Task task, Consumer<String> result) {
@@ -306,7 +335,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
     }
 
     private void finished(Task task, String status, int attempts) {
-        synchronized (queuedTasks) { queuedTasks.remove(task.identity); }
+        if ("cancelled".equals(status)) markCancelled(task);
         task.terminal = true;
         if ("cancelled".equals(status) && task.id.equals(inFlight.get(task.identity))) status = "submitted";
         if ("cancelled".equals(status)) task.cancelled = true;
@@ -428,6 +457,8 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         closed = true;
         try { followListUpdates.close(); } catch (Exception ignored) { }
         generation.incrementAndGet();
+        GenerationAttempt active = activeGeneration;
+        if (active != null) markCancelled(active.task);
         ai.cancelCurrentRequest();
         queue.close();
         dispatcher.cancelKind(AutomationHistoryStore.COMMENT);
@@ -456,10 +487,59 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         volatile boolean approved;
         volatile boolean terminal;
         volatile boolean cancelled;
+        volatile GenerationAttempt generationAttempt;
         Task(long epoch, long account, String aid, String identity, Object work, String input, String name, LocalOptions options) {
             this.epoch = epoch; this.account = account; this.aid = aid; this.identity = identity;
             this.id = identity + ':' + java.util.UUID.randomUUID(); this.work = work; this.input = input;
             this.name = name; this.options = options;
+        }
+    }
+
+    private final class GenerationAttempt {
+        final Task task;
+        final MediaReadCancellation mediaCancellation = mediaReads.get();
+        final FutureTask<Void> future;
+        final Runnable timeout;
+        volatile boolean cancelled;
+        boolean generated;
+        final java.util.concurrent.atomic.AtomicBoolean delivered = new java.util.concurrent.atomic.AtomicBoolean();
+
+        GenerationAttempt(Task task, int attempt, Consumer<String> result) {
+            this.task = task;
+            Consumer<String> complete = status -> {
+                if (delivered.compareAndSet(false, true)) result.accept(status);
+            };
+            future = new FutureTask<>(() -> { generate(task, attempt, complete, this); return null; });
+            timeout = () -> {
+                synchronized (this) {
+                    if (future.isDone() || generated || cancelled) return;
+                    safeLog("Automatic comment generation deadline reached; attempt=" + attempt + "/3");
+                    cancel();
+                    complete.accept(valid(task) ? "failed" : "cancelled");
+                }
+            };
+        }
+
+        void check() {
+            if (cancelled || Thread.currentThread().isInterrupted()) {
+                throw new java.util.concurrent.CancellationException("评论生成已取消");
+            }
+        }
+
+        synchronized void cancel() {
+            cancelled = true;
+            mediaCancellation.cancel();
+            if (activeGeneration == this) ai.cancelCurrentRequest();
+            future.cancel(true);
+            main.removeCallbacks(timeout);
+            release();
+        }
+
+        void release() {
+            main.post(() -> {
+                if (task.generationAttempt == this) task.generationAttempt = null;
+                if (activeGeneration == this) activeGeneration = null;
+            });
         }
     }
 }

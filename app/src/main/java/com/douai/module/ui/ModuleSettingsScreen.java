@@ -20,10 +20,7 @@ import android.widget.ImageButton;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ListView;
-import android.widget.ArrayAdapter;
-import android.widget.CheckBox;
 import android.widget.ScrollView;
-import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
 
@@ -34,7 +31,6 @@ import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.config.LocalOptions;
-import com.douai.module.feature.ChatCompletionClient;
 import com.douai.module.feature.AutomationScopePolicy;
 import com.douai.module.feature.FeedGestureToolsHook;
 import com.douai.module.feature.FollowListSnapshot;
@@ -79,7 +75,6 @@ public final class ModuleSettingsScreen {
     private Dialog categoryDialog;
     private final List<Dialog> optionDialogs = new ArrayList<>();
     private final java.util.Map<Dialog, Runnable> optionDismissActions = new java.util.HashMap<>();
-    private final java.util.concurrent.ExecutorService requests = java.util.concurrent.Executors.newSingleThreadExecutor();
     private final List<EnabledControl> feedFilterControls = new ArrayList<>();
     private final List<CategoryRow> categoryRows = new ArrayList<>();
     private MiuixSettingsViews.Home miuixHome;
@@ -109,7 +104,6 @@ public final class ModuleSettingsScreen {
             @Override public void onViewAttachedToWindow(View view) { }
             @Override public void onViewDetachedFromWindow(View view) {
                 dismissChildPages();
-                requests.shutdownNow();
             }
         });
 
@@ -150,7 +144,6 @@ public final class ModuleSettingsScreen {
             @Override public void onViewAttachedToWindow(View view) { }
             @Override public void onViewDetachedFromWindow(View view) {
                 dismissChildPages();
-                requests.shutdownNow();
                 miuixHome.close();
             }
         });
@@ -379,8 +372,9 @@ public final class ModuleSettingsScreen {
                         repository.getBoolean("auto_play", false), true,
                         value -> repository.putBoolean("auto_play", value));
                 addLocalSwitch("自动倍速播放", "切换视频时应用设定倍速。", "auto_speed");
-                addEditableOption("倍速数值", "0.25 至 4", repository.getString("playback_speed", "2"),
-                        false, true, false, value -> repository.putString("playback_speed", value));
+                addEditableOption("倍速数值", "0.25 至 4", effectivePlaybackSpeed(
+                                repository.getString("playback_speed", "2")), true, true, false,
+                        value -> repository.putString("playback_speed", validatePlaybackSpeed(value)));
                 addLocalSwitch("打开评论时,不滑动视频", "评论展开时暂停自动下一条。", "pause_auto_on_comments");
                 addSwitch("滑动智能判断上下", "开启时跟随最近一次手动滑动方向。",
                         repository.getBoolean("smart_swipe", true), true,
@@ -420,6 +414,8 @@ public final class ModuleSettingsScreen {
                 addEditableOption("续火花内容", "", repository.getString("streak_content", ""),
                         false, true, false, value -> repository.putString("streak_content", value));
                 addLocalSwitch("续火花成功弹出Tip", "发送结果提醒。", "streak_tip");
+                addOption("重试结果未知的续火花", "重新发送可能造成重复消息。", null, true,
+                        this::confirmUnknownStreakRetry);
                 addOption("清空续火花记录", "", null, true, () -> {
                     repository.putString("streak_reset_token", Long.toString(System.currentTimeMillis()));
                     android.widget.Toast.makeText(context, "续火花记录已清空", android.widget.Toast.LENGTH_SHORT).show();
@@ -1166,219 +1162,16 @@ public final class ModuleSettingsScreen {
     }
 
     private void showAiModelEditor(AiModelConfig original) {
-        LinearLayout form = form();
-        EditText name = formInput(form, "配置名称", original.name, false);
-        Spinner provider = miuixHome == null ? new Spinner(context) : MiuixFormControls.spinner(context);
-        List<String> providers = new ArrayList<>();
-        for (AiProviderPresets.Preset preset : AiProviderPresets.ALL) providers.add(preset.name);
-        provider.setAdapter(new ArrayAdapter<>(context, android.R.layout.simple_spinner_dropdown_item, providers));
-        provider.setTag("ai.provider");
-        int providerIndex = 0;
-        for (int i = 0; i < AiProviderPresets.ALL.size(); i++) {
-            if (AiProviderPresets.ALL.get(i).id.equals(original.provider)) providerIndex = i;
-        }
-        provider.setSelection(providerIndex);
-        addField(form, "供应商", provider);
-
-        Spinner protocol = miuixHome == null ? new Spinner(context) : MiuixFormControls.spinner(context);
-        protocol.setAdapter(new ArrayAdapter<>(context, android.R.layout.simple_spinner_dropdown_item,
-                AiModelConfig.PROTOCOL_LABELS));
-        protocol.setTag("ai.protocol");
-        protocol.setSelection(protocolIndex(original.protocol));
-        addField(form, "接口协议", protocol);
-
-        EditText endpoint = formInput(form, "API 基础地址", original.apiEndpoint, false);
-        EditText key = formInput(form, "API 密钥", original.apiKey, true);
-        EditText modelName = formInput(form, "模型名称", original.modelName, false);
-        EditText modelsEndpoint = formInput(form, "模型列表地址（可选）", original.modelsEndpoint, false);
-        Button fetchModels = formButton();
-        fetchModels.setText("获取模型列表");
-        fetchModels.setTag("ai.fetch_models");
-        form.addView(MiuixFormControls.viewFor(fetchModels), matchWrap());
-
-        CheckBox allowHttp = checkField(form, "允许不安全 HTTP", original.allowInsecureHttp);
-        String[] systemPrompt = {original.systemPrompt};
-        TextView memory = text(promptPreview(original.systemPrompt), 14, MUTED, false);
-        memory.setTag("ai.prompt.primary");
-        memory.setContentDescription("一级提示词");
-        memory.setMaxLines(3);
-        memory.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        memory.setPadding(0, dp(8), 0, dp(8));
-        memory.setMinimumHeight(dp(48));
-        memory.setClickable(true);
-        memory.setFocusable(true);
-        MiuixSettingsViews.Option[] promptRow = new MiuixSettingsViews.Option[1];
-        Runnable editMemory = () -> showOptionDialog(new PromptEditorDialog(context, "一级提示词", systemPrompt[0], value -> {
-            systemPrompt[0] = value;
-            memory.setText(promptPreview(value));
-            if (promptRow[0] != null) promptRow[0].setValue(promptPreview(value));
-        }, miuixHome != null));
-        if (miuixHome != null) {
-            promptRow[0] = new MiuixSettingsViews.Option(rowContext(), "一级提示词", null,
-                    promptPreview(original.systemPrompt), true, editMemory);
-            promptRow[0].getView().setTag("ai.prompt.primary");
-            form.addView(promptRow[0].getView(), matchWrap());
-        } else {
-            memory.setOnClickListener(ignored -> editMemory.run());
-            addField(form, "一级提示词", memory);
-        }
-        EditText contextRounds = formInput(form, "上下文轮数（0–50）", Integer.toString(original.contextRounds), false);
-        EditText timeout = formInput(form, "超时秒数（5–120）", Integer.toString(original.timeoutSeconds), false);
-        CheckBox temperatureEnabled = checkField(form, "设置温度", original.temperatureEnabled);
-        EditText temperature = formInput(form, "温度", Double.toString(original.temperature), false);
-        CheckBox maxTokensEnabled = checkField(form, "限制最大输出 Token", original.maxTokensEnabled);
-        EditText maxTokens = formInput(form, "最大输出 Token", Integer.toString(original.maxTokens), false);
-        CheckBox topPEnabled = checkField(form, "设置 Top P", original.topPEnabled);
-        EditText topP = formInput(form, "Top P", Double.toString(original.topP), false);
-        EditText headers = formInput(form, "自定义请求头 JSON", original.customHeaders, false);
-        EditText parameters = formInput(form, "自定义参数 JSON", original.customParameters, false);
-        TextView status = text("模型名称可手动填写；获取列表失败不影响保存。", 12, MUTED, false);
-        status.setTag("ai.status");
-        form.addView(status, matchWrap());
-
-        int[] lastProviderSelection = {providerIndex};
-        provider.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
-            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
-            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
-                if (position == lastProviderSelection[0]) return;
-                lastProviderSelection[0] = position;
-                AiProviderPresets.Preset preset = AiProviderPresets.ALL.get(position);
-                protocol.setSelection(protocolIndex(preset.protocol));
-                if (!preset.apiEndpoint.isEmpty()) endpoint.setText(preset.apiEndpoint);
-                if (name.getText().toString().trim().isEmpty()
-                        || name.getText().toString().equals(original.name)) name.setText(preset.name);
-                if ("ollama".equals(preset.id) || "lmstudio".equals(preset.id)) allowHttp.setChecked(true);
-            }
-        });
-
-        AlertDialog dialog = new MiuixDialogBuilder(context, miuixHome != null).setTitle("模型配置")
-                .setView(scrolling(form)).setNegativeButton("取消", null)
-                .setPositiveButton("保存并启用", null).setNeutralButton("删除", null).create();
-        showOptionDialog(dialog);
-        boolean exists = false;
-        for (AiModelConfig configured : aiSettings().configs) exists |= configured.id.equals(original.id);
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setVisibility(exists ? View.VISIBLE : View.GONE);
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(ignored -> {
-            try { saveAiSettings(aiSettings().delete(original.id)); }
-            catch (RuntimeException failure) { toast(safeError(failure)); return; }
-            dialog.dismiss();
-            showAiModelSettings();
-        });
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
-            try {
-                AiModelConfig draft = buildAiConfig(original.id, name, provider, protocol, endpoint,
-                        key, modelName, modelsEndpoint, systemPrompt[0], contextRounds, timeout, allowHttp,
-                        temperatureEnabled, temperature, maxTokensEnabled, maxTokens,
-                        topPEnabled, topP, headers, parameters);
-                draft.validate(true);
-                saveAiSettings(aiSettings().upsert(draft, true));
-                dialog.dismiss();
-                showAiModelSettings();
-            } catch (Exception failure) { toast(safeError(failure)); }
-        });
-
-        fetchModels.setOnClickListener(ignored -> {
-            try {
-                AiModelConfig draft = buildAiConfig(original.id, name, provider, protocol, endpoint,
-                        key, modelName, modelsEndpoint, systemPrompt[0], contextRounds, timeout, allowHttp,
-                        temperatureEnabled, temperature, maxTokensEnabled, maxTokens,
-                        topPEnabled, topP, headers, parameters);
-                draft.validate(false);
-                fetchModels.setEnabled(false);
-                status.setText("正在获取模型列表…");
-                requests.execute(() -> {
-                    try {
-                        List<String> fetched = ChatCompletionClient.fetchModels(draft);
-                        status.post(() -> {
-                            if (!dialog.isShowing()) return;
-                            fetchModels.setEnabled(true);
-                            if (fetched.isEmpty()) { status.setText("接口未返回模型，请手动填写模型名称。"); return; }
-                            String[] values = fetched.toArray(new String[0]);
-                            showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle("选择模型")
-                                    .setItems(values, (child, selected) -> modelName.setText(values[selected]))
-                                    .setNegativeButton("取消", null).create());
-                            status.setText("已获取 " + fetched.size() + " 个模型");
-                        });
-                    } catch (Exception failure) {
-                        status.post(() -> {
-                            if (!dialog.isShowing()) return;
-                            fetchModels.setEnabled(true);
-                            status.setText("获取失败：" + safeError(failure));
-                        });
-                    }
-                });
-            } catch (Exception failure) { toast(safeError(failure)); }
-        });
-
-        Button test = formButton();
-        test.setText("测试对话");
-        test.setTag("ai.test_chat");
-        form.addView(MiuixFormControls.viewFor(test), matchWrap());
-        test.setOnClickListener(ignored -> {
-            try {
-                AiModelConfig draft = buildAiConfig(original.id, name, provider, protocol, endpoint,
-                        key, modelName, modelsEndpoint, systemPrompt[0], contextRounds, timeout, allowHttp,
-                        temperatureEnabled, temperature, maxTokensEnabled, maxTokens,
-                        topPEnabled, topP, headers, parameters);
-                draft.validate(true);
-                showOptionDialog(new AiTestChatDialog(context, draft, miuixHome != null));
-            } catch (Exception failure) { toast(safeError(failure)); }
-        });
-    }
-
-    private void addField(LinearLayout parent, String label, View input) {
-        TextView heading = text(label, 14, TEXT, false);
-        LinearLayout.LayoutParams params = matchWrap();
-        params.topMargin = dp(10);
-        parent.addView(heading, params);
-        input.setContentDescription(label);
-        parent.addView(MiuixFormControls.viewFor(input), matchWrap());
-    }
-
-    private CheckBox checkField(LinearLayout parent, String label, boolean checked) {
-        CheckBox box = miuixHome == null ? new CheckBox(context)
-                : MiuixFormControls.checkbox(context, label, checked);
-        box.setText(label);
-        box.setTextColor(TEXT);
-        box.setChecked(checked);
-        parent.addView(MiuixFormControls.viewFor(box), matchWrap());
-        return box;
-    }
-
-    private static int protocolIndex(String protocol) {
-        for (int i = 0; i < AiModelConfig.PROTOCOLS.length; i++) {
-            if (AiModelConfig.PROTOCOLS[i].equals(protocol)) return i;
-        }
-        return 0;
+        AiModelEditor editor = new AiModelEditor(context, repository, original,
+                miuixHome != null, this::showAiModelSettings);
+        editor.show(this::showOptionDialog);
     }
 
     private static String protocolName(String protocol) {
-        return AiModelConfig.PROTOCOL_LABELS[protocolIndex(protocol)];
-    }
-
-    private AiModelConfig buildAiConfig(String id, EditText name, Spinner provider, Spinner protocol,
-                                       EditText endpoint, EditText key, EditText model,
-                                       EditText modelsEndpoint, String prompt, EditText rounds,
-                                       EditText timeout, CheckBox allowHttp, CheckBox temperatureEnabled,
-                                       EditText temperature, CheckBox maxTokensEnabled, EditText maxTokens,
-                                       CheckBox topPEnabled, EditText topP, EditText headers,
-                                       EditText parameters) throws Exception {
-        AiProviderPresets.Preset preset = AiProviderPresets.ALL.get(provider.getSelectedItemPosition());
-        return AiModelConfig.fromJson(new JSONObject().put("id", id).put("name", name.getText().toString())
-                .put("provider", preset.id).put("protocol", AiModelConfig.PROTOCOLS[protocol.getSelectedItemPosition()])
-                .put("apiEndpoint", endpoint.getText().toString()).put("apiKey", key.getText().toString())
-                .put("modelName", model.getText().toString()).put("modelsEndpoint", modelsEndpoint.getText().toString())
-                .put("systemPrompt", prompt)
-                .put("contextRounds", Integer.parseInt(rounds.getText().toString().trim()))
-                .put("timeoutSeconds", Integer.parseInt(timeout.getText().toString().trim()))
-                .put("allowInsecureHttp", allowHttp.isChecked())
-                .put("temperatureEnabled", temperatureEnabled.isChecked())
-                .put("temperature", Double.parseDouble(temperature.getText().toString().trim()))
-                .put("maxTokensEnabled", maxTokensEnabled.isChecked())
-                .put("maxTokens", Integer.parseInt(maxTokens.getText().toString().trim()))
-                .put("topPEnabled", topPEnabled.isChecked()).put("topP", Double.parseDouble(topP.getText().toString().trim()))
-                .put("customHeaders", headers.getText().toString().trim().isEmpty() ? "{}" : headers.getText().toString())
-                .put("customParameters", parameters.getText().toString().trim().isEmpty() ? "{}" : parameters.getText().toString()));
+        for (int i = 0; i < AiModelConfig.PROTOCOLS.length; i++) {
+            if (AiModelConfig.PROTOCOLS[i].equals(protocol)) return AiModelConfig.PROTOCOL_LABELS[i];
+        }
+        return AiModelConfig.PROTOCOL_LABELS[0];
     }
 
     private static String safeError(Throwable failure) {
@@ -1538,6 +1331,17 @@ public final class ModuleSettingsScreen {
                 dialog.dismiss();
             } catch (java.time.format.DateTimeParseException failure) { start.setError("时间格式应为 HH:mm"); }
         });
+    }
+
+    private void confirmUnknownStreakRetry() {
+        Dialog dialog = new MiuixDialogBuilder(context, miuixHome != null)
+                .setTitle("重试结果未知的续火花")
+                .setMessage("上次发送可能已经到达对方，只是没有收到确认。继续重试可能会重复发送。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("仍然重试", (ignored, which) -> repository.putString(
+                        "streak_retry_unknown_token", java.util.UUID.randomUUID().toString()))
+                .create();
+        showOptionDialog(dialog);
     }
 
     private void showAudioPathEditor(String title, String key) {
@@ -1712,44 +1516,9 @@ public final class ModuleSettingsScreen {
     }
 
     private void showAutomationSettings() {
-        settings = repository.load();
-        LinearLayout previous = content;
-        LinearLayout panel = new LinearLayout(context);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(16), dp(8), dp(16), dp(8));
-        content = panel;
-        ToggleControl[] automation = new ToggleControl[3];
-        boolean[] changing = {false};
-        automation[0] = addSwitch("自动化总开关", "控制自动点赞、关注和草稿预填。",
-                settings.automationEnabled, true, false, value -> {
-                    if (changing[0]) return;
-                    update(s -> withAutomation(s, value, null, null, null, null));
-                    automation[1].setEnabled(value);
-                    automation[2].setEnabled(value);
-                });
-        automation[1] = addSwitch("自动点赞", "只处理当前显示且尚未点赞的作品。",
-                settings.autoLikeEnabled, settings.automationEnabled, false,
-                value -> { if (!changing[0]) update(s -> withAutomation(s, null, value, null, null, null)); });
-        automation[2] = addSwitch("自动关注", "调用抖音原生关注流程。",
-                settings.autoFollowEnabled, settings.automationEnabled, false,
-                value -> { if (!changing[0]) update(s -> withAutomation(s, null, null, value, null, null)); });
-        Button stop = formButton();
-        stop.setText("立即停止");
-        stop.setOnClickListener(ignored -> {
-            repository.putBoolean("native_auto_reply", false);
-            repository.putBoolean("native_auto_comment", false);
-            repository.putBoolean("streak_enabled", false);
-            update(s -> withAutomation(s, false, false, false, false, false));
-            changing[0] = true;
-            for (ToggleControl toggle : automation) toggle.setChecked(false);
-            changing[0] = false;
-            automation[1].setEnabled(false);
-            automation[2].setEnabled(false);
-        });
-        content.addView(MiuixFormControls.viewFor(stop), matchWrap());
-        content = previous;
-        showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle("互动自动化").setView(scrolling(panel))
-                .setNegativeButton("返回", null).create());
+        AutomationSettingsDialog automation = new AutomationSettingsDialog(context, repository, miuixHome != null,
+                () -> settings = repository.load());
+        showOptionDialog(automation.dialog(), automation::close);
     }
 
     private void showSystemBarSettings() {
@@ -1791,7 +1560,7 @@ public final class ModuleSettingsScreen {
             input.setContentDescription(title);
             input.setTag("settings.input." + title);
             input.setText(current[0]);
-            input.setInputType(numeric ? InputType.TYPE_CLASS_NUMBER
+            input.setInputType(numeric ? InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL
                     : InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
             input.setMaxLines(numeric ? 1 : 6);
             input.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(400)});
@@ -1935,7 +1704,6 @@ public final class ModuleSettingsScreen {
     public void close() {
         dismissChildPages();
         if (miuixHome != null) miuixHome.close();
-        requests.shutdownNow();
     }
 
     public void setScanStatus(ScanStatus status) {
@@ -2218,6 +1986,24 @@ public final class ModuleSettingsScreen {
 
     private int dp(int value) {
         return Math.round(value * context.getResources().getDisplayMetrics().density);
+    }
+
+    private static String validatePlaybackSpeed(String value) {
+        final float speed;
+        try { speed = Float.parseFloat(value.trim()); }
+        catch (NumberFormatException failure) { throw new IllegalArgumentException("请输入 0.25 至 4 的数字"); }
+        if (!Float.isFinite(speed) || speed < 0.25f || speed > 4f) {
+            throw new IllegalArgumentException("倍速应为 0.25 至 4");
+        }
+        return value.trim();
+    }
+
+    private static String effectivePlaybackSpeed(String value) {
+        try {
+            float speed = Float.parseFloat(value == null ? "" : value.trim());
+            if (Float.isFinite(speed) && speed >= 0.25f && speed <= 4f) return value.trim();
+        } catch (NumberFormatException ignored) { }
+        return "2";
     }
 
     private static int parseNonNegative(String value) {

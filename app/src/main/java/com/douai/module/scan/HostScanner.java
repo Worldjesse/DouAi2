@@ -85,13 +85,23 @@ public final class HostScanner {
                     notifyCacheHit(progressListener, dexEntries.size());
                     return cached;
                 }
-            } catch (IOException exception) {
-                cache.delete();
+            } catch (IOException | RuntimeException exception) {
+                try {
+                    cache.delete();
+                } catch (RuntimeException ignored) {
+                    // A broken cache must not prevent a fresh host scan.
+                }
             }
         }
         notifyScanStarted(progressListener, dexEntries.size());
         HostScanReport report = scanEntries(dexEntries, rules, identity, progressListener);
-        if (cache != null) cache.save(report);
+        if (cache != null) {
+            try {
+                cache.save(report);
+            } catch (IOException | RuntimeException exception) {
+                notifyCacheSaveFailed(progressListener, exception);
+            }
+        }
         return report;
     }
 
@@ -188,6 +198,15 @@ public final class HostScanner {
             listener.onDexScanned(completed, total, dexName);
         } catch (RuntimeException ignored) {
             // UI progress must not affect the host scan.
+        }
+    }
+
+    private static void notifyCacheSaveFailed(ProgressListener listener, Exception exception) {
+        if (listener == null) return;
+        try {
+            listener.onCacheSaveFailed(exception);
+        } catch (RuntimeException ignored) {
+            // UI diagnostics must not affect the completed host scan.
         }
     }
 
@@ -489,5 +508,6 @@ public final class HostScanner {
         void onCacheHit(int dexCount);
         void onScanStarted(int dexCount);
         void onDexScanned(int completed, int total, String dexName);
+        default void onCacheSaveFailed(Exception exception) { }
     }
 }

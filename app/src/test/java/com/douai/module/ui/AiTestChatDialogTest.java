@@ -5,6 +5,7 @@ import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.View;
@@ -12,12 +13,15 @@ import android.view.WindowManager;
 import android.view.WindowInsets;
 import android.widget.EditText;
 import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
+import android.widget.ListView;
 import android.widget.TextView;
 
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.feature.ChatImage;
+import com.douai.module.feature.ChatImageLoader;
+import com.douai.module.feature.TestChatMemory;
 
 import org.json.JSONObject;
 import org.junit.After;
@@ -33,6 +37,7 @@ import org.robolectric.shadows.ShadowLooper;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.AbstractExecutorService;
@@ -47,6 +52,7 @@ import static org.junit.Assert.*;
 public final class AiTestChatDialogTest {
     private Activity activity;
     private ManualExecutor worker;
+    private ManualExecutor historyWorker;
     private List<FakeSession> sessions;
     private AiTestChatDialog dialog;
     private View root;
@@ -57,6 +63,7 @@ public final class AiTestChatDialogTest {
     public void openDialog() throws Exception {
         activity = Robolectric.buildActivity(Activity.class).setup().get();
         worker = new ManualExecutor();
+        historyWorker = new ManualExecutor();
         sessions = new ArrayList<>();
         AiModelConfig config = AiModelConfig.fromJson(new JSONObject()
                 .put("id", "test-dialog").put("name", "测试模型")
@@ -65,17 +72,20 @@ public final class AiTestChatDialogTest {
             FakeSession session = new FakeSession();
             sessions.add(session);
             return session;
-        }, worker);
+        }, worker, historyWorker);
         dialog.show();
         root = dialog.getWindow().getDecorView().findViewWithTag("ai.chat");
         input = root.findViewWithTag("ai.chat.input");
         send = root.findViewWithTag("ai.chat.send");
+        historyWorker.runAllOnThread();
         ShadowLooper.idleMainLooper();
     }
 
     @After
     public void closeDialog() {
         dialog.dismiss();
+        worker.shutdownNow();
+        historyWorker.shutdownNow();
         activity.finish();
         ShadowLooper.idleMainLooper();
     }
@@ -127,18 +137,18 @@ public final class AiTestChatDialogTest {
         assertEquals("重试这条消息", input.getText().toString());
         assertEquals("发送失败", text("ai.chat.state").getText().toString());
         assertTrue(text("ai.chat.answer").getText().toString().contains("超时"));
-        assertEquals(2, messages().getChildCount());
+        assertEquals(2, messageCount());
 
         sessions.get(0).failure = null;
-        assertTrue(root.findViewWithTag("ai.chat.retry").performClick());
+        assertTrue(findView("ai.chat.retry").performClick());
         assertEquals("", input.getText().toString());
-        assertEquals(2, messages().getChildCount());
+        assertEquals(2, messageCount());
         worker.runNext();
         ShadowLooper.idleMainLooper();
 
         assertEquals(Arrays.asList("重试这条消息", "重试这条消息"), sessions.get(0).prompts);
         assertEquals("模型回复", text("ai.chat.answer").getText().toString());
-        assertNull(root.findViewWithTag("ai.chat.retry"));
+        assertEquals(View.GONE, findView("ai.chat.retry").getVisibility());
     }
 
     @Test
@@ -149,20 +159,21 @@ public final class AiTestChatDialogTest {
         worker.runNext();
         ShadowLooper.idleMainLooper();
         assertEquals("新的草稿", input.getText().toString());
-        assertNotNull(root.findViewWithTag("ai.chat.retry"));
+        assertNotNull(findView("ai.chat.retry"));
     }
 
     @Test
-    public void clearCreatesFreshContextAndDiscardsAnAlreadyQueuedReply() {
+    public void clearCreatesFreshContextAndDiscardsAnAlreadyQueuedReply() throws Exception {
         submit("清空前的消息");
         worker.runNext();
         input.setText("保留的草稿");
         assertTrue(root.findViewWithTag("ai.chat.clear").performClick());
+        historyWorker.runAllOnThread();
         ShadowLooper.idleMainLooper();
 
         assertEquals(2, sessions.size());
         assertEquals(1, sessions.get(0).cancelCount);
-        assertEquals(0, messages().getChildCount());
+        assertEquals(0, messageCount());
         assertEquals("保留的草稿", input.getText().toString());
         assertEquals("", text("ai.chat.state").getText().toString());
         assertFalse(worker.isShutdown());
@@ -172,7 +183,7 @@ public final class AiTestChatDialogTest {
         ShadowLooper.idleMainLooper();
         assertEquals(Arrays.asList("清空前的消息"), sessions.get(0).prompts);
         assertEquals(Arrays.asList("清空后的消息"), sessions.get(1).prompts);
-        assertEquals(2, messages().getChildCount());
+        assertEquals(2, messageCount());
     }
 
     @Test
@@ -185,7 +196,7 @@ public final class AiTestChatDialogTest {
         assertEquals(1, sessions.get(0).cancelCount);
         assertEquals("模型回复", text("ai.chat.answer").getText().toString());
         assertEquals("", input.getText().toString());
-        assertNull(root.findViewWithTag("ai.chat.retry"));
+        assertEquals(View.GONE, findView("ai.chat.retry").getVisibility());
     }
 
     @Test
@@ -201,11 +212,11 @@ public final class AiTestChatDialogTest {
         assertFalse(worker.isShutdown());
         assertEquals(1, sessions.size());
 
-        root.findViewWithTag("ai.chat.retry").performClick();
+        findView("ai.chat.retry").performClick();
         worker.runNext();
         ShadowLooper.idleMainLooper();
         assertEquals("模型回复", text("ai.chat.answer").getText().toString());
-        assertEquals(2, messages().getChildCount());
+        assertEquals(2, messageCount());
     }
 
     @Test
@@ -214,14 +225,14 @@ public final class AiTestChatDialogTest {
         dialog.addImage(image);
         assertTrue(send.isEnabled());
         assertEquals(View.VISIBLE, root.findViewWithTag("ai.chat.attachments").getVisibility());
-        assertNotNull(root.findViewWithTag("ai.chat.remove_image"));
+        assertNotNull(findView("ai.chat.remove_image"));
         send.performClick();
         assertEquals(View.GONE, root.findViewWithTag("ai.chat.attachments").getVisibility());
         worker.runNext();
         ShadowLooper.idleMainLooper();
         assertEquals(Arrays.asList(""), sessions.get(0).prompts);
         assertEquals(image, sessions.get(0).images.get(0).get(0));
-        assertNotNull(messages().findViewWithTag("ai.chat.image"));
+        assertNotNull(findView("ai.chat.image"));
         submit("图片中有什么？");
         worker.runNext();
         ShadowLooper.idleMainLooper();
@@ -240,10 +251,10 @@ public final class AiTestChatDialogTest {
         assertEquals("识别图片", input.getText().toString());
         assertEquals(View.VISIBLE, root.findViewWithTag("ai.chat.attachments").getVisibility());
         sessions.get(0).failure = null;
-        root.findViewWithTag("ai.chat.retry").performClick();
+        findView("ai.chat.retry").performClick();
         worker.runNext();
         ShadowLooper.idleMainLooper();
-        assertEquals(2, messages().getChildCount());
+        assertEquals(2, messageCount());
         assertEquals(image, sessions.get(0).images.get(1).get(0));
         assertEquals(View.GONE, root.findViewWithTag("ai.chat.attachments").getVisibility());
     }
@@ -260,20 +271,20 @@ public final class AiTestChatDialogTest {
         ShadowLooper.idleMainLooper();
         assertEquals("", sessions.get(0).prompts.get(0));
         assertTrue(sessions.get(0).documents.get(0).contains(document));
-        assertNotNull(root.findViewWithTag("ai.chat.remove_document"));
+        assertNotNull(findView("ai.chat.remove_document"));
         sessions.get(0).failure = null;
-        root.findViewWithTag("ai.chat.retry").performClick();
+        findView("ai.chat.retry").performClick();
         worker.runNext();
         ShadowLooper.idleMainLooper();
-        assertEquals(2, messages().getChildCount());
+        assertEquals(2, messageCount());
         assertTrue(sessions.get(0).documents.get(1).contains(document));
         assertEquals(View.GONE, root.findViewWithTag("ai.chat.attachments").getVisibility());
-        assertNotNull(messages().findViewWithTag("ai.chat.document"));
+        assertNotNull(findView("ai.chat.document"));
     }
 
     @Test public void documentRemovalClearAndOversizedAttachmentKeepDraftStateConsistent() {
         dialog.addDocument("笔记.txt", "普通偏好");
-        root.findViewWithTag("ai.chat.remove_document").performClick();
+        findView("ai.chat.remove_document").performClick();
         assertFalse(send.isEnabled());
         dialog.addDocument("笔记.txt", "普通偏好");
         try { dialog.addDocument("过长.txt", "x".repeat(32769)); fail("Oversized document must fail"); }
@@ -281,14 +292,14 @@ public final class AiTestChatDialogTest {
         assertEquals("笔记.txt", text("ai.chat.document_name").getText().toString());
         root.findViewWithTag("ai.chat.clear").performClick();
         assertFalse(send.isEnabled());
-        assertNull(root.findViewWithTag("ai.chat.remove_document"));
+        assertNull(findView("ai.chat.remove_document"));
     }
 
     @Test
     public void imageLimitRemovalAndClearUpdateSendAvailability() {
         for (int i = 0; i < 5; i++) dialog.addImage(image());
         assertTrue(root.findViewWithTag("ai.chat.attach").isEnabled());
-        root.findViewWithTag("ai.chat.remove_image").performClick();
+        findView("ai.chat.remove_image").performClick();
         assertTrue(root.findViewWithTag("ai.chat.attach").isEnabled());
         root.findViewWithTag("ai.chat.clear").performClick();
         assertFalse(send.isEnabled());
@@ -302,8 +313,95 @@ public final class AiTestChatDialogTest {
             worker.runNext();
             ShadowLooper.idleMainLooper();
         }
-        assertEquals(200, messages().getChildCount());
+        assertEquals(200, messageCount());
+        assertTrue(messages().getChildCount() < messageCount());
         assertEquals("消息 5", text("ai.chat.user").getText().toString());
+    }
+
+    @Test public void restoringSavedTurnsReadsAndDecodesOnWorkerBeforeRenderingTextAndAttachments() throws Exception {
+        ChatImage savedImage = image();
+        FakeSession saved = new FakeSession();
+        saved.saved = Collections.singletonList(new TestChatMemory.Turn("历史问题", "附件文本",
+                Collections.singletonList(savedImage), "历史回复"));
+        List<Boolean> decodeThreads = new ArrayList<>();
+        reopen(saved, image -> {
+            decodeThreads.add(Looper.myLooper() == Looper.getMainLooper());
+            return ChatImageLoader.thumbnail(image);
+        });
+        assertEquals(0, saved.savedCalls);
+        assertEquals(0, messageCount());
+
+        historyWorker.runAllOnThread();
+        assertEquals(1, saved.savedCalls);
+        assertFalse(saved.readOnMain);
+        assertEquals(Collections.singletonList(false), decodeThreads);
+        assertEquals(0, messageCount());
+        ShadowLooper.idleMainLooper();
+
+        assertEquals("历史问题", text("ai.chat.user").getText().toString());
+        assertEquals("历史回复", text("ai.chat.answer").getText().toString());
+        assertNotNull(findView("ai.chat.document"));
+        assertNotNull(((ImageView) findView("ai.chat.image")).getDrawable());
+    }
+
+    @Test public void clearingSavedConversationDiscardsAlreadyPostedRestoreAndClearsOffMain() throws Exception {
+        FakeSession saved = new FakeSession();
+        saved.saved = Collections.singletonList(new TestChatMemory.Turn("已清空的问题", "",
+                Collections.singletonList(image()), "旧回复"));
+        reopen(saved, ChatImageLoader::thumbnail);
+        historyWorker.runAllOnThread();
+        root.findViewWithTag("ai.chat.clear").performClick();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(0, messageCount());
+        assertEquals(1, saved.clearCalls);
+        assertFalse(saved.clearOnMain);
+        assertFalse(send.isEnabled());
+    }
+
+    @Test public void closingSavedConversationDiscardsAlreadyPostedRestoreAndThumbnail() throws Exception {
+        FakeSession saved = new FakeSession();
+        saved.saved = Collections.singletonList(new TestChatMemory.Turn("关闭前的历史", "",
+                Collections.singletonList(image()), "旧回复"));
+        List<Bitmap> bitmaps = new ArrayList<>();
+        reopen(saved, image -> {
+            Bitmap bitmap = ChatImageLoader.thumbnail(image);
+            bitmaps.add(bitmap);
+            return bitmap;
+        });
+        historyWorker.runAllOnThread();
+        dialog.dismiss();
+        ShadowLooper.idleMainLooper();
+        assertEquals(0, messageCount());
+        assertEquals(1, bitmaps.size());
+        assertTrue(bitmaps.get(0).isRecycled());
+    }
+
+    @Test public void restoredConversationKeepsItsBoundAndTextWhenThumbnailFails() throws Exception {
+        FakeSession saved = new FakeSession();
+        saved.saved = new ArrayList<>();
+        for (int index = 0; index < 105; index++) saved.saved.add(new TestChatMemory.Turn("历史 " + index,
+                "", Collections.singletonList(image()), "回复 " + index));
+        reopen(saved, image -> { throw new IllegalArgumentException("Bad historical image"); });
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(200, messageCount());
+        assertEquals("历史 5", text("ai.chat.user").getText().toString());
+        assertEquals("回复 5", text("ai.chat.answer").getText().toString());
+    }
+
+    @Test public void sendingDuringRestoreRejectsTheOlderHistoryCompletion() throws Exception {
+        FakeSession saved = new FakeSession();
+        saved.saved = Collections.singletonList(new TestChatMemory.Turn("旧历史", "",
+                Collections.emptyList(), "旧回复"));
+        reopen(saved, ChatImageLoader::thumbnail);
+        historyWorker.runAllOnThread();
+        submit("新消息");
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(2, messageCount());
+        assertEquals("新消息", text("ai.chat.user").getText().toString());
+        assertEquals("模型回复", text("ai.chat.answer").getText().toString());
     }
 
     @Test
@@ -372,7 +470,7 @@ public final class AiTestChatDialogTest {
                 View.MeasureSpec.makeMeasureSpec(bounds.height, View.MeasureSpec.EXACTLY));
         root.layout(0, 0, bounds.width, bounds.height);
 
-        ScrollView scroll = root.findViewWithTag("ai.chat.scroll");
+        ListView scroll = messages();
         View composer = (View) input.getParent();
         assertTrue("scroll height=" + scroll.getHeight() + ", bounds=" + bounds.width + "x"
                 + bounds.height + ", composer=" + composer.getHeight() + ", input="
@@ -384,8 +482,14 @@ public final class AiTestChatDialogTest {
         assertTrue(input.getWidth() >= 100);
         assertEquals(48, send.getWidth());
         assertEquals(48, send.getHeight());
-        assertNotNull(text("ai.chat.answer").getLayout());
-        assertTrue(text("ai.chat.answer").getLayout().getLineCount() > 1);
+        ListView list = messages();
+        View row = list.getAdapter().getView(list.getAdapter().getCount() - 1, null, list);
+        TextView answer = row.findViewWithTag("ai.chat.answer");
+        answer.measure(View.MeasureSpec.makeMeasureSpec(list.getWidth(), View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(root.getHeight(), View.MeasureSpec.AT_MOST));
+        answer.layout(0, 0, answer.getMeasuredWidth(), answer.getMeasuredHeight());
+        assertNotNull(answer.getLayout());
+        assertTrue(answer.getLayout().getLineCount() > 1);
         assertEquals(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE,
                 bounds.softInputMode & WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST);
         renderPreview(bounds.width, bounds.height);
@@ -411,8 +515,58 @@ public final class AiTestChatDialogTest {
         assertTrue(send.performClick());
     }
 
-    private TextView text(String tag) { return root.findViewWithTag(tag); }
-    private LinearLayout messages() { return root.findViewWithTag("ai.chat.messages"); }
+    private void reopen(FakeSession saved, AiTestChatDialog.ThumbnailLoader thumbnails) throws Exception {
+        dialog.dismiss();
+        worker.shutdownNow();
+        historyWorker.shutdownNow();
+        worker = new ManualExecutor();
+        historyWorker = new ManualExecutor();
+        sessions = new ArrayList<>();
+        sessions.add(saved);
+        AiModelConfig config = AiModelConfig.fromJson(new JSONObject()
+                .put("id", "restore-test").put("name", "恢复模型")
+                .put("apiEndpoint", "https://example.com/v1").put("modelName", "restore-model"));
+        dialog = new AiTestChatDialog(activity, config, () -> {
+            if (sessions.isEmpty()) throw new AssertionError("Unexpected session creation");
+            return sessions.get(0);
+        }, worker, historyWorker, false, thumbnails);
+        dialog.show();
+        root = dialog.getWindow().getDecorView().findViewWithTag("ai.chat");
+        input = root.findViewWithTag("ai.chat.input");
+        send = root.findViewWithTag("ai.chat.send");
+    }
+
+    private TextView text(String tag) {
+        View direct = findView(tag);
+        TextView found = direct instanceof TextView ? (TextView) direct : null;
+        if (found != null) return found;
+        return null;
+    }
+
+    private View findView(String tag) {
+        if (tag.startsWith("ai.chat.user") || tag.startsWith("ai.chat.answer")
+                || tag.startsWith("ai.chat.retry") || tag.startsWith("ai.chat.document")
+                || tag.startsWith("ai.chat.image")) {
+            ListView list = messages();
+            for (int index = 0; index < list.getAdapter().getCount(); index++) {
+                View row = list.getAdapter().getView(index, null, list);
+                View found = row.findViewWithTag(tag);
+                if (found != null && found.getVisibility() != View.GONE) return found;
+            }
+        }
+        View found = root.findViewWithTag(tag);
+        if (found != null) return found;
+        ListView list = messages();
+        for (int index = 0; index < list.getAdapter().getCount(); index++) {
+            View row = list.getAdapter().getView(index, null, list);
+            found = row.findViewWithTag(tag);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private ListView messages() { return root.findViewWithTag("ai.chat.messages"); }
+    private int messageCount() { return messages().getAdapter().getCount(); }
 
     private static final class FakeSession implements AiTestChatDialog.Session {
         final List<String> prompts = new ArrayList<>();
@@ -421,6 +575,11 @@ public final class AiTestChatDialogTest {
         String answer = "模型回复";
         Exception failure;
         int cancelCount;
+        List<TestChatMemory.Turn> saved = Collections.emptyList();
+        int savedCalls;
+        int clearCalls;
+        boolean readOnMain;
+        boolean clearOnMain;
 
         @Override public String reply(String message, List<ChatImage> attachments) throws Exception {
             images.add(new ArrayList<>(attachments));
@@ -435,6 +594,18 @@ public final class AiTestChatDialogTest {
         }
 
         @Override public void cancel() { cancelCount++; }
+
+        @Override public List<TestChatMemory.Turn> savedTurns() {
+            savedCalls++;
+            readOnMain = Looper.myLooper() == Looper.getMainLooper();
+            return saved;
+        }
+
+        @Override public void clear() {
+            clearCalls++;
+            clearOnMain = Looper.myLooper() == Looper.getMainLooper();
+            saved = Collections.emptyList();
+        }
     }
 
     private static ChatImage image() {
@@ -458,6 +629,17 @@ public final class AiTestChatDialogTest {
         void runNext() {
             Runnable task = tasks.poll();
             if (task != null) task.run();
+        }
+
+        void runAllOnThread() throws InterruptedException {
+            Runnable task;
+            while ((task = tasks.poll()) != null) {
+                Runnable next = task;
+                Thread thread = new Thread(next, "test-history-worker");
+                thread.start();
+                thread.join(5000);
+                if (thread.isAlive()) throw new AssertionError("Worker task did not finish");
+            }
         }
 
         @Override public void shutdown() { shutdown = true; }

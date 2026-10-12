@@ -86,6 +86,8 @@ public final class ProfileSpoofHook implements AutoCloseable {
         }
     }
 
+    public boolean isActive() { return !closed && registration.isActive(); }
+
     public void setOptions(LocalOptions options) {
         if (closed) return;
         this.options = options;

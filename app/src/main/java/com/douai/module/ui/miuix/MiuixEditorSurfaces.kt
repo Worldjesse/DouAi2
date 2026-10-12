@@ -7,12 +7,14 @@ import android.graphics.drawable.BitmapDrawable
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.View
+import android.view.ViewGroup
 import android.widget.Button as AndroidButton
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
+import android.widget.ListView
 import android.widget.TextView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -88,23 +90,31 @@ class MiuixChatEditorSurface(activity: Activity, private val model: View, close:
     override fun close() = environment.close()
 
     private fun readState(): ChatState {
-        val messages = model.findViewWithTag<LinearLayout>("ai.chat.messages")
-        val transcript = (0 until messages.childCount).map { index ->
-            val row = messages.getChildAt(index) as LinearLayout
+        val messages = model.findViewWithTag<View>("ai.chat.messages")
+        val rows = when (messages) {
+            is ListView -> (0 until messages.adapter.count).map { messages.adapter.getView(it, null, messages) }
+            is ViewGroup -> (0 until messages.childCount).map { messages.getChildAt(it) }
+            else -> emptyList()
+        }
+        val transcript = rows.map { messageRow ->
+            val row = messageRow as ViewGroup
             val bubble = row.getChildAt(0) as LinearLayout
             val user = bubble.findViewWithTag<TextView>("ai.chat.user")
             val text = user ?: bubble.findViewWithTag("ai.chat.answer")
             ChatMessage(
                 text, user != null, text.text.toString(), text.currentTextColor,
+                (bubble.findViewWithTag<LinearLayout>("ai.chat.message.images")?.let { images ->
+                    (0 until images.childCount).mapNotNull { child ->
+                        (images.getChildAt(child) as? ImageView)?.bitmap()
+                    }
+                } ?: emptyList()),
                 (0 until bubble.childCount).mapNotNull { child ->
-                    bubble.getChildAt(child).takeIf { it.tag == "ai.chat.image" }
-                        ?.let { (it as? ImageView)?.bitmap() }
+                    bubble.getChildAt(child).takeIf {
+                        it.tag == "ai.chat.document" && it.visibility == View.VISIBLE
+                    }?.let { (it as? TextView)?.text?.toString() }
                 },
-                (0 until bubble.childCount).mapNotNull { child ->
-                    bubble.getChildAt(child).takeIf { it.tag == "ai.chat.document" }
-                        ?.let { (it as? TextView)?.text?.toString() }
-                },
-                bubble.findViewWithTag("ai.chat.retry"),
+                bubble.findViewWithTag<View>("ai.chat.retry")
+                    ?.takeIf { it.visibility == View.VISIBLE },
             )
         }
         val attachments = model.findViewWithTag<HorizontalScrollView>("ai.chat.attachments")

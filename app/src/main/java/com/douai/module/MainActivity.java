@@ -7,6 +7,7 @@ import android.os.Looper;
 import com.douai.module.config.FrameworkConfigSync;
 import com.douai.module.config.ModuleConfigRuntime;
 import com.douai.module.diagnostics.ScanDiagnosticsChannel;
+import com.douai.module.diagnostics.HostAdaptationDiagnostics;
 import com.douai.module.ui.ModuleStatusScreen;
 import com.douai.module.ui.ScanStatus;
 
@@ -132,10 +133,14 @@ public final class MainActivity extends ComponentActivity {
                         false, false));
             } else if (complete) {
                 String detail = summary == null ? "DEX 扫描已完成。" : summary;
+                detail += "\n" + HostAdaptationDiagnostics.describe(snapshot);
+                boolean adaptationVerified = snapshot.getBoolean("host_adaptation_static_verified", false);
                 boolean feedInstalled = snapshot.getBoolean("feed_hook_installed", false);
                 boolean downloadInstalled = snapshot.getBoolean("download_hook_installed", false);
                 boolean pendingHook = false;
-                boolean hasFailure = false;
+                boolean hasFailure = snapshot.getInt("host_adaptation_feature_rule_gaps", 0) > 0
+                        || snapshot.getInt("host_adaptation_features_uninstalled", 0) > 0
+                        || snapshot.getInt("feed_ui_resource_mismatches", 0) > 0;
                 if (feedInstalled) {
                     boolean enabled = snapshot.getBoolean("feed_filter_enabled", false);
                     int filteredPages = snapshot.getInt("feed_filtered_pages", 0);
@@ -193,6 +198,8 @@ public final class MainActivity extends ComponentActivity {
                                 : "\n视频界面精简已启用；生命周期回调：")
                                 + snapshot.getInt("feed_ui_selected_callbacks", 0)
                                 + "，已扫描：" + snapshot.getInt("feed_ui_card_scans", 0)
+                                + "，视图查找：" + snapshot.getInt("feed_ui_view_searches", 0)
+                                + "，资源名不符：" + snapshot.getInt("feed_ui_resource_mismatches", 0)
                                 + "，重绘复查：" + snapshot.getInt("feed_ui_predraw_rechecks", 0)
                                 + "，重置后重应用：" + snapshot.getInt("feed_ui_reapplied_views", 0)
                                 + "，命中控件：" + snapshot.getInt("feed_ui_hidden_views", 0) + "。";
@@ -275,6 +282,10 @@ public final class MainActivity extends ComponentActivity {
                         hasFailure = true;
                     } else pendingHook = true;
                 }
+                int unknownStreakCount = snapshot.getInt("unknown_streak_count", 0);
+                if (unknownStreakCount > 0) {
+                    detail += "\n有 " + unknownStreakCount + " 条续火花发送结果未知；可在互动自动化的续火花设置中查看并选择重试。";
+                }
                 if (snapshot.getBoolean("auto_message_hook_installed", false)) {
                     detail += snapshot.getBoolean("auto_message_enabled", false)
                             ? "\n单聊草稿预填已启用；发送仍需手动确认。"
@@ -350,8 +361,9 @@ public final class MainActivity extends ComponentActivity {
                     detail += "\n运行模块版本：" + snapshot.getString("module_version", "未知");
                 }
                 settingsScreen.setScanStatus(new ScanStatus(
-                        hasFailure ? "部分功能未接入" : "已适配功能已接入", detail,
-                        !hasFailure && (feedInstalled || downloadInstalled
+                        !adaptationVerified ? "宿主适配未验证"
+                                : hasFailure ? "部分功能未接入" : "Hook 已接入，行为待验证", detail,
+                        adaptationVerified && !hasFailure && (feedInstalled || downloadInstalled
                                 || snapshot.getBoolean("version_hook_installed", false)
                                 || snapshot.getBoolean("top_tab_hook_installed", false)
                                 || snapshot.getBoolean("feed_ui_hook_installed", false)

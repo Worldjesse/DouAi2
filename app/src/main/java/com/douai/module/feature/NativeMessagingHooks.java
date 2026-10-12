@@ -31,12 +31,14 @@ import java.util.Set;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 /** Observes committed incoming messages and submits opt-in tasks through the native IM SDK. */
 public final class NativeMessagingHooks implements AutoCloseable {
     private final Context context;
     private final SharedPreferences state;
+    private final StreakSendLedger streakLedger;
     private final Consumer<String> log;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ScheduledThreadPoolExecutor worker = new ScheduledThreadPoolExecutor(1);
@@ -101,6 +103,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
         this.dispatcher = ownsDispatcher ? new AutomationDispatcher(context, this.log) : dispatcher;
         this.dispatcher.setOptions(options);
         state = context.getSharedPreferences("douai_message_state", Context.MODE_PRIVATE);
+        streakLedger = new StreakSendLedger(state);
         resetToken = state.getString("streak.reset_token", "");
         recall = new BehaviorHookGroup("prevent_message_recall", this.log);
         receive = new BehaviorHookGroup("native_reply", this.log);
@@ -139,6 +142,16 @@ public final class NativeMessagingHooks implements AutoCloseable {
         return Collections.unmodifiableMap(result);
     }
 
+    /** Number of streak sends whose outcome is unknown, including unmigrated legacy pending entries. */
+    public int unknownStreakCount() { return streakLedger.unknownCount(); }
+
+    /** Read-only count for status surfaces that do not hold the installed hook instance. */
+    public static int unknownStreakCount(Context context) {
+        SharedPreferences state = context.getApplicationContext()
+                .getSharedPreferences("douai_message_state", Context.MODE_PRIVATE);
+        return StreakSendLedger.countUnknown(state);
+    }
+
     private static Map<String, ProfileListEntry> profiles(Map<String, String> names, Map<String, ProfileListEntry> details) {
         Map<String, ProfileListEntry> result = new LinkedHashMap<>();
         for (Map.Entry<String, String> entry : names.entrySet()) result.put(entry.getKey(), details.getOrDefault(entry.getKey(),
@@ -161,13 +174,19 @@ public final class NativeMessagingHooks implements AutoCloseable {
             }
         }
         if (ownsDispatcher) dispatcher.setOptions(value);
+        if (!streakLedger.updateRetryUnknownToken(value.text("streak_retry_unknown_token", ""))) {
+            safeLog("Could not persist streak retry token");
+        }
         String token = value.text("streak_reset_token", "");
         if (!token.equals(resetToken)) {
-            resetToken = token;
-            SharedPreferences.Editor editor = state.edit();
-            for (String key : state.getAll().keySet()) if (key.startsWith("streak.")) editor.remove(key);
-            editor.putString("streak.reset_token", token);
-            editor.apply();
+            synchronized (sendLock) {
+                if (streakLedger.reset(token)) {
+                    resetToken = token;
+                    pendingStreak.clear();
+                } else {
+                    safeLog("Could not persist streak reset token");
+                }
+            }
         }
     }
 
@@ -416,6 +435,11 @@ public final class NativeMessagingHooks implements AutoCloseable {
 
     private void sendText(String id, String text, long account, long epoch, boolean group,
                           Consumer<Boolean> done) throws Exception {
+        sendText(id, text, account, epoch, group, done, () -> true);
+    }
+
+    private void sendText(String id, String text, long account, long epoch, boolean group,
+                          Consumer<Boolean> done, BooleanSupplier beforeNativeSend) throws Exception {
         if (closed || !receive.isActive() || ownUid() != account || generation.get() != epoch
                 || sdk == null || text == null || text.trim().isEmpty()
                 || text.length() > 4000) { done.accept(false); return; }
@@ -448,6 +472,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
         synchronized (sendLock) {
             if (generation.get() != epoch || ownUid() != account || !receive.isActive()
                     || closed || !options.enabled("automation_enabled")) { done.accept(false); return; }
+            if (!beforeNativeSend.getAsBoolean()) { done.accept(false); return; }
             send.invoke(handler, message, Collections.emptyMap());
         }
     }
@@ -522,21 +547,52 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 if (target == null || !automatic("streak_enabled", current)
                         || !ReplyPolicy.inWindow(current.text("streak_start", ""), current.text("streak_end", ""), LocalTime.now())) continue;
                 String key = "streak." + self + "." + day + "." + target;
-                if (state.getBoolean(key, false) || state.getBoolean(key + ".pending", false) || !pendingStreak.add(key)) continue;
+                if (!streakLedger.canBegin(key) || !pendingStreak.add(key)) continue;
                 String id = (String) conversationId.invoke(conversation);
+                StreakSendLedger.Attempt[] attempt = new StreakSendLedger.Attempt[1];
                 try {
                     String content = streakContent(current);
                     if (generation.get() != epoch || !automatic("streak_enabled", options)) { pendingStreak.remove(key); continue; }
-                    state.edit().putBoolean(key + ".pending", true).apply();
+                    boolean[] reachedPersistence = {false};
                     sendText(id, content, self, epoch, false, success -> {
-                        pendingStreak.remove(key);
-                        SharedPreferences.Editor completed = state.edit().remove(key + ".pending");
-                        if (success) completed.putBoolean(key, true);
-                        completed.apply();
-                        safeLog(success ? "Streak send acknowledged by native SDK" : "Streak native SDK send failed");
-                        if (current.enabled("streak_tip")) toast(success ? "续火花已发送" : "续火花发送失败");
+                        StreakSendLedger.Attempt active = attempt[0];
+                        if (active == null) {
+                            pendingStreak.remove(key);
+                            return;
+                        }
+                        boolean recorded = streakLedger.complete(key, active.token, success, System.currentTimeMillis());
+                        if (recorded) {
+                            pendingStreak.remove(key);
+                            safeLog(success ? "Streak send acknowledged by native SDK" : "Streak native SDK send failed");
+                            if (current.enabled("streak_tip")) toast(success ? "续火花已发送" : "续火花发送失败");
+                        } else {
+                            pendingStreak.remove(key);
+                            safeLog("Could not persist streak send result; outcome remains unknown");
+                        }
+                    }, () -> {
+                        reachedPersistence[0] = true;
+                        attempt[0] = streakLedger.begin(key, System.currentTimeMillis());
+                        if (attempt[0] == null) return false;
+                        String attemptToken = attempt[0].token;
+                        worker.schedule(() -> {
+                            if (streakLedger.markUnknown(key, attemptToken, System.currentTimeMillis())) {
+                                pendingStreak.remove(key);
+                                safeLog("Streak send callback timed out; outcome is unknown");
+                            }
+                        }, 30, TimeUnit.SECONDS);
+                        return true;
                     });
-                } catch (Exception failure) { pendingStreak.remove(key); safeLog("Streak task failed: " + failure.getClass().getSimpleName()); }
+                    if (attempt[0] == null && reachedPersistence[0]) {
+                        pendingStreak.remove(key);
+                        safeLog("Streak send prevented because its state could not be persisted");
+                    }
+                } catch (Exception failure) {
+                    if (attempt[0] != null) {
+                        streakLedger.markUnknown(key, attempt[0].token, System.currentTimeMillis());
+                    }
+                    pendingStreak.remove(key);
+                    safeLog("Streak task failed: " + failure.getClass().getSimpleName());
+                }
             }
             if (ownUid() == self) {
                 contacts = Collections.unmodifiableMap(discovered);

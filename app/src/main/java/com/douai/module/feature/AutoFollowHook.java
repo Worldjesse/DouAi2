@@ -120,7 +120,7 @@ public final class AutoFollowHook implements AutoCloseable {
             Object root = quickRootField.get(holder);
             if (!(root instanceof View)) return result;
             View rootView = (View) root;
-            View button = rootView.findViewById(FOLLOW_BUTTON_ID);
+            View button = HostResourceCatalog.findVerifiedView(rootView, FOLLOW_BUTTON_ID);
             if (button == null || button.getVisibility() != View.VISIBLE || !button.isEnabled()) {
                 return result;
             }
@@ -142,7 +142,7 @@ public final class AutoFollowHook implements AutoCloseable {
                                 ? null : invokeNoArg(currentAuthor, "getFollowStatus");
                         if (!awemeId.equals(readString(currentAweme, "getAid", "aid"))
                                 || currentRoot != rootView
-                                || rootView.findViewById(FOLLOW_BUTTON_ID) != button
+                                || HostResourceCatalog.findVerifiedView(rootView, FOLLOW_BUTTON_ID) != button
                                 || !(currentStatus instanceof Number)
                                 || ((Number) currentStatus).intValue() != 0
                                 || button.getVisibility() != View.VISIBLE

@@ -8,6 +8,8 @@ import android.app.Application;
 import android.app.Activity;
 import android.app.Instrumentation;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
@@ -17,16 +19,21 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 import com.douai.module.scan.HostRuleSet;
+import com.douai.module.scan.HostAdaptation;
 import com.douai.module.scan.HostScanCache;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.HostScanner;
 import com.douai.module.scan.StartupHostCache;
 import com.douai.module.scan.HostInstallation;
 import com.douai.module.config.FeatureSettings;
+import com.douai.module.config.ConfigurationChanges;
+import com.douai.module.config.ConfigurationSnapshot;
+import com.douai.module.config.CustomViewLocator;
 import com.douai.module.config.FrameworkConfigSync;
 import com.douai.module.config.ExtendedSettings;
 import com.douai.module.config.LocalOptions;
@@ -45,6 +52,7 @@ import com.douai.module.feature.NativeCommentSpeechHook;
 import com.douai.module.config.SettingsRepository;
 import com.douai.module.config.HostSettingsMigration;
 import com.douai.module.diagnostics.ScanDiagnosticsChannel;
+import com.douai.module.diagnostics.HostAdaptationDiagnostics;
 import com.douai.module.feature.FeedAdFilterHook;
 import com.douai.module.feature.DownloadActionHook;
 import com.douai.module.feature.VersionInfoHook;
@@ -64,13 +72,15 @@ import com.douai.module.ui.HostUiController;
 import io.github.libxposed.api.XposedInterface;
 
 public final class DouAiModule extends XposedModule {
-    private static final String TARGET_PACKAGE = "com.ss.android.ugc.aweme";
+    private static final String TARGET_PACKAGE = HostAdaptation.TARGET_PACKAGE;
     private static final String TAG = "DouAi";
     private volatile boolean isMainProcess;
     private volatile boolean scanScheduled;
     private volatile boolean configurationReady;
     private volatile BroadcastReceiver diagnosticsReceiver;
     private volatile Bundle scanDiagnostics = new Bundle();
+    private volatile Bundle hostVersionEvidence = new Bundle();
+    private volatile String hostRulesFingerprint;
     private volatile SharedPreferences hostPreferences;
     private volatile Context targetContext;
     private volatile ApplicationInfo targetApplicationInfo;
@@ -78,6 +88,8 @@ public final class DouAiModule extends XposedModule {
     private volatile FeatureSettings currentSettings = FeatureSettings.defaults();
     private volatile ExtendedSettings extendedSettings;
     private volatile LocalOptions localOptions = new LocalOptions(java.util.Collections.emptyMap());
+    private Map<String, ?> lastConfigurationValues;
+    private boolean configurationUpdatePending;
     private volatile HostBehaviorHooks hostBehaviorHooks;
     private volatile PlaybackBehaviorHooks playbackBehaviorHooks;
     private volatile ProfileSpoofHook profileSpoofHook;
@@ -192,6 +204,7 @@ public final class DouAiModule extends XposedModule {
         try {
             Context hostContext = awaitHostContext();
             targetContext = hostContext;
+            hostVersionEvidence = HostAdaptationDiagnostics.readInstalledVersion(hostContext);
             HostUiController ui = ensureHostUiController(hostContext);
             registerDiagnosticsReceiver(hostContext);
             HostRuleSet rules = loadRulesFromModuleApk();
@@ -212,6 +225,12 @@ public final class DouAiModule extends XposedModule {
                         public void onCacheHit(int dexCount) {
                             HostUiController controller = hostUiController;
                             if (controller != null) controller.onCacheHit(dexCount);
+                        }
+
+                        @Override
+                        public void onCacheSaveFailed(Exception failure) {
+                            log(5, TAG, "Host scan cache could not be saved: "
+                                    + failure.getClass().getSimpleName() + ": " + failure.getMessage());
                         }
 
                         @Override
@@ -354,10 +373,12 @@ public final class DouAiModule extends XposedModule {
             throw new IOException("Module APK path is unavailable");
         }
         try (ZipFile moduleApk = new ZipFile(moduleInfo.sourceDir)) {
-            ZipEntry entry = moduleApk.getEntry("assets/douyin-host-rules.tsv");
+            ZipEntry entry = moduleApk.getEntry("assets/" + HostAdaptation.RULES_ASSET);
             if (entry == null) throw new IOException("Rule file is missing from module APK");
             try (InputStream input = moduleApk.getInputStream(entry)) {
-                return HostRuleSet.parse(input);
+                HostRuleSet rules = HostRuleSet.parse(input);
+                hostRulesFingerprint = rules.getFingerprint();
+                return rules;
             }
         }
     }
@@ -413,7 +434,7 @@ public final class DouAiModule extends XposedModule {
         if (hostPreferences == preferences && settingsListener != null) return;
         hostPreferences = preferences;
         SharedPreferences.OnSharedPreferenceChangeListener listener = (sharedPreferences, key) ->
-                updateConfiguration(sharedPreferences);
+                scheduleConfigurationUpdate();
         try {
             preferences.registerOnSharedPreferenceChangeListener(listener);
             settingsListener = listener;
@@ -423,61 +444,151 @@ public final class DouAiModule extends XposedModule {
         }
     }
 
-    private void updateConfiguration(SharedPreferences preferences) {
+    private synchronized void scheduleConfigurationUpdate() {
+        if (configurationUpdatePending) return;
+        configurationUpdatePending = true;
+        new Handler(Looper.getMainLooper()).post(() -> {
+            synchronized (DouAiModule.this) {
+                configurationUpdatePending = false;
+                if (hostPreferences != null) updateConfiguration(hostPreferences);
+            }
+        });
+    }
+
+    private synchronized void updateConfiguration(SharedPreferences preferences) {
         try {
-            FeatureSettings settings = FeatureSettings.readFrom(preferences);
+            ConfigurationSnapshot snapshot = ConfigurationSnapshot.readFrom(preferences);
+            Map<String, ?> values = snapshot.values;
+            FeatureSettings settings = snapshot.features;
+            ExtendedSettings extended = snapshot.extended;
+            LocalOptions options = snapshot.options;
+
+            boolean initial = lastConfigurationValues == null;
+            ConfigurationChanges changes = ConfigurationChanges.between(lastConfigurationValues, values);
+            if (!initial && changes.isEmpty()) return;
+
             currentSettings = settings;
-            ExtendedSettings extended = ExtendedSettings.readFrom(preferences);
             extendedSettings = extended;
-            LocalOptions options = LocalOptions.readFrom(preferences);
             localOptions = options;
-            if (nativeFollowLists != null) nativeFollowLists.setOptions(options);
-            if (automationDispatcher != null) automationDispatcher.setOptions(options);
+            lastConfigurationValues = values;
+
+            boolean feedFilterChanged = initial || changes.any("feed_filter_enabled", "hide_ads", "hide_lives",
+                    "hide_image_posts", "hide_recommendation_cards", "hide_recommendation_merchants",
+                    "keyword_filter_enabled", "keyword", "minimum_duration_enabled", "minimum_duration_seconds",
+                    "minimum_likes_enabled", "minimum_like_count", "filter_interrupt", "hide_mini_games",
+                    "hide_long_videos", "maximum_duration_seconds");
+            boolean downloadChanged = initial || changes.any("download_enabled", "remove_watermark",
+                    "download_custom_name", "download_name_template", "remove_download_limits");
+            boolean replyChanged = initial || changes.any("automation_enabled", "native_auto_reply", "reply_global",
+                    "reply_targets", "reply_mode", "reply_prompt", "reply_delay_seconds", "auto_message_text",
+                    "reply_keywords", "reply_scope_mode", "reply_scope_relations", "reply_scope_fields",
+                    "reply_scope_keywords", "reply_scope_users", "reply_filter_mode", "reply_filter_keywords",
+                    "reply_filter_fields", "reply_private_chats", "reply_group_chats", "reply_group_scope_mode",
+                    "reply_group_targets", "reply_group_mode", "reply_group_members", "reply_random",
+                    "ai_model_settings_v2", "streak_enabled", "streak_targets", "streak_content",
+                    "streak_content_api", "streak_start", "streak_end", "streak_tip", "streak_reset_token",
+                    "streak_retry_unknown_token");
+            boolean commentAutomationChanged = initial || changes.any("automation_enabled", "native_auto_comment",
+                    "comment_mode", "comment_prompt", "comment_delay_seconds", "auto_comment_text",
+                    "comment_recognize_images", "comment_recognize_video", "comment_scope_mode",
+                    "comment_scope_relations", "comment_scope_fields", "comment_scope_keywords",
+                    "comment_scope_users", "comment_filter_mode", "comment_filter_keywords",
+                    "comment_filter_fields", "ai_model_settings_v2");
+            boolean feedUiChanged = initial || changes.any("hide_interface", "video_right_alpha",
+                    "component_hide_enabled", "component_hide_uniform_enabled", "component_hide_uniform_alpha",
+                    "component_hide_on_switch", "component_hide_open_comments_on_show", "component_hide_show_on_pause",
+                    CustomViewLocator.SETTINGS_KEY) || changes.hasPrefix("component_alpha_");
+            boolean playbackChanged = initial || changes.any("auto_speed", "playback_speed");
+            boolean autoPlayChanged = initial || changes.any("auto_play", "smart_swipe", "pause_auto_on_comments");
+            boolean gestureChanged = initial || changes.any("playback_speed", "toolbar_enabled", "long_press_action",
+                    "double_tap_action", LocalOptions.INTERCEPT_NATIVE_LONG_PRESS, "remove_watermark",
+                    "download_custom_name", "download_name_template", "remove_download_limits")
+                    || changes.hasPrefix("long_press_") || changes.hasPrefix("double_tap_")
+                    || changes.hasPrefix("toolbar_");
+            boolean messageRecallChanged = initial || changes.any("prevent_message_recall", "recall_self",
+                    "recall_other", "recall_background");
+            boolean spoofChanged = initial || changes.any("spoof_version", "fake_version_name", "fake_version_code",
+                    "spoof_profile", "profile_like_count", "profile_following_count", "profile_follower_count",
+                    "profile_mutual_count");
+
+            if (nativeFollowLists != null && (initial || changes.any("reply_scope_mode", "comment_scope_mode",
+                    "reply_private_chats", "reply_global", "reply_scope_relations", "reply_targets",
+                    "reply_group_targets", "reply_group_members", "comment_scope_relations", "comment_scope_users",
+                    NativeFollowLists.REFRESH_KEY))) {
+                nativeFollowLists.setOptions(options);
+            }
+            if (automationDispatcher != null && (replyChanged || commentAutomationChanged
+                    || changes.any("reply_tip", "comment_tip", "reply_notice_seconds", "comment_notice_seconds",
+                    "streak_tip", "reply_save_history", "comment_save_history"))) {
+                automationDispatcher.setOptions(options);
+            }
             FeedAdFilterHook hook = feedAdFilterHook;
-            if (hook != null) {
+            if (hook != null && feedFilterChanged) {
                 hook.setSettings(settings);
                 hook.setOptions(options);
             }
-            if (hostBehaviorHooks != null) hostBehaviorHooks.setOptions(options);
-            if (playbackBehaviorHooks != null) playbackBehaviorHooks.setOptions(options);
-            if (profileSpoofHook != null) profileSpoofHook.setOptions(options);
-            if (nativeMessagingHooks != null) nativeMessagingHooks.setOptions(options);
-            if (recallHighlightHook != null) recallHighlightHook.setOptions(options);
-            if (feedGestureToolsHook != null) feedGestureToolsHook.setOptions(options);
-            if (directMessageSpeechHook != null) directMessageSpeechHook.setOptions(options);
-            if (mediaModelHook != null) mediaModelHook.setOptions(options);
-            if (commentEnhancementsHook != null) commentEnhancementsHook.setOptions(options);
-            if (commentVoiceHook != null) commentVoiceHook.setOptions(options);
-            if (nativeCommentSpeechHook != null) nativeCommentSpeechHook.setOptions(options);
+            if (hostBehaviorHooks != null && (initial || changes.any("remove_splash_ads", "remove_update_dialog",
+                    "remove_teen_dialog", "hide_video_black_edges", "hide_camera_plus",
+                    "disable_double_tap_like", "prevent_skip_hidden", "prevent_insert_video",
+                    "block_long_press_speed"))) hostBehaviorHooks.setOptions(options);
+            if (playbackBehaviorHooks != null && playbackChanged) playbackBehaviorHooks.setOptions(options);
+            if (profileSpoofHook != null && spoofChanged) profileSpoofHook.setOptions(options);
+            if (nativeMessagingHooks != null && (replyChanged || messageRecallChanged)) nativeMessagingHooks.setOptions(options);
+            if (recallHighlightHook != null && messageRecallChanged) recallHighlightHook.setOptions(options);
+            if (feedGestureToolsHook != null && gestureChanged) feedGestureToolsHook.setOptions(options);
+            if (directMessageSpeechHook != null && (initial || changes.hasPrefix("dm_") || changes.hasPrefix("tts_"))) {
+                directMessageSpeechHook.setOptions(options);
+            }
+            if (mediaModelHook != null && (initial || changes.any("remove_download_limits"))) mediaModelHook.setOptions(options);
+            if (commentEnhancementsHook != null && (initial || changes.any("comment_append_suffix", "comment_suffix",
+                    "colored_comment", "colored_comment_type"))) commentEnhancementsHook.setOptions(options);
+            if (commentVoiceHook != null && (initial || changes.any("comment_voice_replace", "comment_voice_path"))) {
+                commentVoiceHook.setOptions(options);
+            }
+            if (nativeCommentSpeechHook != null && (initial || changes.any("comment_tts", "tts_engine", "tts_language",
+                    "tts_rate", "tts_pitch"))) nativeCommentSpeechHook.setOptions(options);
             AutoLikeHook autoLike = autoLikeHook;
-            if (autoLike != null) autoLike.setSettings(settings);
+            if (autoLike != null && (initial || changes.any("automation_enabled", "auto_like_enabled"))) {
+                autoLike.setSettings(settings);
+            }
             AutoFollowHook autoFollow = autoFollowHook;
-            if (autoFollow != null) autoFollow.setSettings(settings);
+            if (autoFollow != null && (initial || changes.any("automation_enabled", "auto_follow_enabled"))) {
+                autoFollow.setSettings(settings);
+            }
             AutoPlayHook autoPlay = autoPlayHook;
-            if (autoPlay != null) autoPlay.setSettings(extended, options);
+            if (autoPlay != null && autoPlayChanged) autoPlay.setSettings(extended, options);
             AutoCommentHook autoComment = autoCommentDraftHook;
-            if (autoComment != null) autoComment.setOptions(options);
+            if (autoComment != null && commentAutomationChanged) autoComment.setOptions(options);
             AutoMessageDraftHook autoMessage = autoMessageDraftHook;
-            if (autoMessage != null) autoMessage.setSettings(settings, extended);
+            if (autoMessage != null && (initial || changes.any("automation_enabled", "auto_message_enabled",
+                    "native_auto_reply", "auto_message_text", "hide_interface"))) {
+                autoMessage.setSettings(settings, extended);
+            }
             CommentToolsHook commentHook = commentToolsHook;
-            if (commentHook != null) commentHook.setSettings(extended);
+            if (commentHook != null && (initial || changes.any("copy_comment_text", "comment_media_tools", "copy_source_data"))) {
+                commentHook.setSettings(extended);
+            }
             ImmersiveModeController immersive = immersiveModeController;
-            if (immersive != null) immersive.setSettings(extended);
+            if (immersive != null && (initial || changes.any("remove_black_edges", "hide_navigation_bar"))) {
+                immersive.setSettings(extended);
+            }
             HomeNavigationHideController navigation = homeNavigationHideController;
-            if (navigation != null) navigation.setSettings(extended);
+            if (navigation != null && feedUiChanged) navigation.setSettings(extended);
             DownloadActionHook downloadHook = downloadActionHook;
-            if (downloadHook != null) {
+            if (downloadHook != null && downloadChanged) {
                 downloadHook.setSettings(settings);
                 downloadHook.setOptions(options);
             }
             VersionInfoHook versionHook = versionInfoHook;
-            if (versionHook != null) versionHook.setSettings(extended);
+            if (versionHook != null && (initial || changes.any("spoof_version", "fake_version_name", "fake_version_code"))) {
+                versionHook.setSettings(extended);
+            }
             TopTabFilterHook topTabHook = topTabFilterHook;
-            if (topTabHook != null) topTabHook.setSettings(extended);
+            if (topTabHook != null && (initial || changes.any("hide_top_tabs", "hidden_top_tabs"))) topTabHook.setSettings(extended);
             FeedUiHideHook uiHook = feedUiHideHook;
-            if (uiHook != null) uiHook.setSettings(extended);
+            if (uiHook != null && feedUiChanged) uiHook.setSettings(extended);
             RefreshConfirmHook refreshHook = refreshConfirmHook;
-            if (refreshHook != null) refreshHook.setSettings(extended);
+            if (refreshHook != null && (initial || changes.any("confirm_refresh"))) refreshHook.setSettings(extended);
             log(3, TAG, "Configuration updated: feedFilter=" + settings.feedFilterEnabled
                     + ", hideAds=" + settings.hideAds);
         } catch (RuntimeException exception) {
@@ -811,7 +922,7 @@ public final class DouAiModule extends XposedModule {
             snapshot.putBoolean("feature." + key + ".installed",
                     autoPlayHook != null && autoPlayHook.supports(key));
         }
-        snapshot.putBoolean("feature.spoof_profile.installed", profileSpoofHook != null);
+        snapshot.putBoolean("feature.spoof_profile.installed", profileSpoofHook != null && profileSpoofHook.isActive());
         snapshot.putBoolean("feature.prevent_message_recall.installed", nativeMessagingHooks != null
                 && nativeMessagingHooks.supports("prevent_message_recall"));
         snapshot.putBoolean("feature.native_auto_reply.installed", nativeMessagingHooks != null
@@ -820,7 +931,7 @@ public final class DouAiModule extends XposedModule {
         snapshot.putBoolean("feature.comment_enhancements.installed", commentEnhancementsHook != null);
         snapshot.putBoolean("feature.comment_voice.installed", commentVoiceHook != null);
         snapshot.putBoolean("feature.comment_tts.installed", nativeCommentSpeechHook != null);
-        snapshot.putBoolean("feature.recall_background.installed", recallHighlightHook != null);
+        snapshot.putBoolean("feature.recall_background.installed", recallHighlightHook != null && recallHighlightHook.isActive());
         snapshot.putBoolean("feature.dm_speech.installed", directMessageSpeechHook != null);
         for (String key : new String[]{"toolbar_enabled", "long_press_action", "double_tap_action"}) {
             snapshot.putBoolean("feature." + key + ".installed",
@@ -842,6 +953,10 @@ public final class DouAiModule extends XposedModule {
         snapshot.putBoolean("top_tab_filter_enabled", extendedSettings != null && extendedSettings.hideTopTabs);
         if (topTabHookFailure != null) snapshot.putString("top_tab_hook_failure", topTabHookFailure);
         snapshot.putBoolean("feed_ui_hook_installed", feedUiHideHook != null);
+        snapshot.putBoolean("feed_ui_video_hook_installed", feedUiHideHook != null
+                && feedUiHideHook.isVideoLifecycleInstalled());
+        snapshot.putBoolean("feed_ui_image_hook_installed", feedUiHideHook != null
+                && feedUiHideHook.isImageLifecycleInstalled());
         snapshot.putBoolean("feed_ui_hide_enabled", extendedSettings != null && extendedSettings.hideInterface);
         snapshot.putInt("feed_ui_alpha_percent",
                 extendedSettings == null ? 100 : extendedSettings.videoRightAlpha);
@@ -861,6 +976,10 @@ public final class DouAiModule extends XposedModule {
         snapshot.putInt("feed_ui_card_scans", feedUiHook == null ? 0 : feedUiHook.getCardScans());
         snapshot.putInt("feed_ui_predraw_rechecks",
                 feedUiHook == null ? 0 : feedUiHook.getPreDrawRechecks());
+        snapshot.putInt("feed_ui_view_searches",
+                feedUiHook == null ? 0 : feedUiHook.getViewSearches());
+        snapshot.putInt("feed_ui_resource_mismatches",
+                feedUiHook == null ? 0 : feedUiHook.getResourceMismatchCount());
         snapshot.putInt("feed_ui_reapplied_views",
                 feedUiHook == null ? 0 : feedUiHook.getHostStateResets());
         snapshot.putInt("feed_ui_hidden_views", feedUiHook == null ? 0 : feedUiHook.getHiddenViews());
@@ -881,6 +1000,8 @@ public final class DouAiModule extends XposedModule {
         snapshot.putBoolean("auto_comment_hook_installed", autoCommentDraftHook != null);
         snapshot.putBoolean("auto_comment_enabled",
                 settings.automationEnabled && localOptions.enabled("native_auto_comment"));
+        snapshot.putInt("unknown_streak_count",
+                nativeMessagingHooks == null ? 0 : nativeMessagingHooks.unknownStreakCount());
         if (autoCommentDraftHookFailure != null) {
             snapshot.putString("auto_comment_hook_failure", autoCommentDraftHookFailure);
         }
@@ -900,6 +1021,7 @@ public final class DouAiModule extends XposedModule {
         snapshot.putBoolean("immersive_enabled", extendedSettings != null
                 && (extendedSettings.removeBlackEdges || extendedSettings.hideNavigationBar));
         if (immersiveModeFailure != null) snapshot.putString("immersive_hook_failure", immersiveModeFailure);
+        HostAdaptationDiagnostics.append(snapshot, hostVersionEvidence, hostRulesFingerprint, hostScanReport);
         return snapshot;
     }
 

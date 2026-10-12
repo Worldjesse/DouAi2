@@ -44,6 +44,7 @@ import java.util.concurrent.locks.LockSupport;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
+import okhttp3.mockwebserver.SocketPolicy;
 
 import static org.junit.Assert.*;
 
@@ -92,8 +93,8 @@ public final class ModuleSettingsReferenceTest {
                 {"AUTO_COMMENT", "开启自动评论", "评论模式", "评论内容", "作品范围", "素材识别", "发送与记录"},
                 {"COMMENT", "评论自动添加后缀", "后缀内容", "替换语音文件",
                         "评论自动文本转语音(文本前面输入\"#\"符号将自动转换)", "长按操作", "彩色评论", "彩色评论类型"},
-                {"STREAK", "自动续火花", "选择用户", "续火花内容", "续火花成功弹出Tip", "清空续火花记录",
-                        "续火花限制时间", "内容Api"},
+                {"STREAK", "自动续火花", "选择用户", "续火花内容", "续火花成功弹出Tip",
+                        "重试结果未知的续火花", "清空续火花记录", "续火花限制时间", "内容Api"},
                 {"MESSAGE", "消息防撤回", "自己撤回的消息", "对方撤回的消息", "撤回的背景色", "替换私聊语音",
                         "自动文本转语音(文本前面输入\"#\"符号将自动转换)"},
                 {"SPOOF", "伪装总开关", "获赞数量", "关注数量", "粉丝数量", "互关数量", "版本信息"},
@@ -172,6 +173,28 @@ public final class ModuleSettingsReferenceTest {
         View reopened = openCategory("FILTER");
         assertFalse(toggle(reopened, "去推荐卡片开关").isChecked());
         assertTrue(toggle(reopened, "去推荐商家开关").isChecked());
+    }
+
+    @Test
+    public void playbackSpeedRejectsInvalidValuesAndDisplaysTheEffectiveLegacyValue() {
+        store.putString("playback_speed", "99");
+        View page = openCategory("AUTOPLAY");
+        assertEquals("2", ((TextView) page.findViewWithTag("settings.value.倍速数值")).getText().toString());
+
+        option(page, "倍速数值").performClick();
+        AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
+        EditText input = editor.getWindow().getDecorView().findViewWithTag("settings.input.倍速数值");
+        assertNotNull(input);
+        input.setText("4.01");
+        editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertTrue(editor.isShowing());
+        assertEquals("99", store.getString("playback_speed", ""));
+
+        input.setText("0.25");
+        editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertFalse(editor.isShowing());
+        assertEquals("0.25", store.getString("playback_speed", ""));
+        assertEquals("0.25", ((TextView) page.findViewWithTag("settings.value.倍速数值")).getText().toString());
     }
 
     @Test
@@ -440,6 +463,22 @@ public final class ModuleSettingsReferenceTest {
     }
 
     @Test
+    public void unknownStreakRetryRequiresExplicitConfirmation() {
+        View page = openCategory("STREAK");
+        option(page, "重试结果未知的续火花").performClick();
+        AlertDialog confirmation = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(containsText(confirmation.getWindow().getDecorView(), "可能已经到达对方"));
+        confirmation.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+        assertNull(store.getString("streak_retry_unknown_token", null));
+
+        option(page, "重试结果未知的续火花").performClick();
+        confirmation = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(confirmation.getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        ShadowLooper.idleMainLooper();
+        assertFalse(store.getString("streak_retry_unknown_token", "").isEmpty());
+    }
+
+    @Test
     public void extensionOpensVersionedAiProfilesAndDismissesItsChild() {
         View extension = openCategory("EXTENSION");
         Dialog category = ShadowDialog.getLatestDialog();
@@ -558,6 +597,68 @@ public final class ModuleSettingsReferenceTest {
 
         screen.dismissChildPages();
         assertFalse(editor.isShowing());
+    }
+
+    @Test public void closingModelEditorCancelsItsCatalogAndLetsNextEditorFetch() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            server.enqueue(new MockResponse().setHeader("Content-Type", "application/json")
+                    .setBody("{\"data\":[{\"id\":\"next-model\"}]}"));
+            server.start();
+            AiModelConfig config = AiModelConfig.fromJson(testAiProfile("catalog", "模型列表", "saved-model")
+                    .toJson().put("apiEndpoint", server.url("/v1").toString())
+                    .put("allowInsecureHttp", true).put("timeoutSeconds", 30));
+            new AiModelSettings(Arrays.asList(config), config.id).save(store);
+            option(openCategory("EXTENSION"), "AI 模型设置").performClick();
+            View manager = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+            manager.findViewWithTag("ai.edit.catalog").performClick();
+            Dialog oldEditor = ShadowDialog.getLatestDialog();
+            View oldRoot = oldEditor.getWindow().getDecorView();
+            assertTrue(oldRoot.findViewWithTag("ai.fetch_models").performClick());
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            oldEditor.dismiss();
+            ShadowLooper.idleMainLooper();
+
+            manager.findViewWithTag("ai.edit.catalog").performClick();
+            Dialog nextEditor = ShadowDialog.getLatestDialog();
+            View nextRoot = nextEditor.getWindow().getDecorView();
+            assertTrue(nextRoot.findViewWithTag("ai.fetch_models").performClick());
+            assertNotNull("The cancelled catalog must release the shared worker",
+                    server.takeRequest(2, TimeUnit.SECONDS));
+            TextView nextStatus = nextRoot.findViewWithTag("ai.status");
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (!nextStatus.getText().toString().startsWith("已获取") && System.nanoTime() < deadline) {
+                ShadowLooper.idleMainLooper();
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
+            }
+            ShadowLooper.idleMainLooper();
+            assertEquals("已获取 1 个模型", nextStatus.getText().toString());
+            assertEquals("正在获取模型列表…", ((TextView) oldRoot.findViewWithTag("ai.status")).getText().toString());
+            assertFalse(oldEditor.isShowing());
+            assertTrue(nextEditor.isShowing());
+            assertTrue(containsText(ShadowDialog.getLatestDialog().getWindow().getDecorView(), "next-model"));
+            assertEquals("saved-model", AiModelSettings.read(store).selected().modelName);
+        }
+    }
+
+    @Test public void closingSettingsClosesEditorWithActiveCatalog() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            server.start();
+            AiModelConfig config = AiModelConfig.fromJson(testAiProfile("catalog-close", "模型列表", "saved-model")
+                    .toJson().put("apiEndpoint", server.url("/v1").toString())
+                    .put("allowInsecureHttp", true).put("timeoutSeconds", 30));
+            new AiModelSettings(Arrays.asList(config), config.id).save(store);
+            option(openCategory("EXTENSION"), "AI 模型设置").performClick();
+            ShadowDialog.getLatestDialog().getWindow().getDecorView()
+                    .findViewWithTag("ai.edit.catalog-close").performClick();
+            Dialog editor = ShadowDialog.getLatestDialog();
+            assertTrue(editor.getWindow().getDecorView().findViewWithTag("ai.fetch_models").performClick());
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            screen.close();
+            ShadowLooper.idleMainLooper();
+            assertFalse(editor.isShowing());
+        }
     }
 
     private static AiModelConfig testAiProfile(String id, String name, String model) throws Exception {
@@ -759,7 +860,7 @@ public final class ModuleSettingsReferenceTest {
     }
 
     @Test
-    public void historyDetailsAreReadableAndClosingTheCategoryClosesTheirChildWindow() {
+    public void historyDetailsAreReadableAndClosingTheCategoryClosesTheirChildWindow() throws InterruptedException {
         com.douai.module.config.AutomationHistoryStore history = new com.douai.module.config.AutomationHistoryStore(activity);
         history.upsert(new com.douai.module.config.AutomationHistoryStore.Entry("ui-history", "reply", "target-id",
                 "目标用户", "收到消息", "生成回复", "model", "sent", System.currentTimeMillis(), System.currentTimeMillis()));
@@ -767,7 +868,18 @@ public final class ModuleSettingsReferenceTest {
         option(reply, "发送与记录").performClick();
         option(ShadowDialog.getLatestDialog().getWindow().getDecorView(), "回复历史记录").performClick();
         Dialog list = ShadowDialog.getLatestDialog();
-        View row = list.getWindow().getDecorView().findViewWithTag("automation.history.ui-history");
+        ListView historyRows = list.getWindow().getDecorView().findViewWithTag("automation.history");
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+        View row = null;
+        while (row == null && System.nanoTime() < deadline) {
+            ShadowLooper.idleMainLooper();
+            row = historyRows.getAdapter().getView(0, null, historyRows);
+            if (!"automation.history.ui-history".equals(row.getTag())) {
+                row = null;
+                java.util.concurrent.locks.LockSupport.parkNanos(
+                        java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(10));
+            }
+        }
         assertNotNull(row);
         row.performClick();
         Dialog detail = ShadowDialog.getLatestDialog();
@@ -928,6 +1040,50 @@ public final class ModuleSettingsReferenceTest {
         assertTrue(store.load().autoLikeEnabled);
         assertFalse(store.load().automationEnabled);
         assertFalse(store.load().autoMessageEnabled);
+    }
+
+    @Test public void closingAutoplayCategoryClosesItsAutomationDialog() {
+        View page = openCategory("AUTOPLAY");
+        Dialog category = ShadowDialog.getLatestDialog();
+        option(page, "互动自动化").performClick();
+        Dialog automation = ShadowDialog.getLatestDialog();
+        assertTrue(automation.isShowing());
+        category.dismiss();
+        ShadowLooper.idleMainLooper();
+        assertFalse(automation.isShowing());
+    }
+
+    @Test public void automationDialogRefreshesParentSnapshotAndSurvivesOtherCategorySaves() throws Exception {
+        View autoplay = openCategory("AUTOPLAY");
+        option(autoplay, "互动自动化").performClick();
+        Dialog automation = ShadowDialog.getLatestDialog();
+        View controls = automation.getWindow().getDecorView();
+        toggle(controls, "自动化总开关").setChecked(true);
+        toggle(controls, "自动点赞").setChecked(true);
+        java.lang.reflect.Field snapshot = ModuleSettingsScreen.class.getDeclaredField("settings");
+        snapshot.setAccessible(true);
+        FeatureSettings parent = (FeatureSettings) snapshot.get(screen);
+        assertTrue(parent.automationEnabled);
+        assertTrue(parent.autoLikeEnabled);
+        automation.dismiss();
+        ShadowLooper.idleMainLooper();
+        toggle(autoplay, "自动滑动到下一个视频").setChecked(true);
+        assertTrue(store.load().automationEnabled);
+        assertTrue(store.load().autoLikeEnabled);
+        screen.dismissChildPages();
+        toggle(openCategory("DOWNLOAD"), "启用下载菜单").setChecked(true);
+        assertTrue(store.load().downloadEnabled);
+        assertTrue(store.load().automationEnabled);
+        assertTrue(store.load().autoLikeEnabled);
+
+        screen.dismissChildPages();
+        option(openCategory("AUTOPLAY"), "互动自动化").performClick();
+        ShadowDialog.getLatestDialog().getWindow().getDecorView()
+                .findViewWithTag("automation.stop").performClick();
+        parent = (FeatureSettings) snapshot.get(screen);
+        assertFalse(parent.automationEnabled);
+        assertFalse(parent.autoLikeEnabled);
+        assertTrue(parent.downloadEnabled);
     }
 
     @Test

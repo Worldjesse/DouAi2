@@ -113,18 +113,63 @@ public final class ChatCompletionClient {
     }
 
     public static List<String> fetchModels(AiModelConfig config) throws Exception {
-        config.validate(false);
-        String url = modelsEndpoint(config);
-        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
-        configure(connection, config);
-        try {
-            connection.setRequestMethod("GET");
-            setAuthentication(connection, config, url);
-            int status = connection.getResponseCode();
-            String body = readResponse(connection, status);
-            if (status < 200 || status >= 300) throw httpFailure(status);
-            return parseModelIds(config.protocol, body);
-        } finally { connection.disconnect(); }
+        return new ModelCatalogRequest().fetch(config);
+    }
+
+    /** One catalog operation; cancellation also releases a blocked HTTP connection. */
+    public static final class ModelCatalogRequest {
+        private boolean cancelled;
+        private boolean started;
+        private HttpURLConnection connection;
+
+        public List<String> fetch(AiModelConfig config) throws Exception {
+            synchronized (this) {
+                ensureActive();
+                if (started) throw new IllegalStateException("模型列表请求已启动");
+                started = true;
+            }
+            config.validate(false);
+            String url = modelsEndpoint(config);
+            HttpURLConnection opened = (HttpURLConnection) new URL(url).openConnection();
+            try {
+                synchronized (this) {
+                    ensureActive();
+                    connection = opened;
+                }
+                configure(opened, config);
+                opened.setRequestMethod("GET");
+                setAuthentication(opened, config, url);
+                ensureActive();
+                int status = opened.getResponseCode();
+                String body = readResponse(opened, status);
+                ensureActive();
+                if (status < 200 || status >= 300) throw httpFailure(status);
+                List<String> models = parseModelIds(config.protocol, body);
+                ensureActive();
+                return models;
+            } catch (Exception failure) {
+                ensureActive();
+                throw failure;
+            } finally {
+                synchronized (this) {
+                    if (connection == opened) connection = null;
+                }
+                opened.disconnect();
+            }
+        }
+
+        public void cancel() {
+            HttpURLConnection active;
+            synchronized (this) {
+                cancelled = true;
+                active = connection;
+            }
+            if (active != null) active.disconnect();
+        }
+
+        private synchronized void ensureActive() {
+            if (cancelled || Thread.currentThread().isInterrupted()) throw cancelled();
+        }
     }
 
     public static String requestEndpoint(AiModelConfig config, String model) {

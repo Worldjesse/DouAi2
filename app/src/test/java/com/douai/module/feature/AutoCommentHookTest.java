@@ -58,6 +58,7 @@ public final class AutoCommentHookTest {
     private Holder holder;
     private EditText input;
     private final List<String> logs = new ArrayList<>();
+    private java.util.function.Supplier<MediaReadCancellation> mediaReads = MediaReadCancellation::new;
 
     @Before public void setup() throws Exception {
         FollowListSnapshot.reset();
@@ -77,7 +78,7 @@ public final class AutoCommentHookTest {
         framework = new Framework();
         Request.reset(framework);
         hook = AutoCommentHook.install(framework.api, report(), getClass().getClassLoader(), activity,
-                options(false), dispatcher, logs::add);
+                options(false), dispatcher, logs::add, () -> mediaReads.get());
         ShadowLooper.idleMainLooper();
     }
 
@@ -170,6 +171,98 @@ public final class AutoCommentHookTest {
             assertEquals(0, Request.attempts);
             assertEquals("cancelled", entry("work").status);
             assertEquals(1, server.getRequestCount());
+        }
+    }
+
+    @Test public void cancellingBlockedMediaLetsNextOriginalWorkGenerate() throws Throwable {
+        BlockingMediaConnection connection = new BlockingMediaConnection(false);
+        mediaReads = () -> new MediaReadCancellation(60_000, System::nanoTime, uri -> connection);
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(modelResponse("{\"comment\":\"下一作品评论\"}"));
+            setOptions(new LocalOptions(aiOptions(server, true)));
+            holder.work.images = Collections.singletonList(new Picture("https://p.byteimg.com/image.jpg"));
+            selectWork();
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(3));
+            assertTrue(connection.blocked.await(2, TimeUnit.SECONDS));
+            notice().performLongClick();
+            awaitGeneration(); flushDispatch();
+            assertTrue(connection.disconnected);
+            assertEquals("cancelled", entry("work").status);
+            assertEquals(0, server.getRequestCount());
+            holder.work = work("another");
+            generate(); advanceSeconds(8);
+            assertEquals(1, server.getRequestCount());
+            assertEquals(1, Request.attempts);
+            assertEquals("another", Request.models.get(0).y.work.id);
+        } finally { connection.disconnect(); }
+    }
+
+    @Test public void disablingCommentsDuringBlockedMediaDisconnectsOldTask() throws Throwable {
+        BlockingMediaConnection connection = new BlockingMediaConnection(true);
+        mediaReads = () -> new MediaReadCancellation(60_000, System::nanoTime, uri -> connection);
+        try (MockWebServer server = new MockWebServer()) {
+            Map<String, Object> config = aiOptions(server, true);
+            setOptions(new LocalOptions(config));
+            holder.work.images = Collections.singletonList(new Picture("https://p.byteimg.com/image.jpg"));
+            selectWork();
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(3));
+            assertTrue(connection.blocked.await(2, TimeUnit.SECONDS));
+            config.put("native_auto_comment", false);
+            setOptions(new LocalOptions(config));
+            awaitGeneration(); flushDispatch();
+            assertTrue(connection.disconnected);
+            assertEquals("cancelled", entry("work").status);
+            assertEquals(0, server.getRequestCount());
+            assertEquals(0, Request.attempts);
+        } finally { connection.disconnect(); }
+    }
+
+    @Test public void generationDeadlineCompletesEvenBeforeWorkerStarts() throws Throwable {
+        java.util.concurrent.CountDownLatch blocked = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        ScheduledThreadPoolExecutor worker = (ScheduledThreadPoolExecutor) HostTargets.read(hook, "worker");
+        worker.submit(() -> {
+            blocked.countDown();
+            try { release.await(); } catch (InterruptedException ignored) { }
+        });
+        try {
+            assertTrue(blocked.await(2, TimeUnit.SECONDS));
+            setOptions(options(true));
+            selectWork();
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(3));
+            for (int attempt = 1; attempt <= 3; attempt++) {
+                ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(120));
+                if (attempt < 3) ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(attempt));
+            }
+            flushDispatch();
+            assertEquals("failed", entry("work").status);
+            assertEquals(0, Request.attempts);
+            release.countDown();
+            awaitGeneration(); flushDispatch();
+            assertEquals(0, Request.attempts);
+            holder.work = work("another");
+            generate(); advanceSeconds(8);
+            assertEquals(1, Request.attempts);
+            assertEquals("another", Request.models.get(0).y.work.id);
+        } finally { release.countDown(); }
+    }
+
+    @Test public void generationDeadlineDuringAiRequestRetriesAndPublishesOnlyNewResult() throws Throwable {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE));
+            server.enqueue(modelResponse("{\"comment\":\"重试后的评论\"}"));
+            setOptions(new LocalOptions(aiOptions(server, false)));
+            selectWork();
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(3));
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(120));
+            awaitGeneration(); flushDispatch();
+            assertEquals(0, Request.attempts);
+            advanceSeconds(1);
+            assertEquals(2, server.getRequestCount());
+            assertEquals(1, Request.attempts);
+            assertEquals("重试后的评论", Request.models.get(0).a);
+            assertEquals("sent", entry("work").status);
         }
     }
 
@@ -407,6 +500,27 @@ public final class AutoCommentHookTest {
         assertEquals(1, Request.attempts);
         assertEquals("another", Request.models.get(0).y.work.id);
         assertEquals("cancelled", entry("work").status);
+    }
+
+    @Test public void returningToCancelledWorkCannotStealCancelLatestFromQueuedWork() throws Throwable {
+        setOptions(options(true));
+        Work original = holder.work;
+        selectWork();
+        notice().performLongClick();
+        flushDispatch();
+        assertEquals("cancelled", entry("work").status);
+
+        holder.work = work("another");
+        selectWork();
+        holder.work = original;
+        selectWork();
+        assertEquals(1, ((CommentRingView) notice()).getQueueCount());
+
+        notice().performLongClick();
+        flushDispatch();
+        assertEquals("cancelled", entry("another").status);
+        assertEquals(0, Request.attempts);
+        assertNull(notice());
     }
 
     @Test public void pauseBeforeGenerationPreservesOriginalQueuedWork() throws Throwable {
@@ -832,6 +946,7 @@ public final class AutoCommentHookTest {
         public String title;
         public String item_title;
         public String preview_title;
+        public List<Picture> images;
         public Author author = new Author();
         public String getAid() { return id; }
         public boolean getIsAdAweme() { return false; }

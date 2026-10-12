@@ -24,6 +24,9 @@ import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.text.TextRange
 import com.douai.module.config.AiModelConfig
+import com.douai.module.config.AiModelSettings
+import com.douai.module.config.FeatureSettings
+import com.douai.module.config.SettingsStore
 import com.douai.module.feature.ChatImage
 import org.json.JSONObject
 import org.junit.After
@@ -49,10 +52,80 @@ class MiuixEditorsInteractionTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
     private var chat: AiTestChatDialog? = null
     private var prompt: PromptEditorDialog? = null
+    private var modelEditor: AiModelEditor? = null
+    private var automationSettings: AutomationSettingsDialog? = null
     private val worker = ManualWorker()
     private val session = FakeSession()
 
-    @After fun closeEditors() { compose.runOnUiThread { chat?.dismiss(); prompt?.dismiss() } }
+    @After fun closeEditors() { compose.runOnUiThread {
+        chat?.dismiss(); prompt?.dismiss(); modelEditor?.close(); automationSettings?.close()
+    } }
+
+    @Test fun automationDialogUsesMiuixTogglesAndStopControl() {
+        var settings = FeatureSettings.defaults()
+        val values = mutableMapOf<String, Boolean>()
+        val store = object : SettingsStore {
+            override fun load() = settings
+            override fun save(value: FeatureSettings) { settings = value }
+            override fun getBoolean(key: String, fallback: Boolean) = values[key] ?: fallback
+            override fun getString(key: String, fallback: String) = fallback
+            override fun putBoolean(key: String, value: Boolean) { values[key] = value }
+            override fun putString(key: String, value: String) = Unit
+            override fun isInHost() = true
+        }
+        compose.runOnUiThread {
+            automationSettings = AutomationSettingsDialog(compose.activity, store, true)
+            automationSettings!!.dialog().show()
+        }
+        compose.onNodeWithTag("settings.toggle.自动点赞").assertIsNotEnabled()
+        compose.onNodeWithTag("settings.toggle.自动化总开关").performClick()
+        compose.onNodeWithTag("settings.toggle.自动点赞").performClick()
+        compose.runOnIdle { assertTrue(settings.automationEnabled); assertTrue(settings.autoLikeEnabled) }
+        compose.onNodeWithTag("automation.stop").performClick()
+        compose.onNodeWithTag("settings.toggle.自动点赞").assertIsNotEnabled()
+        compose.runOnIdle {
+            assertFalse(settings.automationEnabled)
+            assertFalse(settings.autoLikeEnabled)
+            assertFalse(store.getBoolean("native_auto_reply", true))
+            assertFalse(store.getBoolean("native_auto_comment", true))
+            assertFalse(store.getBoolean("streak_enabled", true))
+        }
+    }
+
+    @Test fun modelEditorSavesThroughMiuixFieldsAndRefreshesOnlyAfterPersistence() {
+        val values = mutableMapOf<String, String>()
+        val store = object : SettingsStore {
+            override fun load() = FeatureSettings.defaults()
+            override fun save(settings: FeatureSettings) = Unit
+            override fun getBoolean(key: String, fallback: Boolean) = fallback
+            override fun getString(key: String, fallback: String) = values[key] ?: fallback
+            override fun putBoolean(key: String, value: Boolean) = Unit
+            override fun putString(key: String, value: String) { values[key] = value }
+            override fun isInHost() = true
+        }
+        val config = AiModelConfig.fromJson(JSONObject().put("id", "miuix-editor")
+            .put("name", "旧配置名称").put("apiEndpoint", "https://example.com/v1")
+            .put("modelName", "saved-model"))
+        AiModelSettings(listOf(config), config.id).save(store)
+        var refreshes = 0
+        compose.runOnUiThread {
+            modelEditor = AiModelEditor(compose.activity, store, config, true, { refreshes++ })
+            modelEditor!!.show { dialog, onDismiss ->
+                dialog.setOwnerActivity(compose.activity)
+                dialog.setOnDismissListener { onDismiss.run() }
+                dialog.show()
+            }
+        }
+        compose.onNodeWithTag("settings.input.配置名称").assertIsDisplayed()
+            .performTextReplacement("更新配置名称")
+        compose.onNodeWithTag("miuix.dialog.button.-1").performClick()
+        compose.runOnIdle {
+            assertFalse(modelEditor!!.dialog().isShowing)
+            assertEquals("更新配置名称", AiModelSettings.read(store).selected().name)
+            assertEquals("saved-model", AiModelSettings.read(store).selected().modelName)
+            assertEquals(1, refreshes)
+        }
+    }
 
     @Test fun promptUsesMiuixInputAndCommitsExactWhitespaceOnlyOnSave() {
         var saved: String? = null
@@ -121,6 +194,9 @@ class MiuixEditorsInteractionTest {
         compose.onNodeWithTag("ai.chat.send").performClick()
         completeRequest()
         compose.onNodeWithTag("ai.chat.attachments").assertDoesNotExist()
+        compose.waitUntil(5_000) {
+            compose.onAllNodesWithTag("ai.chat.image").fetchSemanticsNodes().isNotEmpty()
+        }
         compose.onNodeWithTag("ai.chat.image").assertIsDisplayed()
         assertEquals(listOf(""), session.prompts)
         assertEquals(1, session.images.single().size)

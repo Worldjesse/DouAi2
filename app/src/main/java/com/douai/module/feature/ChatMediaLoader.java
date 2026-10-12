@@ -66,14 +66,19 @@ public final class ChatMediaLoader {
     }
 
     static List<ChatImage> loadVideoFile(File file, int maxFrames) throws Exception {
+        return loadVideoFile(file, maxFrames, null);
+    }
+
+    static List<ChatImage> loadVideoFile(File file, int maxFrames, MediaReadCancellation cancellation) throws Exception {
         validateFrames(maxFrames);
         if (!file.isFile() || file.length() == 0 || file.length() > MAX_VIDEO_BYTES) {
             throw new IllegalArgumentException("视频为空或超过 64 MB");
         }
-        checkCancelled();
+        checkCancelled(cancellation);
         MediaMetadataRetriever retriever = new MediaMetadataRetriever();
         try {
             retriever.setDataSource(file.getAbsolutePath());
+            checkCancelled(cancellation);
             if (!"yes".equals(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO))) {
                 throw new IllegalArgumentException("所选文件不包含可读取的视频画面");
             }
@@ -88,14 +93,14 @@ public final class ChatMediaLoader {
             int[] size = boundedDimensions(width, height);
             List<ChatImage> images = new ArrayList<>();
             for (long time : sampleTimes(duration, maxFrames)) {
-                checkCancelled();
+                checkCancelled(cancellation);
                 Bitmap frame = retriever.getScaledFrameAtTime(time, MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
                         size[0], size[1]);
                 if (frame == null) throw new IllegalArgumentException("无法读取视频画面");
-                try { images.add(encode(frame)); }
+                try { checkCancelled(cancellation); images.add(encode(frame)); checkCancelled(cancellation); }
                 finally { frame.recycle(); }
             }
-            checkCancelled();
+            checkCancelled(cancellation);
             return Collections.unmodifiableList(images);
         } finally { retriever.release(); }
     }
@@ -332,20 +337,30 @@ public final class ChatMediaLoader {
     }
 
     static void copyBounded(InputStream input, java.io.OutputStream output, int maximum) throws Exception {
+        copyBounded(input, output, maximum, null);
+    }
+
+    static void copyBounded(InputStream input, java.io.OutputStream output, int maximum,
+                            MediaReadCancellation cancellation) throws Exception {
+        checkCancelled(cancellation);
         byte[] buffer = new byte[8192];
         int count;
         int total = 0;
         while ((count = input.read(buffer)) != -1) {
-            checkCancelled();
+            checkCancelled(cancellation);
             if (count > maximum - total) throw new IllegalArgumentException("媒体文件超过读取大小限制");
             total += count;
             output.write(buffer, 0, count);
         }
-        checkCancelled();
+        checkCancelled(cancellation);
         if (total == 0) throw new IllegalArgumentException("媒体文件为空");
     }
 
     static void checkCancelled() { if (Thread.currentThread().isInterrupted()) throw new CancellationException("媒体读取已取消"); }
+
+    static void checkCancelled(MediaReadCancellation cancellation) throws Exception {
+        if (cancellation != null) cancellation.check(); else checkCancelled();
+    }
 
     static void deleteTemporary(File file) { if (file != null && file.exists()) file.delete(); }
 }

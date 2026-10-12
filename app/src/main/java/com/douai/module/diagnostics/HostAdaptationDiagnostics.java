@@ -1,0 +1,101 @@
+package com.douai.module.diagnostics;
+
+import android.content.Context;
+import android.content.pm.PackageInfo;
+import android.os.Bundle;
+
+import com.douai.module.scan.HostAdaptation;
+import com.douai.module.scan.HostFeatureCatalog;
+import com.douai.module.scan.HostScanReport;
+import com.douai.module.scan.RuleScanResult;
+
+/** Reports static version evidence, rule gaps and installation without claiming runtime success. */
+public final class HostAdaptationDiagnostics {
+    private HostAdaptationDiagnostics() { }
+
+    public static Bundle readInstalledVersion(Context context) {
+        try {
+            // Archive parsing is independent of the module's PackageManager version-spoof hook.
+            String archive = context.getApplicationInfo().sourceDir;
+            return versionEvidence(archive == null ? null
+                    : context.getPackageManager().getPackageArchiveInfo(archive, 0));
+        } catch (RuntimeException failure) {
+            return versionEvidence(null);
+        }
+    }
+
+    public static Bundle versionEvidence(PackageInfo info) {
+        Bundle result = new Bundle();
+        boolean available = info != null && info.versionName != null && info.getLongVersionCode() > 0;
+        result.putBoolean("host_version_available", available);
+        result.putString("host_package", info == null ? null : info.packageName);
+        result.putString("host_version_name", info == null ? null : info.versionName);
+        result.putLong("host_version_code", info == null ? 0L : info.getLongVersionCode());
+        result.putBoolean("host_version_profile_matched", available && HostAdaptation.matchesVersion(
+                info.packageName, info.versionName, info.getLongVersionCode()));
+        return result;
+    }
+
+    public static void append(Bundle snapshot, Bundle version, String rulesFingerprint, HostScanReport report) {
+        snapshot.putAll(version);
+        boolean versionMatched = version.getBoolean("host_version_profile_matched");
+        boolean rulesMatched = HostAdaptation.matchesRules(rulesFingerprint);
+        snapshot.putBoolean("host_adaptation_static_verified", versionMatched && rulesMatched);
+        snapshot.putBoolean("host_adaptation_rules_verified", rulesMatched);
+        snapshot.putString("host_adaptation_rules_asset", HostAdaptation.RULES_ASSET);
+        snapshot.putString("host_adaptation_rules_fingerprint", rulesFingerprint);
+        snapshot.putInt("host_adaptation_resource_count", HostAdaptation.getFeedResources().size());
+        int gaps = 0;
+        int uninstalled = 0;
+        for (HostFeatureCatalog.Feature feature : HostFeatureCatalog.getFeatures()) {
+            StringBuilder missing = new StringBuilder();
+            for (String rule : feature.rules) {
+                RuleScanResult result = report == null ? null : report.getResults().get(rule);
+                if (result == null || result.getStatus() != RuleScanResult.Status.UNIQUE) {
+                    if (missing.length() > 0) missing.append(", ");
+                    missing.append(rule).append('=').append(result == null
+                            ? "MISSING" : result.getStatus().name());
+                }
+            }
+            String prefix = "capability." + feature.id;
+            snapshot.putString(prefix + ".rule_gaps", missing.toString());
+            snapshot.putBoolean(prefix + ".rules_unique", missing.length() == 0);
+            snapshot.putBoolean(prefix + ".installed", snapshot.getBoolean(feature.installedKey));
+            if (missing.length() > 0) gaps++;
+            if (!snapshot.getBoolean(feature.installedKey)) uninstalled++;
+        }
+        snapshot.putInt("host_adaptation_feature_rule_gaps", gaps);
+        snapshot.putInt("host_adaptation_features_uninstalled", uninstalled);
+    }
+
+    public static String describe(Bundle snapshot) {
+        StringBuilder detail = new StringBuilder("宿主版本：");
+        if (snapshot.getBoolean("host_version_available")) {
+            detail.append(snapshot.getString("host_version_name", "未知"))
+                    .append(" / ").append(snapshot.getLong("host_version_code"));
+        } else detail.append("读取失败，未验证");
+        if (snapshot.getBoolean("host_adaptation_static_verified")) {
+            detail.append("\n版本和规则配置匹配 40.6.0 静态验证记录；DEX 规则仍以本次扫描为准。");
+        } else if (!snapshot.getBoolean("host_version_profile_matched")) {
+            detail.append("\n该宿主版本未验证；唯一规则命中和 Hook 安装不构成版本适配证明。");
+        } else {
+            detail.append("\n版本与 40.6.0 一致，当前规则配置未绑定已验证证据。");
+        }
+        int resourceCount = snapshot.getInt("host_adaptation_resource_count");
+        detail.append("\n资源映射：").append(resourceCount)
+                .append(" 项 Feed ID；按运行时包名和资源名校验。");
+        int mismatches = snapshot.getInt("feed_ui_resource_mismatches");
+        if (mismatches > 0) detail.append("已跳过 ").append(mismatches).append(" 个不符的组件 ID。");
+        for (HostFeatureCatalog.Feature feature : HostFeatureCatalog.getFeatures()) {
+            String prefix = "capability." + feature.id;
+            String gaps = snapshot.getString(prefix + ".rule_gaps", "");
+            if (!gaps.isEmpty()) {
+                detail.append('\n').append(feature.label).append("规则缺口：").append(gaps);
+            } else if (snapshot.containsKey(prefix + ".installed")
+                    && !snapshot.getBoolean(prefix + ".installed")) {
+                detail.append('\n').append(feature.label).append("：规则唯一命中，Hook 未安装。");
+            }
+        }
+        return detail.append("\n功能开关与触发计数单独报告；点击、发送及其他实际行为仍需真机确认。").toString();
+    }
+}

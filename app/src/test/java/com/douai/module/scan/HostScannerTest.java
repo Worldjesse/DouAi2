@@ -33,6 +33,8 @@ import java.util.zip.ZipOutputStream;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 public class HostScannerTest {
@@ -179,6 +181,46 @@ public class HostScannerTest {
         new HostScanner().scan(Collections.singletonList(apk), rules, listener);
         assertEquals(Arrays.asList("start:2", "1/2:progress.apk!classes.dex",
                 "2/2:progress.apk!classes2.dex"), progress);
+    }
+
+    @Test
+    public void cacheSaveFailureKeepsCompletedScanReportAndNotifiesListener() throws Exception {
+        File apk = temporaryFolder.newFile("uncached-host.apk");
+        writeApk(apk, entries("classes.dex", dex(classDef("Lfixture/A;", "fetchVideo",
+                "dl_source_primary", "Lfixture/VideoApi;"))));
+        File cacheParent = temporaryFolder.newFile("cache-parent");
+        HostRule rule = HostRule.builder("video_source", "download", HostRule.Kind.METHOD)
+                .methodName("fetchVideo").build();
+        List<Exception> cacheFailures = new ArrayList<>();
+        HostScanner.ProgressListener listener = new HostScanner.ProgressListener() {
+            @Override public void onCacheHit(int dexCount) { }
+            @Override public void onScanStarted(int dexCount) { }
+            @Override public void onDexScanned(int completed, int total, String dexName) { }
+            @Override public void onCacheSaveFailed(Exception failure) { cacheFailures.add(failure); }
+        };
+
+        HostScanReport report = new HostScanner().scanCached(Collections.singletonList(apk),
+                HostRuleSet.of(Collections.singletonList(rule)),
+                new HostScanCache(new File(cacheParent, "host-scan.cache")), listener);
+
+        assertEquals(RuleScanResult.Status.UNIQUE, report.getResults().get("video_source").getStatus());
+        assertEquals(1, cacheFailures.size());
+        assertNotNull(cacheFailures.get(0));
+    }
+
+    @Test
+    public void scanFailureStillPropagatesWhenCacheCannotBeSaved() throws Exception {
+        File apk = temporaryFolder.newFile("invalid-host.apk");
+        writeApk(apk, entries("classes.dex", new byte[8]));
+        File cacheParent = temporaryFolder.newFile("invalid-cache-parent");
+        HostRule rule = HostRule.builder("target", "download", HostRule.Kind.METHOD)
+                .methodName("fetchVideo").build();
+
+        IOException failure = assertThrows(IOException.class, () -> new HostScanner().scanCached(
+                Collections.singletonList(apk), HostRuleSet.of(Collections.singletonList(rule)),
+                new HostScanCache(new File(cacheParent, "host-scan.cache"))));
+
+        assertTrue(failure.getMessage().contains("Unable to parse invalid-host.apk!classes.dex"));
     }
 
     @Test

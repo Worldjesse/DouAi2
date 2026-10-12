@@ -2,6 +2,9 @@ package com.douai.module.feature;
 
 import android.app.Activity;
 import android.content.Context;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.GradientDrawable;
 import android.view.View;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -20,6 +23,7 @@ import org.robolectric.annotation.Config;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -27,6 +31,9 @@ import java.util.Map;
 import io.github.libxposed.api.XposedInterface;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34)
@@ -44,6 +51,7 @@ public final class HostBehaviorViewTest {
         public final TextView F;
         public final LinearLayout root;
         public boolean own;
+        public boolean failOwn;
         public Profile(Context context) {
             root = new LinearLayout(context);
             y = new TextView(context); w = new TextView(context);
@@ -52,8 +60,32 @@ public final class HostBehaviorViewTest {
             y.setText("12"); w.setText("34"); x.setText("56"); F.setText("78");
         }
         public void bind(Object user) { }
-        public boolean own() { return own; }
+        public boolean own() {
+            if (failOwn) throw new IllegalStateException("Profile fixture unavailable");
+            return own;
+        }
         public View root() { return root; }
+    }
+
+    public static final class RecallCell {
+        public String uid = "100";
+        public boolean failMessage;
+        public void bind(RecallHolder holder, int index) { }
+        public RecallMessage message(int index) {
+            if (failMessage) throw new IllegalStateException("Recall fixture unavailable");
+            return new RecallMessage();
+        }
+        public static RecallCell account() { return new RecallCell(); }
+        public RecallCell user() { return this; }
+    }
+
+    public static final class RecallMessage {
+        public String uuid() { return "message"; }
+    }
+
+    public static final class RecallHolder {
+        public final View itemView;
+        public RecallHolder(Context context) { itemView = new View(context); }
     }
 
     @Test public void blackSpacesApplyLiveAndRestoreOwnedVisibility() throws Throwable {
@@ -119,6 +151,68 @@ public final class HostBehaviorViewTest {
         activity.finish();
     }
 
+    @Test public void profileReflectionFailureRevokesRegistrationAndRestoresDisplayedCounts() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        Profile profile = new Profile(activity);
+        profile.own = true;
+        activity.setContentView(profile.root);
+        Harness harness = new Harness();
+        Method bind = Profile.class.getMethod("bind", Object.class);
+        ProfileSpoofHook hook = ProfileSpoofHook.install(harness.framework, report(Map.of(
+                "adv_profile_render", bind, "adv_profile_own", Profile.class.getMethod("own"),
+                "adv_profile_root", Profile.class.getMethod("root"))), getClass().getClassLoader(),
+                activity, new LocalOptions(Map.of("spoof_profile", true, "profile_like_count", "9001")),
+                ignored -> { });
+        try {
+            assertTrue(hook.isActive());
+            harness.invoke(bind, profile);
+            assertEquals("9001", profile.y.getText().toString());
+            profile.failOwn = true;
+            harness.invoke(bind, profile);
+            assertFalse(hook.isActive());
+            assertFalse(harness.interceptors.containsKey(bind));
+            assertEquals("12", profile.y.getText().toString());
+            assertEquals("34", profile.w.getText().toString());
+            assertEquals("56", profile.x.getText().toString());
+            assertEquals("78", profile.F.getText().toString());
+        } finally { hook.close(); activity.finish(); }
+    }
+
+    @Test public void recallReflectionFailureRevokesRegistrationAndRestoresHighlightedBackground() throws Throwable {
+        Context context = RuntimeEnvironment.getApplication();
+        context.getSharedPreferences("douai_message_state", Context.MODE_PRIVATE).edit().clear()
+                .putBoolean("recall.100.message", true).commit();
+        Harness harness = new Harness();
+        Method bind = RecallCell.class.getMethod("bind", RecallHolder.class, int.class);
+        RecallHighlightHook hook = RecallHighlightHook.install(harness.framework, report(Map.of(
+                "adv_im_cell_bind", bind, "adv_im_cell_message", RecallCell.class.getMethod("message", int.class),
+                "adv_im_message_uuid", RecallMessage.class.getMethod("uuid"),
+                "media_account_service", RecallCell.class.getMethod("account"),
+                "media_current_user", RecallCell.class.getMethod("user"))), getClass().getClassLoader(), context,
+                new LocalOptions(Map.of("prevent_message_recall", true, "recall_background", "#2051BA55")),
+                ignored -> { });
+        RecallCell cell = new RecallCell();
+        RecallHolder holder = new RecallHolder(context);
+        GradientDrawable original = new GradientDrawable();
+        original.setColor(Color.BLUE);
+        holder.itemView.setBackground(original);
+        RecallHolder failingHolder = new RecallHolder(context);
+        GradientDrawable failingOriginal = new GradientDrawable();
+        failingOriginal.setColor(Color.RED);
+        failingHolder.itemView.setBackground(failingOriginal);
+        try {
+            assertTrue(hook.isActive());
+            harness.invoke(bind, cell, holder, 0);
+            assertEquals(Color.parseColor("#2051BA55"), ((ColorDrawable) holder.itemView.getBackground()).getColor());
+            cell.failMessage = true;
+            harness.invoke(bind, cell, failingHolder, 0);
+            assertFalse(hook.isActive());
+            assertFalse(harness.interceptors.containsKey(bind));
+            assertSame(original, holder.itemView.getBackground());
+            assertSame(failingOriginal, failingHolder.itemView.getBackground());
+        } finally { hook.close(); }
+    }
+
     private static HostScanReport report(Map<String, Method> methods) {
         java.util.ArrayList<RuleScanResult> results = new java.util.ArrayList<>();
         for (Map.Entry<String, Method> entry : methods.entrySet()) {
@@ -149,12 +243,13 @@ public final class HostBehaviorViewTest {
                             });
                 });
 
-        void invoke(Method target, Object owner) throws Throwable {
+        void invoke(Method target, Object owner, Object... arguments) throws Throwable {
             XposedInterface.Chain chain = (XposedInterface.Chain) Proxy.newProxyInstance(getClass().getClassLoader(),
                     new Class<?>[] { XposedInterface.Chain.class }, (proxy, method, args) -> {
                         if (method.getName().equals("getThisObject")) return owner;
                         if (method.getName().equals("getExecutable")) return target;
-                        if (method.getName().equals("getArgs")) return Collections.emptyList();
+                        if (method.getName().equals("getArgs")) return Arrays.asList(arguments);
+                        if (method.getName().equals("getArg")) return arguments[(Integer) args[0]];
                         if (method.getName().startsWith("proceed")) { proceeded++; return null; }
                         return null;
                     });

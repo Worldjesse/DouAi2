@@ -21,7 +21,13 @@ public final class AutomationCommentMedia {
     private AutomationCommentMedia() { }
 
     public static List<ChatImage> load(Context context, Object work, LocalOptions options) throws Exception {
-        ChatMediaLoader.checkCancelled();
+        return load(context, work, options, new MediaReadCancellation());
+    }
+
+    static List<ChatImage> load(Context context, Object work, LocalOptions options,
+                                MediaReadCancellation cancellation) throws Exception {
+        cancellation.start();
+        cancellation.check();
         boolean imagesEnabled = options.enabled(RECOGNIZE_IMAGES, true);
         boolean videoEnabled = options.enabled(RECOGNIZE_VIDEO, false);
         if (!imagesEnabled && !videoEnabled) return Collections.emptyList();
@@ -29,21 +35,21 @@ public final class AutomationCommentMedia {
         List<String> sources = imagesEnabled ? imageUrls(work) : Collections.emptyList();
         int imageLimit = video == null ? ChatCompletionClient.MAX_IMAGES_PER_MESSAGE : 1;
         List<ChatImage> images = new ArrayList<>(AutomationImages.load(
-                sources.subList(0, Math.min(imageLimit, sources.size()))));
+                sources.subList(0, Math.min(imageLimit, sources.size())), cancellation));
         if (video != null) {
-            File local = downloadVideo(context, video);
+            File local = downloadVideo(context, video, cancellation);
             try { images.addAll(ChatMediaLoader.loadVideoFile(local,
-                    ChatCompletionClient.MAX_IMAGES_PER_MESSAGE - images.size())); }
+                    ChatCompletionClient.MAX_IMAGES_PER_MESSAGE - images.size(), cancellation)); }
             finally { ChatMediaLoader.deleteTemporary(local); }
         } else if (imagesEnabled && images.isEmpty()) {
             String snapshotSource = videoUrl(work);
             if (snapshotSource != null) {
-                File local = downloadVideo(context, snapshotSource);
-                try { images.addAll(ChatMediaLoader.loadVideoFile(local, 1)); }
+                File local = downloadVideo(context, snapshotSource, cancellation);
+                try { images.addAll(ChatMediaLoader.loadVideoFile(local, 1, cancellation)); }
                 finally { ChatMediaLoader.deleteTemporary(local); }
             }
         }
-        ChatMediaLoader.checkCancelled();
+        cancellation.check();
         return Collections.unmodifiableList(images);
     }
 
@@ -98,15 +104,12 @@ public final class AutomationCommentMedia {
         return false;
     }
 
-    private static File downloadVideo(Context context, String source) throws Exception {
+    private static File downloadVideo(Context context, String source, MediaReadCancellation cancellation) throws Exception {
         String current = source;
         for (int redirect = 0; redirect < 4; redirect++) {
-            ChatMediaLoader.checkCancelled();
+            cancellation.check();
             if (!isVideoUrl(current)) throw new IllegalArgumentException("视频地址不属于受支持的抖音媒体域名");
-            HttpURLConnection connection = (HttpURLConnection) URI.create(current).toURL().openConnection();
-            connection.setConnectTimeout(10_000);
-            connection.setReadTimeout(10_000);
-            connection.setInstanceFollowRedirects(false);
+            HttpURLConnection connection = cancellation.open(URI.create(current));
             File local = null;
             try {
                 int status = connection.getResponseCode();
@@ -122,11 +125,15 @@ public final class AutomationCommentMedia {
                 }
                 local = File.createTempFile("douai-comment-video-", ".video", context.getCacheDir());
                 try (InputStream input = connection.getInputStream(); FileOutputStream output = new FileOutputStream(local)) {
-                    ChatMediaLoader.copyBounded(input, output, ChatMediaLoader.MAX_VIDEO_BYTES);
+                    ChatMediaLoader.copyBounded(input, output, ChatMediaLoader.MAX_VIDEO_BYTES, cancellation);
                 }
                 return local;
-            } catch (Exception failure) { ChatMediaLoader.deleteTemporary(local); throw failure; }
-            finally { connection.disconnect(); }
+            } catch (Exception failure) {
+                ChatMediaLoader.deleteTemporary(local);
+                cancellation.check();
+                throw failure;
+            }
+            finally { cancellation.close(connection); }
         }
         throw new IllegalStateException("视频地址跳转次数过多");
     }

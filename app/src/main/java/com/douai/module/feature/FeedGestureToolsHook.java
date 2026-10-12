@@ -1107,8 +1107,8 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
 
     @SuppressLint("ResourceType")
     private void openComments(View root) {
-        View container = root.findViewById(2131371412);
-        if (container == null) container = root.findViewById(2131371297);
+        View container = HostResourceCatalog.findVerifiedView(root, 2131371412);
+        if (container == null) container = HostResourceCatalog.findVerifiedView(root, 2131371297);
         List<View> candidates = new ArrayList<>();
         collectClicks(container, candidates);
         if (candidates.size() != 1) { toast(root.getContext(), "评论入口未唯一定位"); return; }

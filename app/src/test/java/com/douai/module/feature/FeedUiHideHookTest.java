@@ -277,6 +277,176 @@ public final class FeedUiHideHookTest {
     }
 
     @Test
+    public void preDrawReappliesCachedTargetsWithoutSearchingTheViewTreeAgain() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        FrameLayout right = new FrameLayout(activity);
+        right.setId(2131402155);
+        root.addView(right);
+        activity.setContentView(root);
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, settings(false, 35));
+        FeedHolderFixture holder = holder(root);
+
+        intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder);
+        idleMainLooper();
+        int searchesAfterBind = hook.getViewSearches();
+        assertEquals(1, searchesAfterBind);
+
+        for (int frame = 0; frame < 12; frame++) {
+            right.setAlpha(1f);
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(0.35f, right.getAlpha(), 0.001f);
+        }
+
+        assertEquals(searchesAfterBind, hook.getViewSearches());
+        assertTrue(hook.getPreDrawRechecks() >= 12);
+        hook.close();
+        idleMainLooper();
+        activity.finish();
+    }
+
+    @Test
+    public void layoutInvalidatesCachedTargetsForLateInsertedControls() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        FrameLayout nested = new FrameLayout(activity);
+        root.addView(nested);
+        activity.setContentView(root);
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, enabledSettings());
+        intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+        idleMainLooper();
+        int initialSearches = hook.getViewSearches();
+
+        View lateControl = new View(activity);
+        lateControl.setId(2131374336);
+        nested.addView(lateControl);
+        root.getViewTreeObserver().dispatchOnGlobalLayout();
+        root.getViewTreeObserver().dispatchOnPreDraw();
+        assertEquals(View.INVISIBLE, lateControl.getVisibility());
+        assertEquals(initialSearches + 1, hook.getViewSearches());
+        for (int frame = 0; frame < 12; frame++) root.getViewTreeObserver().dispatchOnPreDraw();
+        assertEquals(initialSearches + 1, hook.getViewSearches());
+
+        hook.close();
+        idleMainLooper();
+        assertEquals(View.VISIBLE, lateControl.getVisibility());
+        int searchesAfterClose = hook.getViewSearches();
+        root.getViewTreeObserver().dispatchOnGlobalLayout();
+        root.getViewTreeObserver().dispatchOnPreDraw();
+        assertEquals(searchesAfterClose, hook.getViewSearches());
+        activity.finish();
+    }
+
+    @Test
+    public void reusedTargetIdDescriptionAndTextAreRevalidatedWithoutLayout() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        View byId = new View(activity);
+        byId.setId(2131374336);
+        View byDescription = new View(activity);
+        byDescription.setContentDescription("like");
+        TextView byText = new TextView(activity);
+        byText.setText("comment");
+        root.addView(byId);
+        root.addView(byDescription);
+        root.addView(byText);
+        activity.setContentView(root);
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, enabledSettings());
+        intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+        idleMainLooper();
+        assertEquals(View.INVISIBLE, byId.getVisibility());
+        assertEquals(View.INVISIBLE, byDescription.getVisibility());
+        assertEquals(View.INVISIBLE, byText.getVisibility());
+        int initialSearches = hook.getViewSearches();
+
+        byId.setId(View.NO_ID);
+        byDescription.setContentDescription("video playback");
+        byText.setText("video playback");
+        root.getViewTreeObserver().dispatchOnPreDraw();
+        assertEquals(View.VISIBLE, byId.getVisibility());
+        assertEquals(View.VISIBLE, byDescription.getVisibility());
+        assertEquals(View.VISIBLE, byText.getVisibility());
+        assertEquals(initialSearches + 1, hook.getViewSearches());
+        hook.close();
+        idleMainLooper();
+        activity.finish();
+    }
+
+    @Test
+    public void unresolvedCustomLocatorRetriesThenStopsUntilLayoutChanges() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        TextView target = new TextView(activity);
+        target.setId(android.R.id.text1);
+        root.addView(target);
+        activity.setContentView(root);
+        CustomViewLocator locator = CustomViewLocator.capture(activity.getWindow().getDecorView(), root, target);
+        assertNotNull(locator);
+        root.removeView(target);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(ComponentHideSettings.CUSTOM_VIEWS,
+                CustomViewLocator.serialize(Collections.singletonList(locator))).commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+        idleMainLooper();
+        int initialSearches = hook.getViewSearches();
+
+        for (int frame = 0; frame < 20; frame++) root.getViewTreeObserver().dispatchOnPreDraw();
+        int afterRetries = hook.getViewSearches();
+        assertTrue(afterRetries > initialSearches);
+        assertTrue(afterRetries <= initialSearches + 7);
+        for (int frame = 0; frame < 12; frame++) root.getViewTreeObserver().dispatchOnPreDraw();
+        assertEquals(afterRetries, hook.getViewSearches());
+
+        root.addView(target);
+        root.getViewTreeObserver().dispatchOnGlobalLayout();
+        root.getViewTreeObserver().dispatchOnPreDraw();
+        assertEquals(View.GONE, target.getVisibility());
+        int afterInsert = hook.getViewSearches();
+        for (int frame = 0; frame < 12; frame++) root.getViewTreeObserver().dispatchOnPreDraw();
+        assertEquals(afterInsert, hook.getViewSearches());
+        hook.close();
+        idleMainLooper();
+        assertEquals(View.VISIBLE, target.getVisibility());
+        activity.finish();
+    }
+
+    @Test
+    public void reusedCustomTargetResourceIdRestoresOldViewAndFindsReplacement() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        TextView target = new TextView(activity);
+        target.setId(android.R.id.text1);
+        root.addView(target);
+        activity.setContentView(root);
+        CustomViewLocator locator = CustomViewLocator.capture(activity.getWindow().getDecorView(), root, target);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(ComponentHideSettings.CUSTOM_VIEWS,
+                CustomViewLocator.serialize(Collections.singletonList(locator))).commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+        idleMainLooper();
+        assertEquals(View.GONE, target.getVisibility());
+
+        target.setId(android.R.id.text2);
+        TextView replacement = new TextView(activity);
+        replacement.setId(android.R.id.text1);
+        root.addView(replacement);
+        root.getViewTreeObserver().dispatchOnPreDraw();
+        assertEquals(View.VISIBLE, target.getVisibility());
+        assertEquals(View.GONE, replacement.getVisibility());
+        hook.close();
+        idleMainLooper();
+        assertEquals(View.VISIBLE, replacement.getVisibility());
+        activity.finish();
+    }
+
+    @Test
     public void pauseRestoresStateAndResumeStartsMonitoringAgain() throws Throwable {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
@@ -843,6 +1013,24 @@ public final class FeedUiHideHookTest {
         hook.close();
         idleMainLooper();
         activity.finish();
+    }
+
+    @Test
+    public void diagnosticsKeepVideoAndImageInstallationSeparate() throws Exception {
+        List<RuleScanResult> results = new java.util.ArrayList<>();
+        for (RuleScanResult result : createReport().getRuleResults()) {
+            if (!result.getRuleId().startsWith("image_holder")) results.add(result);
+        }
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = FeedUiHideHook.install(createFramework(hooks),
+                new HostScanReport("partial-host", results, false), getClass().getClassLoader(),
+                enabledSettings(), ignored -> { });
+        assertTrue(hook.isVideoLifecycleInstalled());
+        assertFalse(hook.isImageLifecycleInstalled());
+        hook.close();
+        assertFalse(hook.isVideoLifecycleInstalled());
+        assertFalse(hook.isImageLifecycleInstalled());
+        idleMainLooper();
     }
 
     private static SharedPreferences componentPreferences() {

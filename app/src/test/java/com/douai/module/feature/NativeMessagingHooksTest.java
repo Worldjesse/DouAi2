@@ -166,4 +166,16 @@ public final class NativeMessagingHooksTest {
             assertEquals("again", records.getString("streak.reset_token", ""));
         } finally { restarted.close(); }
     }
+
+    @Test public void hookExposesCountOfLegacyPendingStreakOutcomes() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        android.content.SharedPreferences records = context.getSharedPreferences("douai_message_state", Context.MODE_PRIVATE);
+        records.edit().clear().putBoolean("streak.100.2026-10-12.200.pending", true).commit();
+        NativeMessagingHooks hook = NativeMessagingHooks.install(new Framework().api, report(), getClass().getClassLoader(),
+                context, new LocalOptions(Collections.emptyMap()), ignored -> { });
+        try {
+            assertEquals(1, hook.unknownStreakCount());
+            assertFalse(records.contains("streak.100.2026-10-12.200.pending"));
+        } finally { hook.close(); }
+    }
 }
