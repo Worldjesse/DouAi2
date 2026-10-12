@@ -34,7 +34,7 @@ jobs:
           packages: platform-tools
 
       - name: Install Android SDK Platform 37
-        run: sdkmanager "platforms;android-37"
+        run: sdkmanager "platforms;android-37.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
