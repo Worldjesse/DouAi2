@@ -1,0 +1,369 @@
+package com.douai.module.ui.miuix
+
+import android.app.Dialog
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.view.View
+import android.widget.EditText
+import androidx.activity.ComponentActivity
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.longClick
+import com.douai.module.config.HostSettingsStore
+import com.douai.module.config.AiModelConfig
+import com.douai.module.config.AiModelSettings
+import org.json.JSONObject
+import com.douai.module.ui.ModuleSettingsScreen
+import java.io.File
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
+import org.robolectric.shadows.ShadowDialog
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35], qualifiers = "w360dp-h720dp-mdpi")
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+class MiuixHostSettingsTest {
+    @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
+    private lateinit var store: HostSettingsStore
+    private lateinit var screen: ModuleSettingsScreen
+
+    @Before
+    fun openSettings() {
+        compose.runOnUiThread {
+            store = HostSettingsStore(compose.activity)
+            screen = ModuleSettingsScreen(compose.activity, store)
+            compose.activity.setContentView(screen.createMiuixView())
+        }
+    }
+
+    @After
+    fun closeSettings() {
+        compose.runOnUiThread { screen.close() }
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun searchFindsCategoriesAndDownloadSwitchesKeepTheirDependency() {
+        compose.onNodeWithTag("settings.search").performTextReplacement("下载")
+        compose.onNodeWithText("基本功能").assertDoesNotExist()
+        compose.onNodeWithText("下载相关").assertIsDisplayed().performClick()
+        val categoryDialog = ShadowDialog.getLatestDialog()
+        assertTrue(categoryDialog.window!!.attributes.width > 0)
+        assertTrue(categoryDialog.window!!.attributes.height > 0)
+        assertTrue(categoryDialog.window!!.attributes.width !=
+            android.view.WindowManager.LayoutParams.MATCH_PARENT)
+        assertTrue(categoryDialog.window!!.attributes.height !=
+            android.view.WindowManager.LayoutParams.MATCH_PARENT)
+        compose.onNodeWithTag("miuix.category.page").assertIsDisplayed()
+        compose.onNodeWithTag("miuix.category.back").assertIsDisplayed()
+        compose.onNodeWithTag("settings.toggle.是否启用抖音下载自定义命名").performClick()
+        compose.runOnIdle {
+            assertTrue(store.getBoolean("download_custom_name", false))
+            assertTrue(store.load().downloadEnabled)
+        }
+        saveDialogPreview("host-download")
+        compose.runOnUiThread { ShadowDialog.getLatestDialog().dismiss() }
+        compose.onNodeWithText("下载相关").assertIsDisplayed()
+        compose.onNodeWithTag("settings.search").performTextReplacement("不存在的分类")
+        compose.onNodeWithText("没有匹配的设置分类").assertIsDisplayed()
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun filterMasterUpdatesChildEnabledStateAndPersistsChanges() {
+        compose.onNodeWithText("视频筛选").performScrollTo().performClick()
+        compose.onNodeWithTag("settings.toggle.去广告开关").assertIsNotEnabled()
+        compose.onNodeWithTag("settings.toggle.过滤总开关").performClick()
+        compose.onNodeWithTag("settings.toggle.去广告开关").assertIsEnabled().performClick()
+        compose.runOnIdle {
+            assertTrue(store.load().feedFilterEnabled)
+            assertTrue(store.load().hideAds)
+        }
+        compose.onNodeWithTag("settings.toggle.过滤总开关").performClick()
+        compose.onNodeWithTag("settings.toggle.去广告开关").assertIsNotEnabled()
+        saveDialogPreview("host-filter")
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun editorSaveUpdatesMiuixPreviewAndComponentWindowClosesWithParent() {
+        compose.onNodeWithTag("settings.search").performTextReplacement("下载")
+        compose.onNodeWithText("下载相关").performClick()
+        compose.onNodeWithTag("settings.option.文件名模板").performClick()
+        compose.waitForIdle()
+        compose.runOnUiThread {
+            val editor = ShadowDialog.getLatestDialog() as android.app.AlertDialog
+            assertNotNull(editor.window!!.decorView.findViewWithTag<View>("miuix.dialog.root"))
+            editor.findViewById<View>(android.R.id.content)
+                .findViewWithTag<EditText>("settings.input.文件名模板").setText("#aid#.#ext#")
+            editor.getButton(Dialog.BUTTON_POSITIVE).performClick()
+        }
+        compose.onNodeWithText("#aid#.#ext#").assertIsDisplayed()
+        assertEquals("#aid#.#ext#", store.getString("download_name_template", ""))
+        compose.runOnUiThread { ShadowDialog.getLatestDialog().dismiss() }
+        compose.onNodeWithTag("settings.search").performTextReplacement("组件")
+        compose.onNodeWithText("组件隐藏").performClick()
+        compose.onNodeWithText("隐藏总开关").assertIsDisplayed().performClick()
+        assertTrue(store.getBoolean("component_hide_enabled", false))
+        saveDialogPreview("host-components")
+        compose.runOnUiThread {
+            val child = ShadowDialog.getLatestDialog()
+            screen.close()
+            assertFalse(child.isShowing)
+        }
+    }
+
+    @Test
+    @Config(sdk = [28, 35])
+    fun composeEditorWindowAllowsImeAndVisibleInputTakesFocus() {
+        compose.onNodeWithTag("settings.search").performTextReplacement("下载")
+        compose.onNodeWithText("下载相关").performClick()
+        compose.onNodeWithTag("settings.option.文件名模板").performClick()
+        compose.waitForIdle()
+        compose.runOnIdle {
+            val flags = ShadowDialog.getLatestDialog().window!!.attributes.flags
+            assertEquals("An editor dialog must remain focusable", 0,
+                flags and android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+            assertEquals("Compose editors must be allowed to connect to the IME", 0,
+                flags and android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+        }
+        compose.onNodeWithTag("settings.input.文件名模板").performClick()
+        compose.onNodeWithTag("settings.input.文件名模板").assertIsFocused()
+    }
+
+    @Test
+    @Config(sdk = [28], qualifiers = "w320dp-h640dp-mdpi")
+    fun organizedAutomationPagesRenderAndCommentInputCanTakeFocus() {
+        compose.onNodeWithTag("settings.category.5").performClick()
+        compose.onNodeWithTag("settings.option.回复内容").assertIsDisplayed()
+        compose.onNodeWithTag("settings.option.回复预设内容").assertDoesNotExist()
+        saveDialogPreview("reply-main")
+        compose.onNodeWithTag("settings.option.私聊范围").performClick()
+        val privateSettings = ShadowDialog.getLatestDialog()
+        compose.onNodeWithTag("settings.option.消息筛选").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.1").performClick()
+        saveDialogPreview("reply-private")
+        compose.runOnUiThread { privateSettings.dismiss(); screen.dismissChildPages() }
+        compose.onNodeWithTag("settings.category.6").performClick()
+        compose.onNodeWithTag("settings.option.评论内容").assertIsDisplayed()
+        compose.onNodeWithTag("settings.option.素材识别").assertIsEnabled()
+        saveDialogPreview("comment-main")
+        compose.onNodeWithTag("settings.option.作品范围").performClick()
+        compose.onNodeWithTag("settings.option.作品筛选").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.1").performClick()
+        saveDialogPreview("comment-scope")
+        compose.onNodeWithTag("settings.option.筛选关键词").performClick()
+        compose.onNodeWithTag("settings.input.筛选关键词").performClick().assertIsFocused()
+        compose.runOnIdle {
+            assertEquals(0, ShadowDialog.getLatestDialog().window!!.attributes.flags and
+                android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+        }
+        compose.onNodeWithTag("settings.input.筛选关键词").performTextReplacement("茶,咖啡")
+        saveDialogPreview("comment-keyword-editor")
+    }
+
+    @Test
+    @Config(sdk = [28], qualifiers = "w640dp-h320dp-land-mdpi")
+    fun organizedCommentPageFitsShortLandscapeWindow() {
+        compose.onNodeWithTag("settings.category.6").performScrollTo().performClick()
+        compose.waitForIdle()
+        compose.runOnUiThread {
+            val scroll = findNativeScroll(ShadowDialog.getLatestDialog().window!!.decorView)
+            assertNotNull("The category must expose its native scroll container after composition", scroll)
+            scroll!!.fullScroll(View.FOCUS_DOWN)
+        }
+        compose.onNodeWithTag("settings.option.发送与记录").assertIsDisplayed()
+        saveDialogPreview("comment-landscape")
+    }
+
+    @Test
+    fun nestedReplyModeAndTargetIdPagesUseMiuixChoiceAndActionShells() {
+        compose.onNodeWithTag("settings.category.5").performClick()
+        compose.onNodeWithTag("settings.option.回复模式").performClick()
+        val choices = ShadowDialog.getLatestDialog() as android.app.AlertDialog
+        compose.runOnIdle {
+            assertNotNull(choices.window!!.decorView.findViewWithTag<View>("miuix.dialog.root"))
+            choices.listView.performItemClick(null, 1, choices.listView.adapter.getItemId(1))
+        }
+        compose.runOnIdle { assertEquals("ai", store.getString("reply_mode", "")) }
+
+        compose.onNodeWithTag("settings.option.私聊范围").performClick()
+        val privateSettings = ShadowDialog.getLatestDialog()
+        compose.onNodeWithTag("settings.option.指定用户").performClick()
+        val targets = ShadowDialog.getLatestDialog() as android.app.AlertDialog
+        assertNotNull(targets.getButton(Dialog.BUTTON_POSITIVE))
+        targets.getButton(Dialog.BUTTON_POSITIVE).performClick()
+        compose.runOnIdle { assertEquals("", store.getString("reply_targets", "")) }
+        compose.runOnUiThread { privateSettings.dismiss() }
+        compose.onNodeWithTag("settings.option.回复模式").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.3").performClick()
+        compose.onNodeWithTag("settings.option.回复内容").performClick()
+        val pool = ShadowDialog.getLatestDialog() as android.app.AlertDialog
+        compose.waitForIdle()
+        assertNotNull(pool.window!!.decorView.findViewWithTag<View>("miuix.dialog.root"))
+        pool.getButton(Dialog.BUTTON_POSITIVE).performClick()
+        saveDialogPreview("host-miuix-deep-reply")
+    }
+
+    @Test
+    fun scopeRelationAndKeywordFieldPickersPersistMiuixMultiSelections() {
+        compose.onNodeWithTag("settings.category.5").performClick()
+        compose.onNodeWithTag("settings.option.私聊范围").performClick()
+        compose.onNodeWithTag("settings.option.关注关系").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.0").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.2").performClick()
+        compose.runOnUiThread {
+            (ShadowDialog.getLatestDialog() as android.app.AlertDialog)
+                .getButton(Dialog.BUTTON_POSITIVE).performClick()
+        }
+        compose.runOnIdle { assertEquals("following,strangers", store.getString("reply_scope_relations", "")) }
+
+        compose.onNodeWithTag("settings.option.消息筛选").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.1").performClick()
+        compose.onNodeWithTag("settings.option.匹配对象").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.0").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.2").assertDoesNotExist()
+        compose.runOnUiThread {
+            (ShadowDialog.getLatestDialog() as android.app.AlertDialog)
+                .getButton(Dialog.BUTTON_POSITIVE).performClick()
+        }
+        compose.runOnIdle { assertEquals("author,caption", store.getString("reply_filter_fields", "")) }
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun modelEditorUsesMiuixControlsAndKeepsSavedCustomEndpointAndPromptDraft() {
+        val config = AiModelConfig.fromJson(JSONObject().put("id", "ui-profile")
+            .put("name", "自定义代理").put("provider", "openai")
+            .put("apiEndpoint", "https://proxy.example.test/v1").put("modelName", "test-model")
+            .put("systemPrompt", "原来的记忆"))
+        compose.runOnUiThread { AiModelSettings(listOf(config), config.id).save(store) }
+        compose.onNodeWithTag("settings.search").performTextReplacement("扩展")
+        compose.onNodeWithTag("settings.category.12").performClick()
+        compose.onNodeWithTag("settings.option.AI 模型设置").performClick()
+        compose.onNodeWithTag("settings.option.自定义代理").performClick()
+        compose.onNodeWithTag("settings.input.API 基础地址").assertExists()
+        saveDialogPreview("host-model-editor")
+        compose.runOnUiThread {
+            val editor = ShadowDialog.getLatestDialog()
+            val endpoint = findNativeInput(editor.window!!.decorView, "API 基础地址")
+            assertEquals("https://proxy.example.test/v1", endpoint.text.toString())
+            val row = editor.window!!.decorView.findViewWithTag<View>("ai.prompt.primary")
+            var parent = row.parent
+            while (parent !is android.widget.ScrollView) parent = parent.parent
+            parent.scrollTo(0, row.top)
+        }
+        compose.onNodeWithTag("settings.option.一级提示词").performClick()
+        compose.onNodeWithTag("settings.input.一级提示词").performTextReplacement("草稿记忆\n")
+        compose.onNodeWithTag("prompt.save").performClick()
+        compose.runOnIdle { assertEquals("原来的记忆", AiModelSettings.read(store).selected().systemPrompt) }
+        compose.onNodeWithTag("miuix.dialog.button.${Dialog.BUTTON_POSITIVE}").performClick()
+        compose.runOnIdle {
+            assertEquals("草稿记忆\n", AiModelSettings.read(store).selected().systemPrompt)
+            assertEquals("https://proxy.example.test/v1", AiModelSettings.read(store).selected().apiEndpoint)
+        }
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun gestureThirdLevelSelectionUpdatesItsMiuixGridCell() {
+        compose.onNodeWithTag("settings.category.1").performClick()
+        compose.onNodeWithTag("settings.option.长按事件").performClick()
+        compose.onNodeWithTag("settings.gesture.long_press_top_left").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.2").performClick()
+        compose.onNodeWithText("左上\n复制文案").assertIsDisplayed()
+        assertEquals("copy_text", store.getString("long_press_top_left", ""))
+        saveDialogPreview("host-gesture")
+    }
+
+    private fun findNativeInput(root: View, label: String): EditText {
+        if (root is EditText && root.contentDescription == label) return root
+        if (root is android.view.ViewGroup) {
+            for (index in 0 until root.childCount) {
+                try { return findNativeInput(root.getChildAt(index), label) } catch (_: NoSuchElementException) { }
+            }
+        }
+        throw NoSuchElementException(label)
+    }
+
+    @Test
+    fun systemBarSecondaryPageUsesRealMiuixSwitches() {
+        compose.onNodeWithTag("settings.category.1").performClick()
+        compose.onNodeWithTag("settings.option.沉浸式全屏").performClick()
+        compose.onNodeWithTag("settings.toggle.隐藏状态栏").assertIsDisplayed().performClick()
+        compose.runOnIdle { assertTrue(store.getBoolean("remove_black_edges", false)) }
+    }
+
+    @Test
+    fun longPressPreservesPartialCommentSelectionAndDoesNotToggleOnRelease() {
+        compose.onNodeWithTag("settings.search").performTextReplacement("评论相关")
+        compose.onNodeWithTag("settings.category.7").performClick()
+        compose.onNodeWithTag("settings.toggle.长按操作").performTouchInput { longClick() }
+        compose.runOnUiThread {
+            val options = ShadowDialog.getLatestDialog() as android.app.AlertDialog
+            assertFalse(store.getBoolean("copy_comment_text", false))
+            val list = options.listView
+            list.performItemClick(list.getChildAt(0), 0, 0)
+            options.getButton(Dialog.BUTTON_POSITIVE).performClick()
+        }
+        compose.runOnIdle {
+            assertTrue(store.getBoolean("copy_comment_text", false))
+            assertFalse(store.getBoolean("comment_media_tools", false))
+            assertFalse(store.getBoolean("copy_source_data", false))
+        }
+        compose.onNodeWithTag("settings.toggle.长按操作").performClick()
+        assertFalse(store.getBoolean("copy_comment_text", true))
+    }
+
+    private fun saveDialogPreview(name: String) {
+        compose.waitForIdle()
+        if (android.os.Build.VERSION.SDK_INT >= 33) return
+        val folder = System.getenv("DOUAI_CHAT_SCREENSHOTS") ?: return
+        compose.runOnUiThread {
+            val window = ShadowDialog.getShownDialogs().last { it.isShowing }.window!!
+            val view = window.decorView
+            val bounds = window.attributes
+            val width = bounds.width.takeIf { it > 0 } ?: view.width
+            val height = bounds.height.takeIf { it > 0 } ?: view.height
+            view.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY))
+            view.layout(0, 0, width, height)
+            val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+            view.draw(Canvas(bitmap))
+            val pixels = IntArray(bitmap.width * bitmap.height)
+            bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+            assertTrue("Miuix preview must contain rendered controls", pixels.toSet().size > 8)
+            val directory = File(folder).apply { mkdirs() }
+            File(directory, "$name.png").outputStream().use {
+                assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it))
+            }
+        }
+    }
+
+    private fun findNativeScroll(root: View): android.widget.ScrollView? {
+        if (root is android.widget.ScrollView) return root
+        if (root is android.view.ViewGroup) {
+            for (index in 0 until root.childCount) findNativeScroll(root.getChildAt(index))?.let { return it }
+        }
+        return null
+    }
+}

@@ -1,0 +1,2 @@
+*.tsv whitespace=-blank-at-eol
+gradlew text eol=lf

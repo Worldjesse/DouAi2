@@ -1,0 +1,168 @@
+package com.douai.module.config;
+
+import android.content.Context;
+import android.content.SharedPreferences;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+
+/** Bounded local automation history, stored independently from module settings. */
+public final class AutomationHistoryStore {
+    public static final String REPLY = "reply";
+    public static final String COMMENT = "comment";
+    private static final String FILE = "douai_automation_history";
+    private static final String KEY = "entries_v1";
+    private static final int MAX_PER_KIND = 200;
+    private static final int MAX_BYTES = 2 * 1024 * 1024;
+    private static final Object LOCK = new Object();
+    private final SharedPreferences preferences;
+
+    public AutomationHistoryStore(Context context) {
+        if (context == null) throw new IllegalArgumentException("Context is required");
+        preferences = context.getSharedPreferences(FILE, Context.MODE_PRIVATE);
+    }
+
+    public List<Entry> read(String kind) {
+        requireKind(kind);
+        synchronized (LOCK) {
+            List<Entry> selected = new ArrayList<>();
+            for (Entry entry : readAll()) if (kind.equals(entry.kind)) selected.add(entry);
+            selected.sort(Comparator.comparingLong((Entry entry) -> entry.createdAt).reversed()
+                    .thenComparing(entry -> entry.id));
+            return Collections.unmodifiableList(selected);
+        }
+    }
+
+    public void clear(String kind) {
+        requireKind(kind);
+        synchronized (LOCK) {
+            List<Entry> entries = readAll();
+            entries.removeIf(entry -> kind.equals(entry.kind));
+            persist(entries);
+            preferences.edit().putLong("cleared_at_" + kind, System.currentTimeMillis()).apply();
+        }
+    }
+
+    public void upsert(Entry entry) {
+        if (entry == null) throw new IllegalArgumentException("Entry is required");
+        synchronized (LOCK) {
+            if (preferences.contains("cleared_at_" + entry.kind)
+                    && entry.createdAt <= preferences.getLong("cleared_at_" + entry.kind, 0)) return;
+            List<Entry> entries = readAll();
+            entries.removeIf(previous -> previous.kind.equals(entry.kind) && previous.id.equals(entry.id));
+            entries.add(entry);
+            entries.sort(Comparator.comparingLong((Entry item) -> item.createdAt)
+                    .thenComparing(item -> item.id));
+            trimKind(entries, REPLY);
+            trimKind(entries, COMMENT);
+            persist(entries);
+        }
+    }
+
+    private static void trimKind(List<Entry> entries, String kind) {
+        int count = 0;
+        for (Entry entry : entries) if (kind.equals(entry.kind)) count++;
+        for (int i = 0; count > MAX_PER_KIND && i < entries.size();) {
+            if (kind.equals(entries.get(i).kind)) { entries.remove(i); count--; }
+            else i++;
+        }
+    }
+
+    private List<Entry> readAll() {
+        String source;
+        try { source = preferences.getString(KEY, "[]"); }
+        catch (ClassCastException ignored) { return new ArrayList<>(); }
+        if (source == null || source.length() > MAX_BYTES) return new ArrayList<>();
+        List<Entry> entries = new ArrayList<>();
+        try {
+            JSONArray array = new JSONArray(source);
+            for (int i = Math.max(0, array.length() - 2 * MAX_PER_KIND); i < array.length(); i++) {
+                JSONObject json = array.optJSONObject(i);
+                if (json == null) continue;
+                try {
+                    entries.add(new Entry(json.optString("id"), json.optString("kind"),
+                            json.optString("targetId"), json.optString("targetName"),
+                            json.optString("input"), json.optString("output"),
+                            json.optString("modelName"), json.optString("status"),
+                            json.optLong("createdAt"), json.optLong("updatedAt")));
+                } catch (IllegalArgumentException ignored) { }
+            }
+        } catch (JSONException ignored) { }
+        return entries;
+    }
+
+    private void persist(List<Entry> entries) {
+        String serialized = serialize(entries);
+        while (!entries.isEmpty() && serialized.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES) {
+            entries.remove(0);
+            serialized = serialize(entries);
+        }
+        preferences.edit().putString(KEY, serialized).apply();
+    }
+
+    private static String serialize(List<Entry> entries) {
+        JSONArray array = new JSONArray();
+        for (Entry entry : entries) {
+            try {
+                array.put(new JSONObject().put("id", entry.id).put("kind", entry.kind)
+                        .put("targetId", entry.targetId).put("targetName", entry.targetName)
+                        .put("input", entry.input).put("output", entry.output)
+                        .put("modelName", entry.modelName).put("status", entry.status)
+                        .put("createdAt", entry.createdAt).put("updatedAt", entry.updatedAt));
+            } catch (JSONException impossible) { throw new IllegalStateException(impossible); }
+        }
+        return array.toString();
+    }
+
+    private static void requireKind(String kind) {
+        if (!REPLY.equals(kind) && !COMMENT.equals(kind)) throw new IllegalArgumentException("Unknown automation kind");
+    }
+
+    private static String bounded(String text, int limit) {
+        if (text == null) return "";
+        if (text.length() <= limit) return text;
+        int end = Character.isHighSurrogate(text.charAt(limit - 1)) ? limit - 1 : limit;
+        return text.substring(0, end);
+    }
+
+    public static final class Entry {
+        public final String id;
+        public final String kind;
+        public final String targetId;
+        public final String targetName;
+        public final String input;
+        public final String output;
+        public final String modelName;
+        public final String status;
+        public final long createdAt;
+        public final long updatedAt;
+
+        public Entry(String id, String kind, String targetId, String targetName,
+                     String input, String output, String modelName, String status,
+                     long createdAt, long updatedAt) {
+            requireKind(kind);
+            if (id == null || id.isEmpty()) throw new IllegalArgumentException("Entry ID is required");
+            if (!"pending".equals(status) && !"cancelled".equals(status) && !"sent".equals(status)
+                    && !"submitted".equals(status) && !"failed".equals(status) && !"sending".equals(status)) {
+                throw new IllegalArgumentException("Unknown automation status");
+            }
+            this.id = bounded(id, 512);
+            this.kind = kind;
+            this.targetId = bounded(targetId, 512);
+            this.targetName = bounded(targetName, 256);
+            this.input = bounded(input, 8000);
+            this.output = bounded(output, 4000);
+            this.modelName = bounded(modelName, 256);
+            this.status = status;
+            this.createdAt = Math.max(0, createdAt);
+            this.updatedAt = Math.max(this.createdAt, updatedAt);
+        }
+    }
+}
