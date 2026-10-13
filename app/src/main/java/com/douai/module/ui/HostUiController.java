@@ -18,6 +18,7 @@ import android.view.WindowManager;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import com.douai.module.config.HostSettingsStore;
 
@@ -52,6 +53,7 @@ public final class HostUiController implements Application.ActivityLifecycleCall
     private boolean scanDismissed;
     private boolean restartInProgress;
     private String restartFailure;
+    private String pendingRestartNotice;
     private boolean closed;
 
     public HostUiController(Application application, Consumer<String> log) {
@@ -78,6 +80,7 @@ public final class HostUiController implements Application.ActivityLifecycleCall
         scanDismissed = false;
         restartInProgress = false;
         restartFailure = null;
+        pendingRestartNotice = null;
         update(ScanState.scanning("检查抖音版本和扫描缓存", 0, 0, false));
     }
 
@@ -89,6 +92,7 @@ public final class HostUiController implements Application.ActivityLifecycleCall
         scanDismissed = false;
         restartInProgress = false;
         restartFailure = null;
+        pendingRestartNotice = null;
         update(ScanState.scanning("查找抖音方法", 0, dexCount, false));
     }
 
@@ -325,7 +329,23 @@ public final class HostUiController implements Application.ActivityLifecycleCall
                 confirmAdaptation(activity);
             }
         });
-        dialog.setOnCancelListener(ignored -> scanDismissed = true);
+        dialog.setOnCancelListener(ignored -> {
+            if (scanDialog != dialog) return;
+            if (scanState.complete && !scanState.failed && scanState.restartRequired) {
+                boolean saved;
+                try { saved = acknowledgment.acknowledge(scanState.identity); }
+                catch (RuntimeException failure) { saved = false; }
+                if (!saved) {
+                    restartFailure = "无法保存适配确认，请重试。";
+                    scanDismissed = false;
+                    mainHandler.post(this::renderScanDialog);
+                    return;
+                }
+                markScanConfirmed();
+                safeLog("Scan completion dismissed; confirmation saved without restart");
+            }
+            scanDismissed = true;
+        });
 
         panel.addView(scanTitle, matchWrap());
         LinearLayout.LayoutParams detailParams = matchWrap();
@@ -361,36 +381,55 @@ public final class HostUiController implements Application.ActivityLifecycleCall
                 || activity != resumedActivity.get() || activity.isFinishing()
                 || activity.isDestroyed()) return;
         restartInProgress = true;
+        String identity = scanState.identity;
         if (scanAction != null) scanAction.setEnabled(false);
         safeLog("Adaptation confirmation requested; scheduling host restart");
-        HostAppRestarter.Result result = appRestarter.restart(activity, scanState.identity,
+        HostAppRestarter.Result result = appRestarter.restart(activity, identity,
                 new HostAppRestarter.AcknowledgmentWriter() {
                     @Override public boolean commit(String identity) {
                         return acknowledgment.acknowledge(identity);
                     }
-
-                    @Override public void rollback(String identity) {
-                        acknowledgment.forget(identity);
-                    }
                 }, message -> {
-                    if (closed || resumedActivity.get() != activity) return;
+                    if (closed || !identity.equals(scanState.identity)) return;
                     restartInProgress = false;
-                    if (scanAction != null) scanAction.setEnabled(true);
-                    restartFailure = message;
-                    scanDismissed = false;
-                    renderScanDialog();
+                    markScanConfirmed();
+                    scanDismissed = true;
+                    dismissScanDialog();
+                    notifyManualRestart();
                     safeLog("Restart relay failed: " + message);
                 });
-        if (result.isSuccessful()) {
+        if (result.isConfirmationSaved()) {
+            markScanConfirmed();
             scanDismissed = true;
             dismissScanDialog();
+            if (!result.isSuccessful()) {
+                restartInProgress = false;
+                notifyManualRestart();
+                safeLog("Could not restart host after adaptation confirmation: " + result.getMessage());
+            }
             return;
         }
         restartInProgress = false;
         if (scanAction != null) scanAction.setEnabled(true);
         restartFailure = result.getMessage();
         renderScanDialog();
-        safeLog("Could not restart host after adaptation confirmation: " + result.getMessage());
+        safeLog("Could not save adaptation confirmation: " + result.getMessage());
+    }
+
+    private void markScanConfirmed() {
+        ScanState current = scanState;
+        scanState = ScanState.completed(current.detail, current.cacheHit, current.identity, false);
+    }
+
+    private void notifyManualRestart() {
+        String message = "自动重启失败，查找结果已保存。请手动重启抖音。";
+        Activity current = resumedActivity.get();
+        if (current == null || current.isFinishing() || current.isDestroyed()) {
+            pendingRestartNotice = message;
+        } else {
+            pendingRestartNotice = null;
+            Toast.makeText(current, message, Toast.LENGTH_LONG).show();
+        }
     }
 
     private void dismissScanDialog() {
@@ -448,6 +487,10 @@ public final class HostUiController implements Application.ActivityLifecycleCall
     public void onActivityResumed(Activity activity) {
         if (closed || activity == null || !application.getPackageName().equals(activity.getPackageName())) return;
         resumedActivity = new WeakReference<>(activity);
+        if (pendingRestartNotice != null) {
+            Toast.makeText(activity, pendingRestartNotice, Toast.LENGTH_LONG).show();
+            pendingRestartNotice = null;
+        }
         monitorSettingsPage(activity);
         renderScanDialog();
     }

@@ -2,6 +2,7 @@ package com.douai.module.ui;
 
 import android.app.Activity;
 import android.app.Dialog;
+import android.content.SharedPreferences;
 import android.os.Looper;
 import android.view.View;
 import android.view.ViewGroup;
@@ -19,6 +20,7 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowDialog;
+import java.lang.reflect.Proxy;
 
 import static org.junit.Assert.*;
 
@@ -84,7 +86,7 @@ public final class HostUiControllerTest {
         }
     }
 
-    @Test public void cachedResultStillRequiresConfirmationUntilAcknowledged() throws Exception {
+    @Test public void dismissingCachedCompletionPersistsConfirmationWithoutRestart() throws Exception {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         AdaptationAcknowledgment acknowledgment = acknowledgment();
         RestartFixture fixture = new RestartFixture(acknowledgment);
@@ -96,17 +98,16 @@ public final class HostUiControllerTest {
             Dialog scan = ShadowDialog.getLatestDialog();
             assertTrue(scan.isShowing());
             scan.cancel();
+            idleMainLooper();
             assertEquals(0, fixture.prepareCount);
-            assertFalse(acknowledgment.isAcknowledged("host-module-1"));
+            assertTrue(acknowledgment.isAcknowledged("host-module-1"));
             controller.close();
             controller = controller(fixture, acknowledgment);
             controller.complete(true, "rules=159; cacheHit=true", "host-module-1");
             controller.onActivityResumed(activity);
             idleMainLooper();
-            scan = ShadowDialog.getLatestDialog();
-            assertTrue(scan.isShowing());
-            findText(scan.getWindow().getDecorView(), "确定").performClick();
-            assertEquals(1, fixture.terminateCount);
+            assertFalse(ShadowDialog.getLatestDialog().isShowing());
+            assertEquals(0, fixture.terminateCount);
         } finally {
             controller.close();
             activity.finish();
@@ -133,7 +134,7 @@ public final class HostUiControllerTest {
         }
     }
 
-    @Test public void restartSchedulingFailureKeepsPromptAndCanBeRetried() throws Exception {
+    @Test public void restartSchedulingFailureKeepsConfirmationAndDoesNotPromptOnNextLaunch() throws Exception {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         AdaptationAcknowledgment acknowledgment = acknowledgment();
         RestartFixture fixture = new RestartFixture(acknowledgment);
@@ -146,16 +147,17 @@ public final class HostUiControllerTest {
             Dialog scan = ShadowDialog.getLatestDialog();
             View confirm = findText(scan.getWindow().getDecorView(), "确定");
             confirm.performClick();
-            assertTrue(scan.isShowing());
-            assertTrue(confirm.isEnabled());
-            assertNotNull(findTextContaining(scan.getWindow().getDecorView(), "无法安排抖音重启"));
-            assertFalse(acknowledgment.isAcknowledged("host-module-1"));
-            assertEquals(0, fixture.terminateCount);
-            fixture.scheduleFailure = false;
-            confirm.performClick();
-            assertEquals(2, fixture.prepareCount);
-            assertEquals(1, fixture.terminateCount);
+            assertFalse(scan.isShowing());
             assertTrue(acknowledgment.isAcknowledged("host-module-1"));
+            assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("手动重启"));
+            assertEquals(0, fixture.terminateCount);
+            controller.close();
+            controller = controller(fixture, acknowledgment);
+            controller.complete(true, "rules=159; cacheHit=true", "host-module-1");
+            controller.onActivityResumed(activity);
+            idleMainLooper();
+            assertFalse(ShadowDialog.getLatestDialog().isShowing());
+            assertEquals(1, fixture.prepareCount);
         } finally {
             controller.close();
             activity.finish();
@@ -187,6 +189,69 @@ public final class HostUiControllerTest {
             first.finish();
             second.finish();
         }
+    }
+
+    @Test public void relayFailureWhilePausedKeepsConfirmationAndShowsManualNoticeOnResume() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        AdaptationAcknowledgment acknowledgment = acknowledgment();
+        RestartFixture fixture = new RestartFixture(acknowledgment);
+        HostUiController controller = controller(fixture, acknowledgment);
+        try {
+            controller.complete(true, "rules=182; cacheHit=true", "host-module-1");
+            controller.onActivityResumed(activity);
+            idleMainLooper();
+            Dialog scan = ShadowDialog.getLatestDialog();
+            findText(scan.getWindow().getDecorView(), "确定").performClick();
+            controller.onActivityPaused(activity);
+            fixture.failureListener.accept("relay unavailable");
+            assertTrue(acknowledgment.isAcknowledged("host-module-1"));
+            controller.onActivityResumed(activity);
+            idleMainLooper();
+            assertFalse(scan.isShowing());
+            assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("手动重启"));
+            controller.close();
+            controller = controller(fixture, acknowledgment);
+            controller.complete(true, "rules=182; cacheHit=true", "host-module-1");
+            controller.onActivityResumed(activity);
+            idleMainLooper();
+            assertFalse(ShadowDialog.getLatestDialog().isShowing());
+            assertEquals(1, fixture.prepareCount);
+        } finally { controller.close(); activity.finish(); }
+    }
+
+    @Test public void failedConfirmationWriteKeepsPromptAndNeverSchedulesRestart() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        SharedPreferences delegate = RuntimeEnvironment.getApplication().getSharedPreferences(
+                AdaptationAcknowledgment.PREFERENCES, Activity.MODE_PRIVATE);
+        SharedPreferences failing = (SharedPreferences) Proxy.newProxyInstance(
+                SharedPreferences.class.getClassLoader(), new Class<?>[]{SharedPreferences.class},
+                (proxy, method, arguments) -> {
+                    if (!"edit".equals(method.getName())) return method.invoke(delegate, arguments);
+                    SharedPreferences.Editor editor = delegate.edit();
+                    return Proxy.newProxyInstance(SharedPreferences.Editor.class.getClassLoader(),
+                            new Class<?>[]{SharedPreferences.Editor.class}, (editorProxy, call, values) -> {
+                                Object result = call.invoke(editor, values);
+                                if ("commit".equals(call.getName())) return false;
+                                return result instanceof SharedPreferences.Editor ? editorProxy : result;
+                            });
+                });
+        AdaptationAcknowledgment acknowledgment = new AdaptationAcknowledgment(failing);
+        RestartFixture fixture = new RestartFixture(acknowledgment);
+        HostUiController controller = controller(fixture, acknowledgment);
+        try {
+            controller.complete(true, "rules=182", "host-module-1");
+            controller.onActivityResumed(activity);
+            idleMainLooper();
+            Dialog scan = ShadowDialog.getLatestDialog();
+            findText(scan.getWindow().getDecorView(), "确定").performClick();
+            assertTrue(scan.isShowing());
+            assertFalse(acknowledgment.isAcknowledged("host-module-1"));
+            assertEquals(0, fixture.prepareCount);
+            scan.cancel();
+            idleMainLooper();
+            assertTrue(scan.isShowing());
+            assertFalse(acknowledgment.isAcknowledged("host-module-1"));
+        } finally { controller.close(); activity.finish(); }
     }
 
     @Test public void failedScanCloseDoesNotScheduleRestartOrAcknowledge() throws Exception {
@@ -354,6 +419,7 @@ public final class HostUiControllerTest {
         int terminateCount;
         int cancelCount;
         boolean scheduleFailure;
+        java.util.function.Consumer<String> failureListener;
 
         RestartFixture(AdaptationAcknowledgment acknowledgment) {
             this.acknowledgment = acknowledgment;
@@ -361,9 +427,12 @@ public final class HostUiControllerTest {
 
         @Override public HostAppRestarter.PreparedRestart prepare(Activity activity) {
             prepareCount++;
-            assertFalse(acknowledgment.isAcknowledged("host-module-1"));
             if (scheduleFailure) throw new IllegalStateException("test scheduler unavailable");
+            assertTrue(acknowledgment.isAcknowledged("host-module-1"));
             return new HostAppRestarter.PreparedRestart() {
+                @Override public void setFailureListener(java.util.function.Consumer<String> listener) {
+                    failureListener = listener;
+                }
                 @Override public void terminate() {
                     assertTrue(acknowledgment.isAcknowledged("host-module-1"));
                     terminateCount++;

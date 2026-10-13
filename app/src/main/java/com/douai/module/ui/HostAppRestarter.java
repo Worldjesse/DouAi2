@@ -3,7 +3,6 @@ package com.douai.module.ui;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.ComponentName;
-import android.content.pm.PackageManager;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
@@ -25,7 +24,6 @@ final class HostAppRestarter {
 
     interface AcknowledgmentWriter {
         boolean commit(String identity);
-        void rollback(String identity);
     }
 
     interface Scheduler {
@@ -64,51 +62,38 @@ final class HostAppRestarter {
         if (identity == null || identity.isEmpty() || acknowledgment == null) {
             return Result.failed("无法保存适配确认，请重试。");
         }
+        boolean saved;
+        try {
+            saved = acknowledgment.commit(identity);
+        } catch (RuntimeException failure) {
+            return Result.failed("无法保存适配确认，请重试：" + reason(failure));
+        }
+        if (!saved) {
+            return Result.failed("无法保存适配确认，请重试。");
+        }
+        // Restart availability must not invalidate a successfully saved scan confirmation.
         PreparedRestart prepared;
         try {
             prepared = scheduler.prepare(activity);
             if (prepared == null) throw new IllegalStateException("Restart scheduling returned no handle");
         } catch (Exception failure) {
-            return Result.failed("无法安排抖音重启：" + reason(failure));
-        }
-
-        boolean saved;
-        try {
-            saved = acknowledgment.commit(identity);
-        } catch (RuntimeException failure) {
-            cancel(prepared);
-            return Result.failed("无法保存适配确认，请重试：" + reason(failure));
-        }
-        if (!saved) {
-            cancel(prepared);
-            return Result.failed("无法保存适配确认，请重试。");
+            return Result.restartFailed("无法安排抖音重启：" + reason(failure));
         }
         prepared.setFailureListener(message -> {
-            try {
-                acknowledgment.rollback(identity);
-            } catch (RuntimeException ignored) { }
             if (failureListener != null) failureListener.accept(message);
         });
         try {
             prepared.start(identity);
         } catch (RuntimeException failure) {
             cancel(prepared);
-            try {
-                acknowledgment.rollback(identity);
-            } catch (RuntimeException ignored) { }
-            return Result.failed("无法打开重启中转页面，请重试：" + reason(failure));
+            return Result.restartFailed("无法打开重启中转页面：" + reason(failure));
         }
         try {
             prepared.terminate();
             return Result.success();
         } catch (RuntimeException failure) {
             cancel(prepared);
-            try {
-                acknowledgment.rollback(identity);
-            } catch (RuntimeException ignored) {
-                // Keep the original termination failure visible.
-            }
-            return Result.failed("无法结束抖音进程，请重试：" + reason(failure));
+            return Result.restartFailed("无法结束抖音进程：" + reason(failure));
         }
     }
 
@@ -127,16 +112,20 @@ final class HostAppRestarter {
 
     static final class Result {
         private final boolean successful;
+        private final boolean confirmationSaved;
         private final String message;
 
-        private Result(boolean successful, String message) {
+        private Result(boolean successful, boolean confirmationSaved, String message) {
             this.successful = successful;
+            this.confirmationSaved = confirmationSaved;
             this.message = message;
         }
 
-        static Result success() { return new Result(true, ""); }
-        static Result failed(String message) { return new Result(false, message); }
+        static Result success() { return new Result(true, true, ""); }
+        static Result failed(String message) { return new Result(false, false, message); }
+        static Result restartFailed(String message) { return new Result(false, true, message); }
         boolean isSuccessful() { return successful; }
+        boolean isConfirmationSaved() { return confirmationSaved; }
         String getMessage() { return message; }
     }
 
@@ -159,11 +148,6 @@ final class HostAppRestarter {
                 throw new IllegalStateException("未找到抖音启动页面");
             }
             ComponentName relay = new ComponentName(RELAY_PACKAGE, RELAY_CLASS);
-            try {
-                activity.getPackageManager().getActivityInfo(relay, PackageManager.MATCH_ALL);
-            } catch (PackageManager.NameNotFoundException missing) {
-                throw new IllegalStateException("重启中转组件不可用");
-            }
             Handler callbackHandler = new Handler(Looper.getMainLooper());
             RelayState state = new RelayState(activity, callbackHandler, terminator);
             return new PreparedRestart() {
@@ -190,6 +174,7 @@ final class HostAppRestarter {
         }
 
         private static final class RelayState {
+            private static final long READY_TIMEOUT_MILLIS = 5000L;
             private final Activity activity;
             private final Handler handler;
             private final Terminator terminator;
@@ -199,6 +184,7 @@ final class HostAppRestarter {
             private boolean terminated;
             private Consumer<String> failureListener = ignored -> { };
             private final ResultReceiver receiver;
+            private final Runnable timeout = () -> fail("等待重启中转页面超时。");
 
             RelayState(Activity activity, Handler handler, Terminator terminator) {
                 this.activity = activity;
@@ -207,7 +193,7 @@ final class HostAppRestarter {
                 receiver = new ResultReceiver(handler) {
                     @Override protected void onReceiveResult(int resultCode, android.os.Bundle data) {
                         if (resultCode != 0) {
-                            if (!cancelled) failureListener.accept("抖音重启中转失败，请重试。");
+                            fail("抖音重启中转失败。");
                             return;
                         }
                         ready = true;
@@ -217,18 +203,29 @@ final class HostAppRestarter {
             }
 
             void requestTermination() {
+                if (cancelled || requested) return;
                 requested = true;
+                handler.postDelayed(timeout, READY_TIMEOUT_MILLIS);
                 terminateIfReady();
             }
 
             void terminateIfReady() {
                 if (!ready || !requested || cancelled || terminated) return;
                 terminated = true;
-                terminator.terminate(activity);
+                handler.removeCallbacks(timeout);
+                try { terminator.terminate(activity); }
+                catch (RuntimeException failure) { fail("无法结束抖音进程：" + reason(failure)); }
+            }
+
+            void fail(String message) {
+                if (cancelled) return;
+                cancel();
+                failureListener.accept(message);
             }
 
             void cancel() {
                 cancelled = true;
+                handler.removeCallbacks(timeout);
             }
         }
     }

@@ -59,16 +59,23 @@ public final class HostAppRestarterTest {
         activity.finish();
     }
 
-    @Test public void registeredRelayIsRequiredBeforeCommitOrTermination() {
+    @Test public void relayHiddenFromPackageQueryStillReceivesExplicitLaunch() {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         registerHostLauncher(activity);
-        registerRelay(activity);
+        ShadowPackageManager manager = Shadow.extract(activity.getPackageManager());
+        manager.removeActivity(new ComponentName(HostAppRestarter.RELAY_PACKAGE, HostAppRestarter.RELAY_CLASS));
+        assertThrows(android.content.pm.PackageManager.NameNotFoundException.class, () ->
+                activity.getPackageManager().getActivityInfo(new ComponentName(
+                        HostAppRestarter.RELAY_PACKAGE, HostAppRestarter.RELAY_CLASS), 0));
         List<String> order = new ArrayList<>();
         HostAppRestarter restarter = new HostAppRestarter(new HostAppRestarter.AndroidScheduler(
                 ignored -> order.add("terminate")));
         HostAppRestarter.Result result = restarter.restart(activity, IDENTITY, writer(order, true));
         assertTrue(result.isSuccessful());
         assertEquals(Arrays.asList("commit"), order);
+        ShadowActivity shadow = Shadow.extract(activity);
+        assertEquals(new ComponentName(HostAppRestarter.RELAY_PACKAGE, HostAppRestarter.RELAY_CLASS),
+                shadow.getNextStartedActivity().getComponent());
         activity.finish();
     }
 
@@ -91,6 +98,52 @@ public final class HostAppRestarterTest {
         HostRestartActivity activity = Robolectric.buildActivity(HostRestartActivity.class, intent)
                 .create().get();
         assertTrue(activity.isFinishing());
+    }
+
+    @Test @Config(sdk = {28, 35})
+    public void missingRelayReadyCallbackTimesOutWithoutTerminationOrLostConfirmation() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        registerHostLauncher(activity);
+        registerRelay(activity);
+        List<String> order = new ArrayList<>();
+        List<String> failures = new ArrayList<>();
+        HostAppRestarter restarter = new HostAppRestarter(new HostAppRestarter.AndroidScheduler(
+                ignored -> order.add("terminate")));
+        HostAppRestarter.Result result = restarter.restart(activity, IDENTITY, writer(order, true), failures::add);
+        assertTrue(result.isConfirmationSaved());
+        ShadowActivity shadow = Shadow.extract(activity);
+        Intent handoff = shadow.getNextStartedActivity();
+        @SuppressWarnings("deprecation")
+        ResultReceiver receiver = handoff.getParcelableExtra(HostAppRestarter.EXTRA_RESULT_RECEIVER);
+        idleMainLooperFor(Duration.ofMillis(5100));
+        assertEquals(1, failures.size());
+        assertTrue(failures.get(0).contains("超时"));
+        assertEquals(Arrays.asList("commit"), order);
+        receiver.send(0, null);
+        idleMainLooper();
+        assertEquals(Arrays.asList("commit"), order);
+        activity.finish();
+    }
+
+    @Test public void terminationFailureAfterReadyIsReportedWithoutUndoingConfirmation() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        registerHostLauncher(activity);
+        registerRelay(activity);
+        List<String> order = new ArrayList<>();
+        List<String> failures = new ArrayList<>();
+        HostAppRestarter restarter = new HostAppRestarter(new HostAppRestarter.AndroidScheduler(
+                ignored -> { throw new IllegalStateException("termination unavailable"); }));
+        HostAppRestarter.Result result = restarter.restart(activity, IDENTITY, writer(order, true), failures::add);
+        assertTrue(result.isConfirmationSaved());
+        ShadowActivity shadow = Shadow.extract(activity);
+        ResultReceiver receiver = shadow.getNextStartedActivity().getParcelableExtra(
+                HostAppRestarter.EXTRA_RESULT_RECEIVER, ResultReceiver.class);
+        receiver.send(0, null);
+        idleMainLooper();
+        assertEquals(1, failures.size());
+        assertTrue(failures.get(0).contains("无法结束"));
+        assertEquals(Arrays.asList("commit"), order);
+        activity.finish();
     }
 
     @Test @Config(sdk = {28, 35})
@@ -150,7 +203,6 @@ public final class HostAppRestarterTest {
                 order.add("commit");
                 return succeeds;
             }
-            @Override public void rollback(String identity) { order.add("rollback"); }
         };
     }
 
