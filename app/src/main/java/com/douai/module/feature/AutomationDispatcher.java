@@ -272,7 +272,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
 
     private boolean enabled(String kind) {
         LocalOptions current = options;
-        return current.enabled("automation_enabled") && current.enabled(AutomationHistoryStore.REPLY.equals(kind)
+        return current.enabled(AutomationHistoryStore.REPLY.equals(kind)
                 ? "native_auto_reply" : "native_auto_comment");
     }
 

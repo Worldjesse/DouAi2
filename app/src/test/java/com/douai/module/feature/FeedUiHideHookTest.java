@@ -340,6 +340,588 @@ public final class FeedUiHideHookTest {
     }
 
     @Test
+    public void delayedProgressEscapesPreviouslyHiddenContainerWithoutAnotherLayoutEvent() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        FrameLayout bottomTools = new FrameLayout(activity);
+        bottomTools.setId(2131367345);
+        root.addView(bottomTools);
+        View tool = new View(activity);
+        bottomTools.addView(tool);
+        activity.setContentView(root);
+        SharedPreferences preferences = componentPreferences();
+        SharedPreferences.Editor editor = preferences.edit();
+        for (Component component : Component.values()) editor.putString(component.key, "-2");
+        editor.putString(Component.PROGRESS.key, "255").commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            assertEquals(View.GONE, bottomTools.getVisibility());
+            for (int frame = 0; frame < 12; frame++) root.getViewTreeObserver().dispatchOnPreDraw();
+
+            View progress = new View(activity);
+            progress.setId(2131378120);
+            progress.setAlpha(0.7f);
+            bottomTools.addView(progress);
+            root.getViewTreeObserver().dispatchOnPreDraw();
+
+            assertTrue("A kept progress bar must not inherit a cached container hide", progress.isShown());
+            assertEquals(0.7f, progress.getAlpha(), 0.001f);
+            assertEquals(View.GONE, tool.getVisibility());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void delayedProgressPreservesHostRevealOfAnInitiallyGoneContainer() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        FrameLayout tools = new FrameLayout(activity);
+        tools.setId(2131367345);
+        tools.setVisibility(View.GONE);
+        tools.setAlpha(0f);
+        root.addView(tools);
+        View tool = new View(activity);
+        tools.addView(tool);
+        activity.setContentView(root);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(Component.BOTTOM_TOOLS.key, "-2")
+                .putString(Component.PROGRESS.key, "255").commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            View progress = new com.ss.android.ugc.aweme.feed.widget.LineProgressBar(activity);
+            tools.addView(progress);
+            tools.setVisibility(View.VISIBLE);
+            tools.setAlpha(1f);
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertTrue("Restoring a shared container must preserve the host's later reveal", progress.isShown());
+            assertEquals("The host's fade-in must not be replaced by the initial zero alpha", 1f,
+                    tools.getAlpha(), 0.001f);
+            assertEquals(View.GONE, tool.getVisibility());
+            preferences.edit().putBoolean(ComponentHideSettings.ENABLED, false).commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            assertTrue(progress.isShown());
+            assertEquals(View.VISIBLE, tool.getVisibility());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void switchingGoneToOpacityKeepsHostFadeInBeforeTheNextDraw() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        View like = new View(activity);
+        like.setId(2131374356);
+        like.setAlpha(0f);
+        root.addView(like);
+        activity.setContentView(root);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(Component.LIKE.key, "-2").commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            like.setVisibility(View.VISIBLE);
+            like.setAlpha(1f);
+            preferences.edit().putString(Component.LIKE.key, "128").commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            assertEquals(128 / 255f, like.getAlpha(), 0.001f);
+            preferences.edit().putBoolean(ComponentHideSettings.ENABLED, false).commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            assertEquals(1f, like.getAlpha(), 0.001f);
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void alternateHostProgressViewsKeepTheirBranchAndHostVisibility() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        FrameLayout tools = new FrameLayout(activity);
+        tools.setId(2131367345);
+        root.addView(tools);
+        View tool = new View(activity);
+        tools.addView(tool);
+        View line = new com.ss.android.ugc.aweme.feed.widget.LineProgressBar(activity);
+        View alternate = new com.ss.android.ugc.aweme.shortvideo.ui.NewVideoPlayerProgressbar(activity);
+        alternate.setVisibility(View.GONE);
+        tools.addView(line);
+        tools.addView(alternate);
+        activity.setContentView(root);
+        SharedPreferences preferences = componentPreferences();
+        SharedPreferences.Editor editor = preferences.edit();
+        for (Component component : Component.values()) editor.putString(component.key, "-2");
+        editor.putString(Component.PROGRESS.key, "255").commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            assertTrue("The line progress variant must escape bottom-tools hiding", line.isShown());
+            assertEquals(View.GONE, alternate.getVisibility());
+            assertEquals(View.GONE, tool.getVisibility());
+            alternate.setVisibility(View.VISIBLE);
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertTrue("Host reveal of a kept alternate progress must remain visible", alternate.isShown());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void progressValueAppliesToProSeekbarOutsideSelectedCardAndRestoresOnPause() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout page = new FrameLayout(activity);
+        FrameLayout card = new FrameLayout(activity);
+        page.addView(card);
+        View progress = new com.ss.android.ugc.aweme.o.seekbar.views.seekbar.ProSeekBarView(activity);
+        progress.setAlpha(1f);
+        page.addView(progress);
+        activity.setContentView(page);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(Component.PROGRESS.key, "124").commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(card));
+            idleMainLooper();
+            assertEquals(124 / 255f, progress.getAlpha(), 0.001f);
+            for (int frame = 0; frame < 12; frame++) page.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(124 / 255f, progress.getAlpha(), 0.001f);
+            hook.setComponentsTemporarilyShown(true);
+            idleMainLooper();
+            assertEquals(1f, progress.getAlpha(), 0.001f);
+            hook.setComponentsTemporarilyShown(false);
+            idleMainLooper();
+            assertEquals(124 / 255f, progress.getAlpha(), 0.001f);
+            preferences.edit().putString(Component.PROGRESS.key, "-2").commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            assertEquals(View.GONE, progress.getVisibility());
+            preferences.edit().putString(Component.PROGRESS.key, "-1").commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            assertEquals(View.INVISIBLE, progress.getVisibility());
+            preferences.edit().putBoolean(ComponentHideSettings.ENABLED, false).commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            assertEquals(View.VISIBLE, progress.getVisibility());
+            assertEquals(1f, progress.getAlpha(), 0.001f);
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void progressAt124FollowsHostFadeInAndRestoresTheLatestHostAlpha() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        View progress = new com.ss.android.ugc.aweme.feed.ui.seekbar.CustomizedUISeekBar(activity);
+        progress.setVisibility(View.GONE);
+        progress.setAlpha(0f);
+        root.addView(progress);
+        activity.setContentView(root);
+        SharedPreferences preferences = componentPreferences();
+        SharedPreferences.Editor editor = preferences.edit();
+        for (Component component : Component.values()) editor.putString(component.key, "-2");
+        editor.putString(Component.PROGRESS.key, "124").commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            progress.setVisibility(View.VISIBLE);
+            progress.setAlpha(1f);
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertTrue(progress.isShown());
+            assertEquals("Progress opacity must use the host's later fade-in", 124 / 255f,
+                    progress.getAlpha(), 0.001f);
+            for (int frame = 0; frame < 12; frame++) root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals("Reapplying must not compound opacity each frame", 124 / 255f,
+                    progress.getAlpha(), 0.001f);
+            progress.setAlpha(0.5f);
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(0.5f * 124 / 255f, progress.getAlpha(), 0.001f);
+            hook.setComponentsTemporarilyShown(true);
+            idleMainLooper();
+            assertEquals("Pausing must restore the latest host alpha", 0.5f, progress.getAlpha(), 0.001f);
+            hook.setComponentsTemporarilyShown(false);
+            idleMainLooper();
+            assertEquals(0.5f * 124 / 255f, progress.getAlpha(), 0.001f);
+            progress.setVisibility(View.GONE);
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals("An opacity setting must not force a host-hidden progress visible",
+                    View.GONE, progress.getVisibility());
+            preferences.edit().putBoolean(ComponentHideSettings.ENABLED, false).commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            assertEquals(View.GONE, progress.getVisibility());
+            assertEquals(0.5f, progress.getAlpha(), 0.001f);
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void progressValuesKeepOpacityInvisibilityAndLayoutRemovalDistinct() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        android.widget.LinearLayout column = new android.widget.LinearLayout(activity);
+        column.setOrientation(android.widget.LinearLayout.VERTICAL);
+        root.addView(column);
+        View progress = new com.ss.android.ugc.aweme.feed.widget.LineProgressBar(activity);
+        column.addView(progress, new android.widget.LinearLayout.LayoutParams(100, 12));
+        column.addView(new View(activity), new android.widget.LinearLayout.LayoutParams(100, 8));
+        activity.setContentView(root);
+        SharedPreferences preferences = componentPreferences();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            int[] values = {-2, -1, 0, 64, 124, 255};
+            int[] visibility = {View.GONE, View.INVISIBLE, View.VISIBLE, View.VISIBLE, View.VISIBLE, View.VISIBLE};
+            int[] heights = {8, 20, 20, 20, 20, 20};
+            float[] alphas = {1f, 1f, 0f, 64 / 255f, 124 / 255f, 1f};
+            for (int index = 0; index < values.length; index++) {
+                preferences.edit().putString(Component.PROGRESS.key, Integer.toString(values[index])).commit();
+                hook.setSettings(ExtendedSettings.readFrom(preferences));
+                idleMainLooper();
+                column.measure(View.MeasureSpec.makeMeasureSpec(100, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(100, View.MeasureSpec.AT_MOST));
+                assertEquals("visibility for " + values[index], visibility[index], progress.getVisibility());
+                assertEquals("layout height for " + values[index], heights[index], column.getMeasuredHeight());
+                assertEquals("alpha for " + values[index], alphas[index], progress.getAlpha(), 0.001f);
+            }
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void progressMountAt124FollowsHostAlphaAndKeepsHiddenToolsSeparate() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        FrameLayout tools = new FrameLayout(activity);
+        tools.setId(2131367345);
+        root.addView(tools);
+        View tool = new View(activity);
+        tools.addView(tool);
+        FrameLayout mount = new FrameLayout(activity);
+        mount.setId(2131378120);
+        mount.setAlpha(0f);
+        tools.addView(mount);
+        activity.setContentView(root);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(Component.BOTTOM_TOOLS.key, "-2")
+                .putString(Component.PROGRESS.key, "124").commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            mount.setAlpha(1f);
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(124 / 255f, mount.getAlpha(), 0.001f);
+            assertTrue(mount.isShown());
+            assertEquals(View.GONE, tool.getVisibility());
+            preferences.edit().putString(Component.PROGRESS.key, "255").commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            assertEquals(1f, mount.getAlpha(), 0.001f);
+            assertEquals(View.GONE, tool.getVisibility());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void progressDiagnosticsCaptureEnabledAndDisabledStatesAndStopOnClose() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        root.addView(new com.ss.android.ugc.aweme.feed.widget.LineProgressBar(activity));
+        activity.setContentView(root);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(Component.BOTTOM_TOOLS.key, "-2")
+                .putString(Component.PROGRESS.key, "124").commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        java.util.ArrayList<String> logs = new java.util.ArrayList<>();
+        FeedUiHideHook hook = FeedUiHideHook.install(createFramework(hooks), createReport(),
+                getClass().getClassLoader(), ExtendedSettings.readFrom(preferences), logs::add);
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            idleForMillis(3100L);
+            assertEquals(3, logs.stream().filter(value -> value.contains(" reason=selection ")).count());
+            assertTrue(logs.stream().anyMatch(value -> value.contains("LineProgressBar")));
+            assertTrue(logs.stream().anyMatch(value -> value.contains("progress=124")));
+            preferences.edit().putBoolean(ComponentHideSettings.ENABLED, false).commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            assertTrue(logs.stream().anyMatch(value -> value.contains("reason=settings")
+                    && value.contains("enabled=false")));
+            hook.close();
+            idleMainLooper();
+            int afterClose = logs.size();
+            idleForMillis(10000L);
+            assertEquals("Close must cancel delayed diagnostic samples", afterClose, logs.size());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void progressDiagnosticSelectionBudgetReservesSamplesForSettingsChanges() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        activity.setContentView(root);
+        SharedPreferences preferences = componentPreferences();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        java.util.ArrayList<String> logs = new java.util.ArrayList<>();
+        FeedUiHideHook hook = FeedUiHideHook.install(createFramework(hooks), createReport(),
+                getClass().getClassLoader(), ExtendedSettings.readFrom(preferences), logs::add);
+        FeedHolderFixture holder = holder(root);
+        try {
+            for (int card = 0; card < 8; card++) {
+                holder.aid = "card" + card;
+                intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder);
+                idleMainLooper();
+                idleForMillis(3100L);
+            }
+            assertEquals(18, logs.stream().filter(value -> value.contains(" reason=selection ")).count());
+            preferences.edit().putBoolean(ComponentHideSettings.ENABLED, false).commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            idleForMillis(3100L);
+            assertEquals(3, logs.stream().filter(value -> value.contains(" reason=settings ")).count());
+            assertFalse(logs.stream().anyMatch(value -> value.contains("aid=") || value.contains("card7")));
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void chapterProgressUsesItsIndependentSettingInsideSharedTools() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        FrameLayout tools = new FrameLayout(activity);
+        tools.setId(2131367345);
+        root.addView(tools);
+        View tool = new View(activity);
+        tools.addView(tool);
+        View chapter = new com.ss.android.ugc.aweme.feed.widget.ChapterOuterSeekBar(activity);
+        chapter.setAlpha(0.75f);
+        tools.addView(chapter);
+        activity.setContentView(root);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(Component.BOTTOM_TOOLS.key, "-2")
+                .putString(Component.PROGRESS.key, "255").commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            assertTrue("Retained chapter progress must escape shared container hiding", chapter.isShown());
+            assertEquals(0.75f, chapter.getAlpha(), 0.001f);
+            assertEquals(View.GONE, tool.getVisibility());
+            preferences.edit().putString(Component.PROGRESS.key, "-2").commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            assertFalse(chapter.isShown());
+            preferences.edit().putBoolean(ComponentHideSettings.ENABLED, false).commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            assertTrue(chapter.isShown());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void delayedFeedbackInsertedIntoUntargetedBranchIsHiddenBeforeDrawing() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        FrameLayout nested = new FrameLayout(activity);
+        root.addView(nested);
+        activity.setContentView(root);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(Component.FEEDBACK.key, "-2").commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            for (int frame = 0; frame < 12; frame++) root.getViewTreeObserver().dispatchOnPreDraw();
+            View feedback = new View(activity);
+            feedback.setId(2131371905);
+            nested.addView(feedback);
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals("Late feedback must join the active hide targets", View.GONE, feedback.getVisibility());
+            int discovered = hook.getViewSearches();
+            for (int frame = 0; frame < 12; frame++) root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals("Stable frames must still reuse cached targets", discovered, hook.getViewSearches());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void delayedRecommendationTagUsesFeedbackSettingWithoutMatchingCaptionText() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        android.widget.TextView caption = new android.widget.TextView(activity);
+        caption.setText("这段视频获得了100人推荐");
+        root.addView(caption);
+        View progress = new View(activity);
+        progress.setId(2131378120);
+        root.addView(progress);
+        activity.setContentView(root);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(Component.FEEDBACK.key, "-2")
+                .putString(Component.PROGRESS.key, "255").commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            com.ss.android.ugc.aweme.base.ui.TagLayout tag = new com.ss.android.ugc.aweme.base.ui.TagLayout(activity);
+            android.widget.TextView count = new android.widget.TextView(activity);
+            count.setText("100人推荐");
+            tag.addView(count);
+            root.addView(tag);
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(View.GONE, tag.getVisibility());
+            assertTrue(progress.isShown());
+            assertTrue(caption.isShown());
+            preferences.edit().putBoolean(ComponentHideSettings.ENABLED, false).commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            assertEquals(View.VISIBLE, tag.getVisibility());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void delayedDeclarationAndAnchorStripFollowTheirOwnSettingsAndKeepProgress() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        View progress = new com.ss.android.ugc.aweme.feed.widget.LineProgressBar(activity);
+        root.addView(progress);
+        TextView caption = new TextView(activity);
+        caption.setText("作者声明和位置只是视频里的文案");
+        root.addView(caption);
+        activity.setContentView(root);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(Component.FEEDBACK.key, "-2")
+                .putString(Component.BOTTOM_TOOLS.key, "-2")
+                .putString(Component.PROGRESS.key, "255").commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            View declaration = new View(activity);
+            declaration.setId(2131378315);
+            android.widget.LinearLayout declarationBackground = new android.widget.LinearLayout(activity);
+            declarationBackground.setBackgroundColor(android.graphics.Color.BLACK);
+            declarationBackground.addView(declaration);
+            FrameLayout anchors = new FrameLayout(activity);
+            anchors.setId(2131378359);
+            TextView poi = new TextView(activity);
+            poi.setText("泰州市·兴化市");
+            anchors.addView(poi);
+            FrameLayout anonymousAnchor = new com.ss.android.ugc.aweme.feed.anchor.framework.base.MaxWidthFrameLayout(activity);
+            FrameLayout legacyAnchor = new com.ss.android.ugc.aweme.base.ui.FeedAnchorLayout(activity);
+            root.addView(declarationBackground);
+            root.addView(anchors);
+            root.addView(anonymousAnchor);
+            root.addView(legacyAnchor);
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertFalse(declaration.isShown());
+            assertEquals(View.GONE, declarationBackground.getVisibility());
+            assertEquals(View.GONE, anchors.getVisibility());
+            assertEquals(View.GONE, anonymousAnchor.getVisibility());
+            assertEquals(View.GONE, legacyAnchor.getVisibility());
+            assertTrue(progress.isShown());
+            assertTrue(caption.isShown());
+            preferences.edit().putString(Component.FEEDBACK.key, "255").commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            assertEquals(View.VISIBLE, declaration.getVisibility());
+            assertEquals(View.VISIBLE, declarationBackground.getVisibility());
+            assertEquals(View.GONE, anchors.getVisibility());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void lateTextBindingOnExistingViewInvalidatesLegacyMatching() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        TextView label = new TextView(activity);
+        root.addView(label);
+        activity.setContentView(root);
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, enabledSettings());
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            assertEquals(View.VISIBLE, label.getVisibility());
+            label.setText("分享");
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(View.INVISIBLE, label.getVisibility());
+            label.setText("正常文案");
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(View.VISIBLE, label.getVisibility());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void reusedUntargetedViewAndEqualSizedBranchReplacementInvalidateDiscovery() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        FrameLayout branch = new FrameLayout(activity);
+        root.addView(branch);
+        View reused = new View(activity);
+        branch.addView(reused);
+        activity.setContentView(root);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(Component.FEEDBACK.key, "-2").commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            reused.setId(2131371905);
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(View.GONE, reused.getVisibility());
+            FrameLayout replacement = new FrameLayout(activity);
+            View feedback = new View(activity);
+            feedback.setId(2131371905);
+            replacement.addView(feedback);
+            root.removeView(branch);
+            root.addView(replacement);
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(View.VISIBLE, reused.getVisibility());
+            assertEquals(View.GONE, feedback.getVisibility());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void customTargetInsertedAfterRetriesAreExhaustedIsDiscoveredWithoutLayout() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        FrameLayout branch = new FrameLayout(activity);
+        root.addView(branch);
+        activity.setContentView(root);
+        SharedPreferences preferences = componentPreferences();
+        android.widget.TextView target = new android.widget.TextView(activity);
+        target.setText("延迟插入的自定义控件");
+        branch.addView(target);
+        com.douai.module.config.CustomViewLocator locator = com.douai.module.config.CustomViewLocator.capture(
+                root.getRootView(), root, target);
+        branch.removeView(target);
+        preferences.edit().putString(ComponentHideSettings.CUSTOM_VIEWS,
+                com.douai.module.config.CustomViewLocator.serialize(Collections.singletonList(locator))).commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            for (int frame = 0; frame < 20; frame++) root.getViewTreeObserver().dispatchOnPreDraw();
+            branch.addView(target);
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(View.GONE, target.getVisibility());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
     public void reusedTargetIdDescriptionAndTextAreRevalidatedWithoutLayout() throws Throwable {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
@@ -1070,6 +1652,13 @@ public final class FeedUiHideHookTest {
         Object shadow = Class.forName("org.robolectric.Shadows")
                 .getMethod("shadowOf", Looper.class).invoke(null, Looper.getMainLooper());
         shadow.getClass().getMethod("idle").invoke(shadow);
+    }
+
+    private static void idleForMillis(long millis) throws ReflectiveOperationException {
+        Object shadow = Class.forName("org.robolectric.Shadows")
+                .getMethod("shadowOf", Looper.class).invoke(null, Looper.getMainLooper());
+        shadow.getClass().getMethod("idleFor", long.class, java.util.concurrent.TimeUnit.class)
+                .invoke(shadow, millis, java.util.concurrent.TimeUnit.MILLISECONDS);
     }
 
     private static void intercept(XposedInterface.Hooker hook, Object holder, Object... arguments) throws Throwable {

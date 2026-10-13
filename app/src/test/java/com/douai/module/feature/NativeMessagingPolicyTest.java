@@ -90,7 +90,7 @@ public final class NativeMessagingPolicyTest {
     @Test public void oldDraftFlagsCannotEnableNativeSending() {
         assertNull(ReplyPolicy.incoming(incoming(), 100, NOW,
                 options("automation_enabled", true, "auto_message_enabled", true, "reply_global", true)));
-        assertNull(ReplyPolicy.incoming(incoming(), 100, NOW,
+        assertNotNull(ReplyPolicy.incoming(incoming(), 100, NOW,
                 options("native_auto_reply", true, "reply_global", true)));
         assertNull(ReplyPolicy.incoming(incoming(), 100, NOW,
                 options("automation_enabled", true, "native_auto_reply", true)));

@@ -146,7 +146,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
     public void setOptions(LocalOptions next) {
         LocalOptions before = options;
         options = next;
-        for (String key : new String[]{"automation_enabled", "native_auto_comment", "comment_mode", "comment_prompt",
+        for (String key : new String[]{"native_auto_comment", "comment_mode", "comment_prompt",
                 "comment_delay_seconds", "auto_comment_text", AutomationCommentMedia.RECOGNIZE_IMAGES,
                 AutomationCommentMedia.RECOGNIZE_VIDEO, "comment_scope_mode", "comment_scope_relations",
                 "comment_scope_fields", "comment_scope_keywords", "comment_scope_users", "comment_filter_mode",
@@ -169,7 +169,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         }
     }
 
-    private boolean enabled() { return !closed && options.enabled("automation_enabled") && options.enabled("native_auto_comment"); }
+    private boolean enabled() { return !closed && options.enabled("native_auto_comment"); }
     public boolean ownsPublish(Object model) { return publisher.ownsPublish(model); }
 
     private void selected(Object selected) {

@@ -11,7 +11,7 @@ public final class HostAdaptation {
     public static final String VERIFIED_VERSION_NAME = "40.6.0";
     public static final long VERIFIED_VERSION_CODE = 400601L;
     public static final String VERIFIED_RULES_FINGERPRINT =
-            "cf4734cd1e44ebae583b6c6069d48709f42285a2462698c957673c5287cfc8b0";
+            "12039abcf939f2afe473416551cf75076ed18d978cb0bbcf3418908c121f48b9";
     private static final Map<Integer, String> FEED_RESOURCES = feedResources();
 
     private HostAdaptation() { }
@@ -49,7 +49,11 @@ public final class HostAdaptation {
         values.put(2131370900, "esb");
         values.put(2131370902, "esd");
         values.put(2131371905, "fc7");
+        values.put(2131378315, "jb1");
+        values.put(2131378359, "jc5");
+        values.put(2131378361, "jc7");
         values.put(2131378120, "i=8");
+        values.put(2131369826, "d5s");
         values.put(2131378145, "i_t");
         values.put(2131380047, "ket");
         values.put(2131380048, "keu");

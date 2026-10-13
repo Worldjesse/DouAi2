@@ -16,8 +16,8 @@ import android.widget.TextView;
 import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.AutomationHistoryStore.Entry;
 import com.douai.module.ui.miuix.HostComposeContext;
+import com.douai.module.ui.miuix.MiuixAutomationHistory;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
-import com.douai.module.ui.miuix.MiuixSettingsViews;
 
 import java.text.DateFormat;
 import java.util.ArrayList;
@@ -40,12 +40,11 @@ final class AutomationHistoryDialog {
     });
 
     private final Context context;
-    private final Context rowContext;
     private final AutomationHistoryStore store;
     private final String kind;
     private final boolean miuix;
-    private final ListView rows;
     private final Rows adapter;
+    private final MiuixAutomationHistory composeRows;
     private final AlertDialog dialog;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService worker;
@@ -77,17 +76,26 @@ final class AutomationHistoryDialog {
                 styledContext = context;
             }
         }
-        rowContext = styledContext;
         this.miuix = styled;
         store = new AutomationHistoryStore(context);
-        adapter = new Rows();
-        rows = new ListView(context);
-        rows.setTag("automation.history");
-        rows.setDividerHeight(dp(1));
-        rows.setAdapter(adapter);
+        View history;
+        if (this.miuix) {
+            adapter = null;
+            composeRows = new MiuixAutomationHistory(styledContext, this::showDetail,
+                    AutomationHistoryDialog::status);
+            history = composeRows.getView();
+        } else {
+            composeRows = null;
+            adapter = new Rows();
+            ListView rows = new ListView(context);
+            rows.setTag("automation.history");
+            rows.setDividerHeight(dp(1));
+            rows.setAdapter(adapter);
+            history = rows;
+        }
         dialog = new MiuixDialogBuilder(context, this.miuix)
                 .setTitle(AutomationHistoryStore.REPLY.equals(kind) ? "回复历史记录" : "评论历史记录")
-                .setView(rows).setNegativeButton("关闭", null).setNeutralButton("清空记录", null).create();
+                .setView(history).setNegativeButton("关闭", null).setNeutralButton("清空记录", null).create();
         if (owner != null) dialog.setOwnerActivity(owner);
         dialog.setOnShowListener(ignored -> {
             dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(view -> clear());
@@ -103,20 +111,20 @@ final class AutomationHistoryDialog {
 
     private void refresh() {
         int ticket = nextGeneration();
-        adapter.setState("正在读取…");
+        setState("正在读取…");
         work = worker.submit(() -> {
             List<Entry> result = read();
             main.post(() -> {
                 if (!isCurrent(ticket)) return;
                 work = null;
-                adapter.setEntries(result);
+                setEntries(result);
             });
         });
     }
 
     private void clear() {
         int ticket = nextGeneration();
-        adapter.setState("正在清空…");
+        setState("正在清空…");
         worker.execute(() -> {
             try { store.clear(kind); }
             catch (RuntimeException ignored) { }
@@ -124,7 +132,7 @@ final class AutomationHistoryDialog {
             main.post(() -> {
                 if (!isCurrent(ticket)) return;
                 work = null;
-                adapter.setEntries(result);
+                setEntries(result);
             });
         });
     }
@@ -132,6 +140,16 @@ final class AutomationHistoryDialog {
     private List<Entry> read() {
         try { return store.read(kind); }
         catch (RuntimeException failure) { return Collections.emptyList(); }
+    }
+
+    private void setState(String value) {
+        if (composeRows != null) composeRows.setState(value);
+        else adapter.setState(value);
+    }
+
+    private void setEntries(List<Entry> value) {
+        if (composeRows != null) composeRows.setEntries(value);
+        else adapter.setEntries(value);
     }
 
     private int nextGeneration() {
@@ -239,12 +257,6 @@ final class AutomationHistoryDialog {
             }
             String title = entry.targetName + " · " + status(entry.status);
             String date = DateFormat.getDateTimeInstance().format(new Date(entry.createdAt));
-            if (miuix) {
-                View row = new MiuixSettingsViews.Option(rowContext, title, date, entry.output, true,
-                        () -> showDetail(entry)).getView();
-                row.setTag("automation.history." + entry.id);
-                return row;
-            }
             TextView row = recycled instanceof TextView ? (TextView) recycled : label("");
             row.setTag("automation.history." + entry.id);
             row.setText(title + "\n" + date + "\n" + entry.output);

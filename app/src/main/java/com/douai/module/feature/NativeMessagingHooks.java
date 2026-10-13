@@ -191,7 +191,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
     }
 
     private static boolean automationOptionsChanged(LocalOptions previous, LocalOptions next) {
-        for (String key : new String[]{"automation_enabled", "native_auto_reply", "reply_global", "reply_targets",
+        for (String key : new String[]{"native_auto_reply", "reply_global", "reply_targets",
                 "reply_mode", "reply_prompt", "reply_delay_seconds", "auto_message_text", "reply_keywords",
                 "reply_scope_mode", "reply_scope_relations", "reply_scope_fields", "reply_scope_keywords",
                 "reply_filter_mode", "reply_filter_keywords", "reply_filter_fields",
@@ -199,7 +199,8 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 "reply_group_scope_mode", "reply_group_targets", "reply_group_mode", "reply_group_members",
                 "reply_random", AiModelSettings.KEY, "streak_enabled", "streak_targets", "streak_content",
                 "streak_content_api", "streak_start", "streak_end"}) {
-            if (previous.enabled(key) != next.enabled(key)
+            boolean defaultEnabled = "reply_private_chats".equals(key);
+            if (previous.enabled(key, defaultEnabled) != next.enabled(key, defaultEnabled)
                     || !previous.text(key, "").equals(next.text(key, ""))) return true;
         }
         return false;
@@ -341,7 +342,8 @@ public final class NativeMessagingHooks implements AutoCloseable {
     }
 
     private boolean automatic(String key, LocalOptions current) {
-        return !closed && receive.isActive() && current.enabled("automation_enabled") && current.enabled(key);
+        return !closed && receive.isActive() && current.enabled(key)
+                && ("native_auto_reply".equals(key) || current.enabled("automation_enabled"));
     }
 
     private void onIncoming(ContentValues values) {
@@ -435,7 +437,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
 
     private void sendText(String id, String text, long account, long epoch, boolean group,
                           Consumer<Boolean> done) throws Exception {
-        sendText(id, text, account, epoch, group, done, () -> true);
+        sendText(id, text, account, epoch, group, done, () -> automatic("native_auto_reply", options));
     }
 
     private void sendText(String id, String text, long account, long epoch, boolean group,
@@ -471,7 +473,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
         Object handler = senderConstructor.newInstance(sdk, callback);
         synchronized (sendLock) {
             if (generation.get() != epoch || ownUid() != account || !receive.isActive()
-                    || closed || !options.enabled("automation_enabled")) { done.accept(false); return; }
+                    || closed) { done.accept(false); return; }
             if (!beforeNativeSend.getAsBoolean()) { done.accept(false); return; }
             send.invoke(handler, message, Collections.emptyMap());
         }
@@ -570,6 +572,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                             safeLog("Could not persist streak send result; outcome remains unknown");
                         }
                     }, () -> {
+                        if (!automatic("streak_enabled", options)) return false;
                         reachedPersistence[0] = true;
                         attempt[0] = streakLedger.begin(key, System.currentTimeMillis());
                         if (attempt[0] == null) return false;

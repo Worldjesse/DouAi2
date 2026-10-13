@@ -219,6 +219,8 @@ public final class DouAiModule extends XposedModule {
             registerSettingsListener(preferences);
             updateConfiguration(preferences);
             configurationReady = true;
+            ensureImmersiveModeController(hostContext, extendedSettings == null
+                    ? ExtendedSettings.readSystemBars(preferences) : extendedSettings);
             HostScanReport report = new HostScanner().scanCached(
                     archives, rules, new HostScanCache(cacheFile), new HostScanner.ProgressListener() {
                         @Override
@@ -292,6 +294,13 @@ public final class DouAiModule extends XposedModule {
                             if (application instanceof Application) {
                                 try {
                                     ensureHostUiController((Application) application);
+                                    ExtendedSettings startupSettings = extendedSettings;
+                                    if (startupSettings == null) {
+                                        startupSettings = ExtendedSettings.readSystemBars(
+                                                ((Application) application).getSharedPreferences(
+                                                        SettingsRepository.PREFERENCES_NAME, Context.MODE_PRIVATE));
+                                    }
+                                    ensureImmersiveModeController((Application) application, startupSettings);
                                 } catch (Throwable failure) {
                                     log(5, TAG, "Could not initialize in-app controls: "
                                             + failure.getMessage());
@@ -351,6 +360,24 @@ public final class DouAiModule extends XposedModule {
         if (application == null || !TARGET_PACKAGE.equals(application.getPackageName())) return null;
         hostUiController = new HostUiController(application, message -> log(3, TAG, message));
         return hostUiController;
+    }
+
+    private synchronized void ensureImmersiveModeController(Context context, ExtendedSettings settings) {
+        if (immersiveModeController != null || context == null) return;
+        try {
+            immersiveModeController = ImmersiveModeController.install(context, settings,
+                    message -> log(3, TAG, message), () -> {
+                        HostUiController ui = hostUiController;
+                        return ui == null ? null : ui.getResumedActivity();
+                    });
+            immersiveModeFailure = null;
+            log(3, TAG, "Reversible status-bar controller installed; enabled="
+                    + (settings != null && settings.removeBlackEdges));
+        } catch (Throwable failure) {
+            immersiveModeFailure = failure.getMessage() == null
+                    ? failure.getClass().getSimpleName() : failure.getMessage();
+            log(6, TAG, "Status-bar controller installation failed", failure);
+        }
     }
 
     private Context awaitHostContext() throws Exception {
@@ -755,7 +782,7 @@ public final class DouAiModule extends XposedModule {
                         message -> log(3, TAG, message));
                 autoCommentDraftHookFailure = null;
                 log(3, TAG, "Native automatic comment hook installed; enabled="
-                        + (currentSettings.automationEnabled && localOptions.enabled("native_auto_comment")));
+                        + localOptions.enabled("native_auto_comment"));
             } catch (Throwable failure) {
                 autoCommentDraftHookFailure = failure.getMessage() == null
                         ? failure.getClass().getSimpleName() : failure.getMessage();
@@ -788,19 +815,7 @@ public final class DouAiModule extends XposedModule {
                 log(6, TAG, "Comment long-press tools hook installation failed", failure);
             }
         }
-        if (immersiveModeController == null && targetContext != null) {
-            try {
-                immersiveModeController = ImmersiveModeController.install(targetContext,
-                        extendedSettings, message -> log(3, TAG, message));
-                immersiveModeFailure = null;
-                log(3, TAG, "Reversible status-bar controller installed; enabled="
-                        + (extendedSettings != null && extendedSettings.removeBlackEdges));
-            } catch (Throwable failure) {
-                immersiveModeFailure = failure.getMessage() == null
-                        ? failure.getClass().getSimpleName() : failure.getMessage();
-                log(6, TAG, "Status-bar controller installation failed", failure);
-            }
-        }
+        ensureImmersiveModeController(targetContext, extendedSettings);
         if (homeNavigationHideController == null && targetContext != null) {
             try {
                 homeNavigationHideController = HomeNavigationHideController.install(targetContext,
@@ -999,7 +1014,12 @@ public final class DouAiModule extends XposedModule {
         if (autoPlayHookFailure != null) snapshot.putString("auto_play_hook_failure", autoPlayHookFailure);
         snapshot.putBoolean("auto_comment_hook_installed", autoCommentDraftHook != null);
         snapshot.putBoolean("auto_comment_enabled",
-                settings.automationEnabled && localOptions.enabled("native_auto_comment"));
+                localOptions.enabled("native_auto_comment"));
+        snapshot.putBoolean("auto_reply_enabled", localOptions.enabled("native_auto_reply"));
+        snapshot.putBoolean("short_progress_legacy_installed", feedUiHideHook != null
+                && feedUiHideHook.isShortProgressLegacyInstalled());
+        snapshot.putBoolean("short_progress_pro_installed", feedUiHideHook != null
+                && feedUiHideHook.isShortProgressProInstalled());
         snapshot.putInt("unknown_streak_count",
                 nativeMessagingHooks == null ? 0 : nativeMessagingHooks.unknownStreakCount());
         if (autoCommentDraftHookFailure != null) {

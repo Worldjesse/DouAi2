@@ -46,8 +46,36 @@ public final class ExtendedSettings {
         autoMessageText = safeString(preferences, "auto_message_text");
     }
 
+    private ExtendedSettings(boolean hideStatusBar, boolean hideNavigation) {
+        components = null;
+        hideInterface = false;
+        videoRightAlpha = 100;
+        hideTopTabs = false;
+        removeBlackEdges = hideStatusBar;
+        hideNavigationBar = hideNavigation;
+        autoPlay = false;
+        playerGestures = false;
+        copyCommentText = false;
+        commentMediaTools = false;
+        copySourceData = false;
+        preventMessageRecall = false;
+        confirmRefresh = false;
+        spoofVersion = false;
+        hiddenTopTabs = "";
+        fakeVersionName = "";
+        fakeVersionCode = "";
+        autoCommentText = "";
+        autoMessageText = "";
+    }
+
     public static ExtendedSettings readFrom(SharedPreferences preferences) {
         return new ExtendedSettings(preferences);
+    }
+
+    /** Startup-only system bar settings; unrelated feature preferences are not parsed. */
+    public static ExtendedSettings readSystemBars(SharedPreferences preferences) {
+        return new ExtendedSettings(preferences.getBoolean("remove_black_edges", false),
+                preferences.getBoolean("hide_navigation_bar", false));
     }
 
     private static String safeString(SharedPreferences preferences, String key) {

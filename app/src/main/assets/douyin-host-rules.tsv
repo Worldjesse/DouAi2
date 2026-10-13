@@ -41,6 +41,8 @@ host_settings_activity	method_scan	class	Lcom/ss/android/ugc/aweme/setting/ui/Do
 host_settings_scroll	method_scan	class	Lcom/ss/android/ugc/aweme/setting/ui/SettingNestedScrollView;											
 component_player_pause	method_scan	method	Lcom/ss/android/ugc/aweme/feed/controller/refactor/impl_pm/PMPlayListenerDispatcherV2;		onPausePlay	(Ljava/lang/String;)V	on_pause_play							
 component_player_playing	method_scan	method	Lcom/ss/android/ugc/aweme/feed/controller/refactor/impl_pm/PMPlayListenerDispatcherV2;		onPlaying	(Ljava/lang/String;)V	on_playing							
+component_short_progress_legacy	method_scan	method	LX/1QBp;		LIZ	(Lcom/ss/android/ugc/aweme/feed/model/Aweme;Ljava/lang/Integer;)Z								
+component_short_progress_pro	method_scan	method	LX/1PIm;		LIZ	(Lcom/ss/android/ugc/aweme/feed/model/Aweme;)Z								
 home_tab_select_or_refresh	method_scan	method	Lcom/ss/android/ugc/aweme/homepage/tab/HomeTabServiceImpl;		LJIILLIIL	(Ljava/lang/Boolean;Ljava/lang/String;)V								
 feed_holder_selected	method_scan	method	Lcom/ss/android/ugc/aweme/feed/adapter/VideoViewHolder;		onViewHolderSelected	(I)V								
 digg_core_presenter_bind	method_scan	method	Lcom/ss/android/ugc/aweme/feed/quick/component/digg/core/DiggCorePresenter;		LLLIZZ	(Lcom/ss/android/ugc/aweme/kiwi/model/QModel;LX/0wHb;)V								

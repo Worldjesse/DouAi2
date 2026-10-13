@@ -2,13 +2,19 @@
 
 抖音增强模块，面向抖音 `com.ss.android.ugc.aweme` 40.6.0，使用 libxposed API 102。
 
-作者：**yudigaga**。当前正式版：**0.1.47** / versionCode **48**。
+作者：**yudigaga**。当前正式版：**0.1.50** / versionCode **51**。
 
 - [源码仓库](https://github.com/yudigaga/DouAi)
 - [正式版下载](https://github.com/yudigaga/DouAi/releases)
 - [LSPosed 模块仓库](https://github.com/Xposed-Modules-Repo/io.github.yudigaga.douai)
 
 正式包名：`io.github.yudigaga.douai`。
+
+## 0.1.50 更新
+
+普通短视频在组件隐藏开启且进度值大于 0 时使用原生可见进度，支持 124 等透明度设置。自动评论和自动回复由各自开关独立控制。包含系统栏首次隐藏、组件恢复和晚插入控件、进度淡入及 Miuix 评论历史修复。
+
+[完整更新与验证](docs/release-0.1.50.md)
 
 ## 安装与使用
 

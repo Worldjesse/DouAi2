@@ -144,15 +144,25 @@ public final class AutomationDispatcherTest {
         assertEquals("cancelled", history.read("comment").get(0).status);
     }
 
-    @Test public void automationDisabledBeforeQueuedSendCancelsWithoutCallingNativeAction() {
+    @Test public void replyDisabledBeforeQueuedSendCancelsWithoutCallingNativeAction() {
         dispatcher.setOptions(options(false, true));
         prepare("reply", "disabled", () -> true);
         Map<String, Object> disabled = base(false, true);
-        disabled.put("automation_enabled", false);
+        disabled.put("native_auto_reply", false);
         dispatcher.setOptions(new LocalOptions(disabled));
         worker.runAll();
         assertEquals(0, sends.get());
         assertEquals("cancelled", history.read("reply").get(0).status);
+    }
+
+    @Test public void commentAndReplyDispatchWithInteractionAutomationOff() {
+        Map<String, Object> independent = base(false, true);
+        independent.put("automation_enabled", false);
+        dispatcher.setOptions(new LocalOptions(independent));
+        prepare("comment", "independent-comment", () -> true);
+        prepare("reply", "independent-reply", () -> true);
+        worker.runAll();
+        assertEquals(2, sends.get());
     }
 
     @Test public void invalidTargetAtTimeoutCancelsAndDoesNotSend() {

@@ -23,7 +23,7 @@ public final class HostAdaptationTest {
         if (!file.isFile()) file = new File("app/src/main/assets/" + HostAdaptation.RULES_ASSET);
         HostRuleSet rules;
         try (FileInputStream input = new FileInputStream(file)) { rules = HostRuleSet.parse(input); }
-        assertTrue(HostAdaptation.matchesRules(rules.getFingerprint()));
+        assertEquals(HostAdaptation.VERIFIED_RULES_FINGERPRINT, rules.getFingerprint());
         assertFalse(HostAdaptation.matchesRules("changed"));
         assertFalse(HostAdaptation.matchesRules(null));
         Set<String> ids = new HashSet<>();
@@ -31,7 +31,11 @@ public final class HostAdaptationTest {
         for (HostFeatureCatalog.Feature feature : HostFeatureCatalog.getFeatures()) {
             for (String rule : feature.rules) assertTrue(feature.id + " references " + rule, ids.contains(rule));
         }
-        assertEquals(47, HostAdaptation.getFeedResources().size());
+        assertEquals(51, HostAdaptation.getFeedResources().size());
+        assertEquals("d5s", HostAdaptation.getFeedResources().get(2131369826));
+        assertEquals("jb1", HostAdaptation.getFeedResources().get(2131378315));
+        assertEquals("jc5", HostAdaptation.getFeedResources().get(2131378359));
+        assertEquals("jc7", HostAdaptation.getFeedResources().get(2131378361));
         assertEquals("comment_layout", HostAdaptation.getFeedResources().get(2131371412));
         assertEquals("j_l", HostAdaptation.getFeedResources().get(2131379757));
     }

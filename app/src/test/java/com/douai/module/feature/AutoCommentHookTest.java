@@ -536,15 +536,43 @@ public final class AutoCommentHookTest {
         assertEquals(1, Request.attempts);
     }
 
-    @Test public void disablingAutomationCancelsQueuedWorkAndBlocksFurtherRequests() throws Throwable {
+    @Test public void disablingCommentCancelsQueuedWorkAndBlocksFurtherRequests() throws Throwable {
         generate();
         Map<String, Object> disabled = baseOptions(false);
-        disabled.put("automation_enabled", false);
+        disabled.put("native_auto_comment", false);
         setOptions(new LocalOptions(disabled));
         flushDispatch();
         advanceSeconds(10);
         assertEquals(0, Request.attempts);
         assertEquals("cancelled", entry("work").status);
+    }
+
+    @Test public void commentRunsWithInteractionAutomationOffAndKeepsItsOwnStopSwitch() throws Throwable {
+        Map<String, Object> independent = baseOptions(false);
+        independent.put("automation_enabled", false);
+        setOptions(new LocalOptions(independent));
+        selectWork();
+        advanceSeconds(3);
+        assertEquals("The comment switch must work independently", 1, Request.attempts);
+        assertEquals("sent", entry("work").status);
+        independent.put("native_auto_comment", false);
+        setOptions(new LocalOptions(independent));
+        holder.work = work("after-stop");
+        selectWork();
+        advanceSeconds(10);
+        assertEquals(1, Request.attempts);
+    }
+
+    @Test public void interactionMasterChangeDoesNotCancelPreparedComment() throws Throwable {
+        setOptions(options(true));
+        selectWork();
+        advanceSeconds(3);
+        Map<String, Object> independent = baseOptions(true);
+        independent.put("automation_enabled", false);
+        setOptions(new LocalOptions(independent));
+        advanceSeconds(8);
+        assertEquals(1, Request.attempts);
+        assertEquals("sent", entry("work").status);
     }
 
     @Test public void enablingAutomationProcessesTheAlreadySelectedWork() throws Throwable {

@@ -37,7 +37,7 @@ public final class ReplyPolicy {
     }
 
     public static Incoming incoming(ContentValues values, long ownUid, long startedAt, LocalOptions options) {
-        if (values == null || ownUid <= 0 || !options.enabled("automation_enabled")
+        if (values == null || ownUid <= 0
                 || !options.enabled("native_auto_reply")) return null;
         try {
             Long sender = values.getAsLong("sender");

@@ -40,12 +40,28 @@ public final class NativeAutoReplyIntegrationTest {
     @Test public void receivedMessageIsPreviewedThenSentThroughNativeSdkAndRecordedAfterAck() throws Throwable { flow(false); }
     @Test public void longPressCancelsReceivedMessageWithoutCallingNativeSender() throws Throwable { flow(true); }
     @Test public void refreshedWhitelistCancelsPreparedReplyBeforeNativeSend() throws Throwable { flow(false, true); }
+    @Test public void receivedMessageRepliesWithInteractionMasterOff() throws Throwable { flow(false, false, false); }
+    @Test public void interactionMasterChangeDoesNotCancelDelayedReply() throws Throwable { flow(false, false, true, true); }
+    @Test public void disablingDefaultPrivateChatScopeCancelsPreparedReply() throws Throwable { flow(false, false, true, false, true); }
 
     private void flow(boolean cancel) throws Throwable {
         flow(cancel, false);
     }
 
     private void flow(boolean cancel, boolean removedFromList) throws Throwable {
+        flow(cancel, removedFromList, true);
+    }
+
+    private void flow(boolean cancel, boolean removedFromList, boolean interactionMaster) throws Throwable {
+        flow(cancel, removedFromList, interactionMaster, false);
+    }
+
+    private void flow(boolean cancel, boolean removedFromList, boolean interactionMaster, boolean changeMaster) throws Throwable {
+        flow(cancel, removedFromList, interactionMaster, changeMaster, false);
+    }
+
+    private void flow(boolean cancel, boolean removedFromList, boolean interactionMaster, boolean changeMaster,
+                      boolean disablePrivate) throws Throwable {
         FollowListSnapshot.reset();
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         activity.getSharedPreferences("douai_automation_history", Activity.MODE_PRIVATE).edit().clear().commit();
@@ -53,7 +69,7 @@ public final class NativeAutoReplyIntegrationTest {
         AutomationDispatcher dispatcher = new AutomationDispatcher(activity, ignored -> { }, worker);
         dispatcher.onActivityResumed(activity);
         Map<String, Object> values = new HashMap<>();
-        values.put("automation_enabled", true); values.put("native_auto_reply", true); values.put("reply_global", true);
+        values.put("automation_enabled", interactionMaster); values.put("native_auto_reply", true); values.put("reply_global", true);
         values.put("reply_tip", true); values.put("reply_save_history", true); values.put("auto_message_text", "固定回复");
         if (removedFromList) {
             values.put("reply_scope_mode", "whitelist");
@@ -80,11 +96,23 @@ public final class NativeAutoReplyIntegrationTest {
                     database, "msg", null, incoming);
             ScheduledThreadPoolExecutor scheduled = (ScheduledThreadPoolExecutor) HostTargets.read(hook, "worker");
             Runnable reply = scheduled.getQueue().peek();
+            if (changeMaster) {
+                values.put("automation_enabled", false);
+                LocalOptions changed = new LocalOptions(values);
+                hook.setOptions(changed);
+                dispatcher.setOptions(changed);
+            }
             assertNotNull(reply); scheduled.getQueue().remove(reply); reply.run();
             ShadowLooper.idleMainLooper();
             View notice = activity.getWindow().getDecorView().findViewWithTag("automation.notice.100:thread:7001");
             assertNotNull(notice);
             assertEquals(0, database.imSdkContext.sends);
+            if (disablePrivate) {
+                values.put("reply_private_chats", false);
+                LocalOptions changed = new LocalOptions(values);
+                hook.setOptions(changed);
+                dispatcher.setOptions(changed);
+            }
             if (removedFromList) {
                 FollowListSnapshot.publish(FollowListSnapshot.beginRefresh("100", FollowListSnapshot.Kind.FOLLOWING),
                         Collections.emptySet());
@@ -94,9 +122,9 @@ public final class NativeAutoReplyIntegrationTest {
             worker.runAll(); ShadowLooper.idleMainLooper(); worker.runAll();
             List<AutomationHistoryStore.Entry> records = new AutomationHistoryStore(activity).read("reply");
             assertEquals(1, records.size());
-            assertEquals(cancel || removedFromList ? "cancelled" : "sent", records.get(0).status);
-            assertEquals(cancel || removedFromList ? 0 : 1, database.imSdkContext.sends);
-            if (!cancel && !removedFromList) {
+            assertEquals(cancel || removedFromList || disablePrivate ? "cancelled" : "sent", records.get(0).status);
+            assertEquals(cancel || removedFromList || disablePrivate ? 0 : 1, database.imSdkContext.sends);
+            if (!cancel && !removedFromList && !disablePrivate) {
                 assertEquals(7, database.imSdkContext.last.type);
                 assertEquals("固定回复", new org.json.JSONObject(database.imSdkContext.last.content).getString("text"));
                 assertEquals("thread", database.imSdkContext.last.conversation.id());
