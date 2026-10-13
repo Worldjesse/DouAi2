@@ -99,6 +99,56 @@ public final class AutomationHistoryDialogTest {
                 .getText().toString());
     }
 
+    @Test public void commentDetailsDistinguishUnknownUnsentTextOnlyAndImageRequests() throws Exception {
+        int[] imageCounts = {-1, 0, 0, 1, 3};
+        boolean[] requestSent = {false, false, true, true, true};
+        String[] statuses = {"sent", "cancelled", "sent", "sent", "cancelled"};
+        String[] labels = {"图片请求：未记录", "图片请求：未确认发送", "图片请求：未携带图片",
+                "图片请求：已携带 1 张图片", "图片请求：已携带 3 张图片"};
+        for (int index = 0; index < labels.length; index++) {
+            store.upsert(new AutomationHistoryStore.Entry("request-" + index, "comment", "target", "作者",
+                    "作品内容", "生成评论", "模型", statuses[index], index + 1, index + 1,
+                    imageCounts[index], requestSent[index]));
+        }
+        page.dialog().dismiss();
+        page = new AutomationHistoryDialog(activity, AutomationHistoryStore.COMMENT, false, worker);
+        page.dialog().show();
+        ShadowLooper.idleMainLooper();
+        worker.runNextOnThread();
+        ShadowLooper.idleMainLooper();
+
+        ListView list = list();
+        assertEquals(labels.length, list.getAdapter().getCount());
+        for (int position = 0; position < labels.length; position++) {
+            int index = labels.length - 1 - position;
+            View row = list.getAdapter().getView(position, null, list);
+            row.performClick();
+            AlertDialog detail = (AlertDialog) org.robolectric.shadows.ShadowDialog.getLatestDialog();
+            View content = detail.getWindow().getDecorView();
+            assertTrue(labels[index], containsText(content, labels[index]));
+            assertTrue(containsText(content, AutomationHistoryDialog.status(statuses[index])));
+            assertTrue(containsText(content, "作品内容"));
+            assertTrue(containsText(content, "生成评论"));
+            for (int other = 0; other < labels.length; other++) {
+                if (other != index) assertFalse(labels[other], containsText(content, labels[other]));
+            }
+            detail.dismiss();
+        }
+    }
+
+    @Test public void replyDetailsDoNotShowCommentImageRequestMetadata() throws Exception {
+        store.upsert(new AutomationHistoryStore.Entry("reply", "reply", "target", "用户", "消息", "回复",
+                "模型", "sent", 1, 1, 0, true));
+        page.dialog().show();
+        ShadowLooper.idleMainLooper();
+        worker.runNextOnThread();
+        ShadowLooper.idleMainLooper();
+        list().getAdapter().getView(0, null, list()).performClick();
+
+        AlertDialog detail = (AlertDialog) org.robolectric.shadows.ShadowDialog.getLatestDialog();
+        assertFalse(containsText(detail.getWindow().getDecorView(), "图片请求："));
+    }
+
     private ListView list() {
         return page.dialog().getWindow().getDecorView().findViewWithTag("automation.history");
     }

@@ -1,13 +1,19 @@
 package com.douai.module.config;
 
 import android.app.Application;
+import android.content.Context;
 import android.content.SharedPreferences;
 
 import com.douai.module.DouAiModule;
+import com.douai.module.feature.AutoCommentHook;
+import com.douai.module.feature.AutoCommentHookTest;
+import com.douai.module.feature.AutomationDispatcher;
 import com.douai.module.feature.FeedGestureToolsHook;
 import com.douai.module.feature.FollowListPager;
 import com.douai.module.feature.NativeFollowLists;
+import com.douai.module.feature.NativeMessagingHooks;
 import com.douai.module.feature.PlaybackBehaviorHooks;
+import com.douai.module.scan.HostScanReport;
 
 import io.github.libxposed.api.XposedInterface;
 
@@ -79,6 +85,68 @@ public final class ConfigurationDispatchTest {
         assertRelationshipDispatch("reply_global", true, false);
     }
 
+    @Test public void changingOnlyReplyDailyLimitUpdatesReplyAndDispatcherSnapshots() throws Exception {
+        assertAutomationLimitDispatch("reply_daily_limit");
+    }
+
+    @Test public void changingOnlyReplyCooldownUpdatesReplyAndDispatcherSnapshots() throws Exception {
+        assertAutomationLimitDispatch("reply_user_cooldown_minutes");
+    }
+
+    @Test public void changingOnlyCommentDailyLimitUpdatesCommentAndDispatcherSnapshots() throws Exception {
+        assertAutomationLimitDispatch("comment_daily_limit");
+    }
+
+    @Test public void changingOnlyCommentCooldownUpdatesCommentAndDispatcherSnapshots() throws Exception {
+        assertAutomationLimitDispatch("comment_user_cooldown_minutes");
+    }
+
+    private static void assertAutomationLimitDispatch(String key) throws Exception {
+        DouAiModule module = module();
+        Map<String, Object> values = new HashMap<>();
+        values.put("reply_daily_limit", "0");
+        values.put("reply_user_cooldown_minutes", "0");
+        values.put("comment_daily_limit", "0");
+        values.put("comment_user_cooldown_minutes", "0");
+        values.put("auto_message_text", "reply");
+        values.put("auto_comment_text", "comment");
+        LocalOptions initial = new LocalOptions(values);
+        try (AutomationDispatcher dispatcher = new AutomationDispatcher(RuntimeEnvironment.getApplication(), ignored -> { });
+             NativeMessagingHooks reply = messaging(initial, dispatcher);
+             AutoCommentHook comment = comments(initial, dispatcher)) {
+            setField(module, "automationDispatcher", dispatcher);
+            setField(module, "nativeMessagingHooks", reply);
+            setField(module, "autoCommentDraftHook", comment);
+            update(module, values);
+            LocalOptions previous = options(dispatcher);
+            assertSame(field(module, "localOptions"), previous);
+            assertSame(previous, options(reply));
+            assertSame(previous, options(comment));
+
+            values.put(key, "12");
+            update(module, values);
+            LocalOptions updated = (LocalOptions) field(module, "localOptions");
+            Object selected = key.startsWith("reply_") ? reply : comment;
+            Object other = key.startsWith("reply_") ? comment : reply;
+            assertNotSame(previous, updated);
+            assertSame(key, updated, options(selected));
+            assertSame(key, updated, options(dispatcher));
+            assertSame(key, previous, options(other));
+            assertEquals(12, options(selected).integer(key, -1));
+            assertEquals(12, options(dispatcher).integer(key, -1));
+            assertEquals("reply", options(selected).text("auto_message_text", ""));
+            assertEquals("comment", options(selected).text("auto_comment_text", ""));
+
+            values.put("playback_speed", "3");
+            update(module, values);
+            assertSame(updated, options(selected));
+            assertSame(updated, options(dispatcher));
+            assertSame(previous, options(other));
+        } finally {
+            ShadowLooper.idleMainLooper();
+        }
+    }
+
     private static void assertRelationshipDispatch(String key, Object before, Object after) throws Exception {
         DouAiModule module = module();
         Map<String, Object> values = new HashMap<>();
@@ -121,6 +189,26 @@ public final class ConfigurationDispatchTest {
                 LocalOptions.class, Consumer.class);
         constructor.setAccessible(true);
         return constructor.newInstance(options, (Consumer<String>) ignored -> { });
+    }
+
+    private static NativeMessagingHooks messaging(LocalOptions options, AutomationDispatcher dispatcher) throws Exception {
+        Constructor<NativeMessagingHooks> constructor = NativeMessagingHooks.class.getDeclaredConstructor(
+                Context.class, LocalOptions.class, Consumer.class, AutomationDispatcher.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(RuntimeEnvironment.getApplication(), options,
+                (Consumer<String>) ignored -> { }, dispatcher);
+    }
+
+    private static AutoCommentHook comments(LocalOptions options, AutomationDispatcher dispatcher) throws Exception {
+        Method report = AutoCommentHookTest.class.getDeclaredMethod("report");
+        report.setAccessible(true);
+        Class<?> frameworkType = Class.forName(AutoCommentHookTest.class.getName() + "$Framework");
+        Constructor<?> constructor = frameworkType.getDeclaredConstructor();
+        constructor.setAccessible(true);
+        Object framework = constructor.newInstance();
+        return AutoCommentHook.install((XposedInterface) field(framework, "api"),
+                (HostScanReport) report.invoke(null), AutoCommentHookTest.class.getClassLoader(),
+                RuntimeEnvironment.getApplication(), options, dispatcher, ignored -> { });
     }
 
     private static NativeFollowLists relationships() throws Exception {

@@ -79,11 +79,13 @@ final class NativeCommentPublisher implements AutoCloseable {
         return text != null && text.equals(HostTargets.read(model, "a"));
     }
 
-    void send(Object work, String aid, String text, BooleanSupplier valid, Runnable acceptedRequest, Consumer<String> result) {
+    void send(Object work, String aid, String text, BooleanSupplier valid, BooleanSupplier beforeNativeSend,
+              Runnable acceptedRequest, Consumer<String> result) {
         main.post(() -> {
             if (closed || !valid.getAsBoolean()) { result.accept("cancelled"); return; }
             Object request = null;
             Pending pending = null;
+            boolean accepted = false;
             try {
                 Object state = contextFactory.invoke(null, work);
                 Object origin = state == null ? null : resolveAweme.invoke(null, state);
@@ -96,7 +98,11 @@ final class NativeCommentPublisher implements AutoCloseable {
                 request = requestConstructor.newInstance();
                 pending = new Pending(aid, result);
                 requests.put(request, pending);
-                boolean accepted = Boolean.TRUE.equals(submit.invoke(request, model));
+                if (!valid.getAsBoolean() || !beforeNativeSend.getAsBoolean()) {
+                    received(request, "cancelled");
+                    return;
+                }
+                accepted = Boolean.TRUE.equals(submit.invoke(request, model));
                 if (!accepted) { received(request, "failed"); return; }
                 acceptedRequest.run();
                 safeLog("Automatic comment native request accepted for captured work");
@@ -108,6 +114,16 @@ final class NativeCommentPublisher implements AutoCloseable {
                 }, 30_000);
                 main.postDelayed(() -> requests.remove(owner, token), 120_000);
             } catch (ReflectiveOperationException | RuntimeException failure) {
+                // An invoked host method can throw after it has already sent the request.
+                if (request != null && pending != null
+                        && (accepted || failure instanceof java.lang.reflect.InvocationTargetException)) {
+                    Object owner = request;
+                    Pending token = pending;
+                    main.postDelayed(() -> requests.remove(owner, token), 120_000);
+                    safeLog("Automatic comment native request outcome unknown: " + failure.getClass().getSimpleName());
+                    result.accept("submitted");
+                    return;
+                }
                 if (request != null && pending != null) requests.remove(request);
                 safeLog("Automatic comment native request failed: " + failure.getClass().getSimpleName());
                 result.accept("failed");

@@ -65,6 +65,7 @@ public final class AutoCommentHookTest {
         activity = Robolectric.buildActivity(Activity.class).setup().get();
         activity.getSharedPreferences("douai_comment_state", Context.MODE_PRIVATE).edit().clear().commit();
         activity.getSharedPreferences("douai_automation_history", Context.MODE_PRIVATE).edit().clear().commit();
+        activity.getSharedPreferences("douai_automation_limits", Context.MODE_PRIVATE).edit().clear().commit();
         FrameLayout root = new FrameLayout(activity);
         input = new EditText(activity);
         root.addView(input);
@@ -123,6 +124,8 @@ public final class AutoCommentHookTest {
         flushDispatch();
         assertEquals(1, Request.attempts);
         assertEquals("sent", entry("work").status);
+        assertFalse(entry("work").modelRequestSent);
+        assertEquals(0, entry("work").requestImageCount);
     }
 
     @Test public void cancellingRingBeforeGenerationRemovesNewestWorkAndKeepsOldestFirst() throws Throwable {
@@ -189,6 +192,8 @@ public final class AutoCommentHookTest {
             assertTrue(connection.disconnected);
             assertEquals("cancelled", entry("work").status);
             assertEquals(0, server.getRequestCount());
+            assertFalse(entry("work").modelRequestSent);
+            assertEquals(0, entry("work").requestImageCount);
             holder.work = work("another");
             generate(); advanceSeconds(8);
             assertEquals(1, server.getRequestCount());
@@ -263,7 +268,66 @@ public final class AutoCommentHookTest {
             assertEquals(1, Request.attempts);
             assertEquals("重试后的评论", Request.models.get(0).a);
             assertEquals("sent", entry("work").status);
+            assertTrue(entry("work").modelRequestSent);
+            assertEquals(0, entry("work").requestImageCount);
         }
+    }
+
+    @Test public void imageRequestIsRecordedWithActualPayloadAndRetainedAfterCommentSend() throws Throwable {
+        useImageMedia();
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(modelResponse("{\"comment\":\"图片里的颜色很鲜明\"}"));
+            setOptions(new LocalOptions(aiOptions(server, false)));
+            generate(); flushDispatch();
+            RecordedRequest recorded = server.takeRequest(2, TimeUnit.SECONDS);
+            assertNotNull(recorded);
+            JSONArray contents = new JSONObject(recorded.getBody().readUtf8()).getJSONArray("messages")
+                    .getJSONObject(1).getJSONArray("content");
+            assertEquals("image_url", contents.getJSONObject(1).getString("type"));
+            assertTrue(contents.getJSONObject(1).getJSONObject("image_url").getString("url").startsWith("data:image/"));
+            assertTrue(entry("work").modelRequestSent);
+            assertEquals(1, entry("work").requestImageCount);
+            assertEquals("sent", entry("work").status);
+        }
+    }
+
+    @Test public void cancelledCommentKeepsImageRequestEvidenceWhileModelIsStillWaiting() throws Throwable {
+        useImageMedia();
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE));
+            setOptions(new LocalOptions(aiOptions(server, true)));
+            selectWork();
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(3));
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            flushDispatch();
+            assertTrue(entry("work").modelRequestSent);
+            assertEquals(1, entry("work").requestImageCount);
+            notice().performLongClick();
+            awaitGeneration(); flushDispatch();
+            assertEquals("cancelled", entry("work").status);
+            assertTrue(entry("work").modelRequestSent);
+            assertEquals(1, entry("work").requestImageCount);
+            assertEquals(0, Request.attempts);
+        }
+    }
+
+    private void useImageMedia() {
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(2, 2, android.graphics.Bitmap.Config.ARGB_8888);
+        bitmap.eraseColor(android.graphics.Color.RED);
+        assertTrue(bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, bytes));
+        bitmap.recycle();
+        mediaReads = () -> new MediaReadCancellation(60_000, System::nanoTime, uri ->
+                new java.net.HttpURLConnection(uri.toURL()) {
+                    @Override public int getResponseCode() { return 200; }
+                    @Override public java.io.InputStream getInputStream() {
+                        return new java.io.ByteArrayInputStream(bytes.toByteArray());
+                    }
+                    @Override public void disconnect() { }
+                    @Override public boolean usingProxy() { return false; }
+                    @Override public void connect() { }
+                });
+        holder.work.images = Collections.singletonList(new Picture("https://p.byteimg.com/image.png"));
     }
 
     @Test public void longPressDuringPublishingStopsFurtherRetriesWithoutRepeatingTheAcceptedRequest() throws Throwable {
@@ -596,6 +660,99 @@ public final class AutoCommentHookTest {
         flushDispatch();
         assertEquals("sent", entry("work").status);
         assertEquals(1, Request.attempts);
+    }
+
+    @Test public void dailyLimitStopsAlreadyQueuedCommentsFromOtherAuthors() throws Throwable {
+        Map<String, Object> limited = baseOptions(false);
+        limited.put("comment_daily_limit", "1");
+        setOptions(new LocalOptions(limited));
+        selectWork();
+        holder.work = work("second"); holder.work.author.uid = "300";
+        selectWork();
+        advanceSeconds(3);
+        advanceSeconds(5);
+        assertEquals(1, Request.attempts);
+        assertEquals("work", Request.models.get(0).y.work.id);
+        assertEquals("cancelled", entry("second").status);
+    }
+
+    @Test public void cooldownUsesAuthorUidAcrossDifferentWorksAndAllowsOtherAuthors() throws Throwable {
+        Map<String, Object> limited = baseOptions(false);
+        limited.put("comment_user_cooldown_minutes", "10");
+        setOptions(new LocalOptions(limited));
+        generate(); flushDispatch();
+        holder.work = work("same-author");
+        generate(); flushDispatch();
+        assertEquals(1, Request.attempts);
+        holder.work = work("other-author"); holder.work.author.uid = "300";
+        generate(); flushDispatch();
+        assertEquals(2, Request.attempts);
+        assertEquals("other-author", Request.models.get(1).y.work.id);
+    }
+
+    @Test public void nativeFailureReleasesDailyQuotaAndCooldownForRetry() throws Throwable {
+        Map<String, Object> limited = baseOptions(false);
+        limited.put("comment_daily_limit", "1");
+        limited.put("comment_user_cooldown_minutes", "10");
+        setOptions(new LocalOptions(limited));
+        Request.failuresRemaining = 1;
+        generate(); flushDispatch();
+        advanceSeconds(1);
+        assertEquals(2, Request.attempts);
+        assertEquals("sent", entry("work").status);
+        holder.work = work("after-success");
+        generate(); flushDispatch();
+        assertEquals(2, Request.attempts);
+    }
+
+    @Test public void unconfirmedSendConsumesQuotaWithHistoryDisabledAndLateFailureReleasesIt() throws Throwable {
+        Map<String, Object> limited = baseOptions(false);
+        limited.put("comment_daily_limit", "1");
+        limited.put("comment_save_history", false);
+        setOptions(new LocalOptions(limited));
+        Request.autoCallback = false;
+        generate(); flushDispatch();
+        advanceSeconds(30);
+        holder.work = work("while-unconfirmed");
+        generate(); flushDispatch();
+        assertEquals(1, Request.attempts);
+        assertTrue(history().isEmpty());
+        Request.complete(Request.instances.get(0), false); flushDispatch();
+        Request.autoCallback = true;
+        holder.work = work("after-failure");
+        generate(); flushDispatch();
+        assertEquals(2, Request.attempts);
+    }
+
+    @Test public void loweringLimitBeforeNativeSendCancelsPreparedComment() throws Throwable {
+        generate(); flushDispatch();
+        setOptions(options(true));
+        holder.work = work("second");
+        generate();
+        assertNotNull(notice());
+        Map<String, Object> limited = baseOptions(true);
+        limited.put("comment_daily_limit", "1");
+        setOptions(new LocalOptions(limited));
+        advanceSeconds(10);
+        assertEquals(1, Request.attempts);
+        assertEquals("cancelled", entry("second").status);
+    }
+
+    @Test public void exceptionAfterHostSubmissionKeepsQuotaAndNeverRetriesUnknownRequest() throws Throwable {
+        Map<String, Object> limited = baseOptions(false);
+        limited.put("comment_daily_limit", "1");
+        setOptions(new LocalOptions(limited));
+        Request.autoCallback = false;
+        Request.throwAfterSubmit = true;
+        generate(); flushDispatch();
+        advanceSeconds(10);
+        assertEquals(1, Request.attempts);
+        assertEquals("submitted", entry("work").status);
+        holder.work = work("after-unknown"); holder.work.author.uid = "300";
+        generate(); flushDispatch();
+        assertEquals(1, Request.attempts);
+        Request.complete(Request.instances.get(0), true); flushDispatch();
+        assertEquals("sent", entry("work").status);
     }
 
     @Test public void automaticHashCommentsRetainTextAndOwnedModelIdentity() throws Throwable {
@@ -1016,15 +1173,18 @@ public final class AutoCommentHookTest {
         static int failuresRemaining;
         static boolean autoCallback;
         static boolean reject;
+        static boolean throwAfterSubmit;
         static final List<Model> models = new ArrayList<>();
         static final List<Request> instances = new ArrayList<>();
         static void reset(Framework selected) {
             framework = selected; attempts = 0; failuresRemaining = 0; autoCallback = true; reject = false;
+            throwAfterSubmit = false;
             models.clear(); instances.clear();
         }
         public boolean checked(Model model) {
             attempts++; models.add(model); instances.add(this);
             if (reject) return false;
+            if (throwAfterSubmit) throw new IllegalStateException("Host threw after starting submission");
             if (autoCallback) {
                 boolean success = failuresRemaining == 0;
                 if (!success) failuresRemaining--;

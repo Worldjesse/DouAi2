@@ -237,6 +237,19 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
 
     public void recordOutcome(Entry entry) { onMain(() -> record(entry)); }
 
+    public void commentRequestSent(String id, int imageCount) {
+        onMain(() -> {
+            if (closed || !options.enabled("comment_save_history")) return;
+            try {
+                worker.execute(() -> {
+                    if (!options.enabled("comment_save_history")) return;
+                    try { history.markModelRequestSent(AutomationHistoryStore.COMMENT, id, imageCount); }
+                    catch (RuntimeException failure) { safeLog("Could not write comment image request history"); }
+                });
+            } catch (RejectedExecutionException ignored) { }
+        });
+    }
+
     public void reportFinalFailure(Entry entry) {
         onMain(() -> {
             if (closed) return;
@@ -356,7 +369,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
     private static Entry withStatus(Entry entry, String status) {
         return new Entry(entry.id, entry.kind, entry.targetId, entry.targetName,
                 entry.input, entry.output, entry.modelName, status,
-                entry.createdAt, System.currentTimeMillis());
+                entry.createdAt, System.currentTimeMillis(), entry.requestImageCount, entry.modelRequestSent);
     }
 
     private void record(Entry entry) {

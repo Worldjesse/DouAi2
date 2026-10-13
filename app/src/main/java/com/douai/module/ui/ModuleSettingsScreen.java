@@ -527,7 +527,20 @@ public final class ModuleSettingsScreen {
         addSwitch("接收群聊", "", repository.getBoolean("reply_group_chats", false), true,
                 value -> { repository.putBoolean("reply_group_chats", value); groupRange[0].setValue(groupReplyPreview()); });
         groupRange[0] = addOption("群聊范围", "", groupReplyPreview(), true, () -> showGroupReplySettings(groupRange[0]));
+        addAutomationLimitOption("每日最大回复数", "0 不限制；按本地自然日重置", "reply_daily_limit", 1000000);
+        addAutomationLimitOption("同一用户回复间隔（分钟）", "0 不限制；按同一 UID 计算", "reply_user_cooldown_minutes", 525600);
         addOption("发送与记录", "", null, true, this::showReplyDeliverySettings);
+    }
+
+    private void addAutomationLimitOption(String title, String summary, String key, int maximum) {
+        addEditableOption(title, summary, repository.getString(key, "0"), true, true, false, value -> {
+            if (!value.matches("[0-9]+")) throw new IllegalArgumentException("请输入 0 至 " + maximum + " 的整数");
+            int limit;
+            try { limit = Integer.parseInt(value); }
+            catch (NumberFormatException invalid) { throw new IllegalArgumentException("请输入 0 至 " + maximum + " 的整数"); }
+            if (limit > maximum) throw new IllegalArgumentException("请输入 0 至 " + maximum + " 的整数");
+            repository.putString(key, Integer.toString(limit));
+        });
     }
 
     private static String scopeLabel(String mode) {
@@ -775,6 +788,8 @@ public final class ModuleSettingsScreen {
                 true, () -> showCommentScopeSettings(scope[0]));
         boolean ai = "ai".equals(repository.getString("comment_mode", "ai"));
         media[0] = addOption("素材识别", "", commentMediaPreview(), ai, () -> showCommentMediaSettings(media[0]));
+        addAutomationLimitOption("每日最大评论数", "0 不限制；按本地自然日重置", "comment_daily_limit", 1000000);
+        addAutomationLimitOption("同一作者评论间隔（分钟）", "0 不限制；按作品作者 UID 计算", "comment_user_cooldown_minutes", 525600);
         addOption("发送与记录", "", null, true, () -> showDeliverySettings(AutomationHistoryStore.COMMENT));
     }
 
@@ -2115,8 +2130,8 @@ public final class ModuleSettingsScreen {
         FILTER("视频筛选", 14),
         DOWNLOAD("下载相关", 5),
         AUTOPLAY("自动播放", 6),
-        AUTO_REPLY("自动回复", 8),
-        AUTO_COMMENT("自动评论", 6),
+        AUTO_REPLY("自动回复", 10),
+        AUTO_COMMENT("自动评论", 8),
         COMMENT("评论相关", 7),
         STREAK("自动续火花", 7),
         COMPONENT_HIDE("组件隐藏", 24),

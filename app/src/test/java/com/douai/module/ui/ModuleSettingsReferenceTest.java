@@ -89,8 +89,10 @@ public final class ModuleSettingsReferenceTest {
                 {"DOWNLOAD", "启用下载菜单", "是否启用抖音下载自定义命名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
                 {"AUTOPLAY", "自动滑动到下一个视频", "自动倍速播放", "倍速数值", "打开评论时,不滑动视频",
                         "滑动智能判断上下", "互动自动化"},
-                {"AUTO_REPLY", "开启自动回复", "回复模式", "回复内容", "接收私聊", "私聊范围", "接收群聊", "群聊范围", "发送与记录"},
-                {"AUTO_COMMENT", "开启自动评论", "评论模式", "评论内容", "作品范围", "素材识别", "发送与记录"},
+                {"AUTO_REPLY", "开启自动回复", "回复模式", "回复内容", "接收私聊", "私聊范围", "接收群聊", "群聊范围",
+                        "每日最大回复数", "同一用户回复间隔（分钟）", "发送与记录"},
+                {"AUTO_COMMENT", "开启自动评论", "评论模式", "评论内容", "作品范围", "素材识别",
+                        "每日最大评论数", "同一作者评论间隔（分钟）", "发送与记录"},
                 {"COMMENT", "评论自动添加后缀", "后缀内容", "替换语音文件",
                         "评论自动文本转语音(文本前面输入\"#\"符号将自动转换)", "长按操作", "彩色评论", "彩色评论类型"},
                 {"STREAK", "自动续火花", "选择用户", "续火花内容", "续火花成功弹出Tip",
@@ -106,6 +108,85 @@ public final class ModuleSettingsReferenceTest {
                     settingTitles(page));
             assertEquals(reference[0] + " must open editors from a single row", 0,
                     collect(page, EditText.class).size());
+            screen.dismissChildPages();
+        }
+    }
+
+    @Test
+    public void automationLimitsAreSeparateTopLevelSettingsAndPersistIndependently() {
+        View reply = openCategory("AUTO_REPLY");
+        assertEquals("0", ((TextView) reply.findViewWithTag("settings.value.每日最大回复数")).getText().toString());
+        assertEquals("0", ((TextView) reply.findViewWithTag("settings.value.同一用户回复间隔（分钟）")).getText().toString());
+        assertNull(reply.findViewWithTag("settings.option.每日最大评论数"));
+        assertNull(reply.findViewWithTag("settings.option.同一作者评论间隔（分钟）"));
+        assertTrue(containsText(option(reply, "每日最大回复数"), "本地自然日"));
+        assertTrue(containsText(option(reply, "同一用户回复间隔（分钟）"), "UID"));
+        editOption(reply, "每日最大回复数", "120");
+        editOption(reply, "同一用户回复间隔（分钟）", "15");
+        assertFalse(store.values.containsKey("comment_daily_limit"));
+        assertFalse(store.values.containsKey("comment_user_cooldown_minutes"));
+        option(reply, "发送与记录").performClick();
+        View replyDelivery = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        assertNull(replyDelivery.findViewWithTag("settings.option.每日最大回复数"));
+        assertNull(replyDelivery.findViewWithTag("settings.option.同一用户回复间隔（分钟）"));
+
+        screen.dismissChildPages();
+        View comment = openCategory("AUTO_COMMENT");
+        assertEquals("0", ((TextView) comment.findViewWithTag("settings.value.每日最大评论数")).getText().toString());
+        assertEquals("0", ((TextView) comment.findViewWithTag("settings.value.同一作者评论间隔（分钟）")).getText().toString());
+        assertNull(comment.findViewWithTag("settings.option.每日最大回复数"));
+        assertNull(comment.findViewWithTag("settings.option.同一用户回复间隔（分钟）"));
+        editOption(comment, "每日最大评论数", "40");
+        editOption(comment, "同一作者评论间隔（分钟）", "60");
+        assertEquals("120", store.getString("reply_daily_limit", ""));
+        assertEquals("15", store.getString("reply_user_cooldown_minutes", ""));
+        assertEquals("40", store.getString("comment_daily_limit", ""));
+        assertEquals("60", store.getString("comment_user_cooldown_minutes", ""));
+        option(comment, "发送与记录").performClick();
+        View commentDelivery = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        assertNull(commentDelivery.findViewWithTag("settings.option.每日最大评论数"));
+        assertNull(commentDelivery.findViewWithTag("settings.option.同一作者评论间隔（分钟）"));
+
+        screen.dismissChildPages();
+        reply = openCategory("AUTO_REPLY");
+        assertEquals("120", ((TextView) reply.findViewWithTag("settings.value.每日最大回复数")).getText().toString());
+        assertEquals("15", ((TextView) reply.findViewWithTag("settings.value.同一用户回复间隔（分钟）")).getText().toString());
+        screen.dismissChildPages();
+        comment = openCategory("AUTO_COMMENT");
+        assertEquals("40", ((TextView) comment.findViewWithTag("settings.value.每日最大评论数")).getText().toString());
+        assertEquals("60", ((TextView) comment.findViewWithTag("settings.value.同一作者评论间隔（分钟）")).getText().toString());
+    }
+
+    @Test
+    public void automationLimitsRejectInvalidValuesAndAcceptZeroAndUpperBounds() {
+        String[][] fields = {
+                {"AUTO_REPLY", "每日最大回复数", "reply_daily_limit", "1000000"},
+                {"AUTO_REPLY", "同一用户回复间隔（分钟）", "reply_user_cooldown_minutes", "525600"},
+                {"AUTO_COMMENT", "每日最大评论数", "comment_daily_limit", "1000000"},
+                {"AUTO_COMMENT", "同一作者评论间隔（分钟）", "comment_user_cooldown_minutes", "525600"}
+        };
+        for (String[] field : fields) {
+            View page = openCategory(field[0]);
+            editOption(page, field[1], "7");
+            option(page, field[1]).performClick();
+            AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
+            EditText input = editor.getWindow().getDecorView().findViewWithTag("settings.input." + field[1]);
+            input.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
+            for (String invalid : Arrays.asList("", "-1", "+1", "1.5", "invalid", "2147483648",
+                    Integer.toString(Integer.parseInt(field[3]) + 1))) {
+                input.setText(invalid);
+                editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+                ShadowLooper.idleMainLooper();
+                assertTrue(field[1] + ": " + invalid, editor.isShowing());
+                assertEquals(field[1] + ": " + invalid, "7", store.getString(field[2], ""));
+                assertEquals("7", ((TextView) page.findViewWithTag("settings.value." + field[1])).getText().toString());
+            }
+            editor.dismiss();
+            ShadowLooper.idleMainLooper();
+            editOption(page, field[1], field[3]);
+            assertEquals(field[3], store.getString(field[2], ""));
+            editOption(page, field[1], "0");
+            assertEquals("0", store.getString(field[2], ""));
             screen.dismissChildPages();
         }
     }
@@ -1313,7 +1394,7 @@ public final class ModuleSettingsReferenceTest {
 
     @Test
     public void narrowSubpagesKeepEntireLabelsAndControlsWithinTheirRows() {
-        for (String category : Arrays.asList("INTERFACE", "FILTER", "DOWNLOAD", "AUTO_REPLY", "COMMENT", "MESSAGE")) {
+        for (String category : Arrays.asList("INTERFACE", "FILTER", "DOWNLOAD", "AUTO_REPLY", "AUTO_COMMENT", "COMMENT", "MESSAGE")) {
             View page = openCategory(category);
             ViewGroup container = page.findViewById(android.R.id.content);
             View panel = container.getChildAt(0);

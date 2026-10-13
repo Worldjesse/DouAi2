@@ -508,6 +508,7 @@ public final class DouAiModule extends XposedModule {
                     "download_custom_name", "download_name_template", "remove_download_limits");
             boolean replyChanged = initial || changes.any("automation_enabled", "native_auto_reply", "reply_global",
                     "reply_targets", "reply_mode", "reply_prompt", "reply_delay_seconds", "auto_message_text",
+                    "reply_daily_limit", "reply_user_cooldown_minutes",
                     "reply_keywords", "reply_scope_mode", "reply_scope_relations", "reply_scope_fields",
                     "reply_scope_keywords", "reply_scope_users", "reply_filter_mode", "reply_filter_keywords",
                     "reply_filter_fields", "reply_private_chats", "reply_group_chats", "reply_group_scope_mode",
@@ -517,6 +518,7 @@ public final class DouAiModule extends XposedModule {
                     "streak_retry_unknown_token");
             boolean commentAutomationChanged = initial || changes.any("automation_enabled", "native_auto_comment",
                     "comment_mode", "comment_prompt", "comment_delay_seconds", "auto_comment_text",
+                    "comment_daily_limit", "comment_user_cooldown_minutes",
                     "comment_recognize_images", "comment_recognize_video", "comment_scope_mode",
                     "comment_scope_relations", "comment_scope_fields", "comment_scope_keywords",
                     "comment_scope_users", "comment_filter_mode", "comment_filter_keywords",

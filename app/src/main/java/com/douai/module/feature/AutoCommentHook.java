@@ -46,6 +46,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
     private final AtomicLong generation = new AtomicLong();
     private final AutoCommentQueue<Task> queue;
     private final NativeCommentPublisher publisher;
+    private final AutomationRateLimiter rateLimiter;
     private final AutoCloseable followListUpdates;
     private final Field holderRoot;
     private final Method holderAweme;
@@ -70,6 +71,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         this.imageRoot = imageRoot;
         this.imageAweme = imageAweme;
         this.publisher = publisher;
+        rateLimiter = new AutomationRateLimiter(this.context);
         this.log = log;
         this.mediaReads = mediaReads;
         queue = new AutoCommentQueue<>(new AutoCommentQueue.Scheduler() {
@@ -147,14 +149,17 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         LocalOptions before = options;
         options = next;
         for (String key : new String[]{"native_auto_comment", "comment_mode", "comment_prompt",
-                "comment_delay_seconds", "auto_comment_text", AutomationCommentMedia.RECOGNIZE_IMAGES,
+                "comment_delay_seconds", "comment_daily_limit", "comment_user_cooldown_minutes",
+                "auto_comment_text", AutomationCommentMedia.RECOGNIZE_IMAGES,
                 AutomationCommentMedia.RECOGNIZE_VIDEO, "comment_scope_mode", "comment_scope_relations",
                 "comment_scope_fields", "comment_scope_keywords", "comment_scope_users", "comment_filter_mode",
                 "comment_filter_keywords", "comment_filter_fields", AiModelSettings.KEY}) {
             boolean defaultEnabled = AutomationCommentMedia.RECOGNIZE_IMAGES.equals(key);
             if (before.enabled(key, defaultEnabled) != next.enabled(key, defaultEnabled)
                     || !before.text(key, "").equals(next.text(key, ""))
-                    || "comment_delay_seconds".equals(key) && before.integer(key, 3) != next.integer(key, 3)) {
+                    || "comment_delay_seconds".equals(key) && before.integer(key, 3) != next.integer(key, 3)
+                    || ("comment_daily_limit".equals(key) || "comment_user_cooldown_minutes".equals(key))
+                    && before.integer(key, 0) != next.integer(key, 0)) {
                 generation.incrementAndGet();
                 GenerationAttempt active = activeGeneration;
                 if (active != null) markCancelled(active.task);
@@ -198,6 +203,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
             Task task = new Task(generation.get(), account, aid, identity, work, workInput(work),
                     workAuthor(work), options);
             String authorId = string(modelValue(author, "uid", "getUid"));
+            if (!rateLimiter.canSend(AutomationHistoryStore.COMMENT, account, authorId, options)) return;
             if (!ContentScopePolicy.allows("comment", options, authorId, task.name,
                     workDescription(work), workTitle(work), AutomationScopePolicy.fromUser(author))) {
                 safeLog("Automatic comment skipped by author scope");
@@ -215,6 +221,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         Object author = modelValue(task.work, "author", "getAuthor");
         return accountCurrent && enabled() && !task.cancelled && task.epoch == generation.get() && task.account == account
                 && task.aid.equals(HostTargets.invoke(task.work, "getAid"))
+                && rateLimiter.canSend(AutomationHistoryStore.COMMENT, task.account, task.authorId, options)
                 && ContentScopePolicy.allows("comment", options,
                 string(modelValue(author, "uid", "getUid")), workAuthor(task.work),
                 workDescription(task.work), workTitle(task.work), AutomationScopePolicy.fromUser(author));
@@ -255,7 +262,12 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                         operation.check();
                         String output = ai.reply(task.identity, task.input, images, models,
                                 CommentOutputPolicy.task(task.options.text("comment_prompt",
-                                        "根据当前作品自然地写一条评论。")), false);
+                                        "根据当前作品自然地写一条评论。")), false, "", imageCount -> {
+                                    task.requestImageCount = imageCount;
+                                    task.modelRequestSent = true;
+                                    safeLog("Automatic comment model request sent; images=" + imageCount + "; work=" + task.aid);
+                                    dispatcher.commentRequestSent(task.id, imageCount);
+                                });
                         operation.check();
                         String comment = CommentOutputPolicy.parse(output);
                         if (comment.isEmpty()) {
@@ -321,11 +333,16 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
 
     private void publish(Task task, Consumer<String> result) {
         dispatcher.commentStage(task.id, "publishing");
+        AutomationRateLimiter.Reservation[] reservation = new AutomationRateLimiter.Reservation[1];
         publisher.send(task.work, task.aid, task.text, () -> valid(task), () -> {
+            reservation[0] = rateLimiter.tryReserve(AutomationHistoryStore.COMMENT, task.account, task.authorId, options);
+            return reservation[0] != null;
+        }, () -> {
             inFlight.put(task.identity, task.id);
             rememberSubmission(task);
             main.postDelayed(() -> inFlight.remove(task.identity, task.id), 120_000);
         }, status -> {
+            if ("failed".equals(status) || "cancelled".equals(status)) rateLimiter.release(reservation[0]);
             if ("failed".equals(status) && inFlight.remove(task.identity, task.id)) {
                 context.getSharedPreferences("douai_comment_state", Context.MODE_PRIVATE).edit().remove(task.identity).apply();
             } else if ("sent".equals(status)) inFlight.remove(task.identity, task.id);
@@ -360,7 +377,8 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
 
     private static AutomationHistoryStore.Entry entry(Task task, String status) {
         return new AutomationHistoryStore.Entry(task.id, AutomationHistoryStore.COMMENT, task.aid, task.name,
-                task.input, task.text == null ? "" : task.text, task.model, status, task.createdAt, System.currentTimeMillis());
+                task.input, task.text == null ? "" : task.text, task.model, status, task.createdAt,
+                System.currentTimeMillis(), task.requestImageCount, task.modelRequestSent);
     }
 
     static String workInput(Object work) {
@@ -480,10 +498,13 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         final Object work;
         final String input;
         final String name;
+        final String authorId;
         final LocalOptions options;
         final long createdAt = System.currentTimeMillis();
         volatile String text;
         volatile String model = "";
+        volatile int requestImageCount;
+        volatile boolean modelRequestSent;
         volatile boolean approved;
         volatile boolean terminal;
         volatile boolean cancelled;
@@ -492,6 +513,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
             this.epoch = epoch; this.account = account; this.aid = aid; this.identity = identity;
             this.id = identity + ':' + java.util.UUID.randomUUID(); this.work = work; this.input = input;
             this.name = name; this.options = options;
+            this.authorId = string(modelValue(modelValue(work, "author", "getAuthor"), "uid", "getUid"));
         }
     }
 

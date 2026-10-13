@@ -44,6 +44,89 @@ public final class NativeAutoReplyIntegrationTest {
     @Test public void interactionMasterChangeDoesNotCancelDelayedReply() throws Throwable { flow(false, false, true, true); }
     @Test public void disablingDefaultPrivateChatScopeCancelsPreparedReply() throws Throwable { flow(false, false, true, false, true); }
 
+    @Test public void dailyLimitStopsASecondReplyPreparedBeforeTheFirstSend() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies("reply_daily_limit", "1")) {
+            fixture.receive(200, "thread");
+            fixture.receive(201, "other");
+            fixture.flush();
+            assertEquals(1, fixture.database.imSdkContext.sends);
+            List<AutomationHistoryStore.Entry> records = fixture.history();
+            assertEquals(2, records.size());
+            assertEquals(1, records.stream().filter(entry -> "sent".equals(entry.status)).count());
+            assertEquals(1, records.stream().filter(entry -> "cancelled".equals(entry.status)).count());
+        }
+    }
+
+    @Test public void nativeSendBoundaryRechecksAllowanceConsumedAfterPreviewValidation() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies("reply_daily_limit", "1")) {
+            fixture.database.imSdkContext.beforeSender = () -> assertNotNull(new AutomationRateLimiter(fixture.activity)
+                    .tryReserve(AutomationHistoryStore.REPLY, 100, "201", new LocalOptions(fixture.values)));
+            fixture.receive(200, "thread");
+            fixture.flush();
+            assertEquals(0, fixture.database.imSdkContext.sends);
+            assertEquals("cancelled", fixture.history().get(0).status);
+        }
+    }
+
+    @Test public void sameSenderIntervalSpansPrivateAndGroupChatsButAllowsAnotherGroupMember() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies("reply_user_cooldown_minutes", "30")) {
+            fixture.receive(200, "thread");
+            fixture.receive(200, "group");
+            fixture.receive(201, "group");
+            fixture.flush();
+            assertEquals(2, fixture.database.imSdkContext.sends);
+            fixture.receive(200, "group");
+            fixture.flush();
+            assertEquals(2, fixture.database.imSdkContext.sends);
+            assertEquals(3, fixture.history().size());
+        }
+    }
+
+    @Test public void nativeFailureRestoresDailyAndSameSenderAllowance() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies("reply_daily_limit", "1",
+                "reply_user_cooldown_minutes", "30")) {
+            fixture.database.imSdkContext.failNext = true;
+            fixture.receive(200, "thread");
+            fixture.flush();
+            fixture.receive(200, "thread");
+            fixture.flush();
+            assertEquals(2, fixture.database.imSdkContext.sends);
+            assertEquals(1, fixture.history().stream().filter(entry -> "failed".equals(entry.status)).count());
+            assertEquals(1, fixture.history().stream().filter(entry -> "sent".equals(entry.status)).count());
+        }
+    }
+
+    @Test public void missingNativeAcknowledgmentKeepsAllowanceConsumedAfterTimeout() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies("reply_daily_limit", "1")) {
+            fixture.database.imSdkContext.suppressCallbacks = true;
+            fixture.receive(200, "thread");
+            fixture.flush();
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(31));
+            fixture.flush();
+            fixture.receive(201, "other");
+            fixture.flush();
+            assertEquals(1, fixture.database.imSdkContext.sends);
+            assertEquals("submitted", fixture.history().get(0).status);
+        }
+    }
+
+    @Test public void enablingLimitCountsEarlierUnlimitedSendsAndCancelsPreparedReply() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies()) {
+            fixture.receive(200, "thread");
+            fixture.flush();
+            fixture.receive(201, "other");
+            fixture.values.put("reply_daily_limit", "1");
+            LocalOptions changed = new LocalOptions(fixture.values);
+            fixture.hook.setOptions(changed);
+            fixture.dispatcher.setOptions(changed);
+            fixture.flush();
+            fixture.receive(202, "third");
+            fixture.flush();
+            assertEquals(1, fixture.database.imSdkContext.sends);
+            assertEquals(2, fixture.history().size());
+        }
+    }
+
     private void flow(boolean cancel) throws Throwable {
         flow(cancel, false);
     }
@@ -137,6 +220,8 @@ public final class NativeAutoReplyIntegrationTest {
 
     public static final class Sdk {
         int sends; Message last;
+        boolean failNext; boolean suppressCallbacks;
+        Runnable beforeSender = () -> { };
         public long uid() { return 100; }
         public Bean bean() { return new Bean(); }
         public Conversations conversations() { return new Conversations(); }
@@ -155,21 +240,98 @@ public final class NativeAutoReplyIntegrationTest {
     }
     public static final class Message { int type; String content; Conversation conversation; }
     public static final class Conversations {
-        public Conversation find(String id) { return "thread".equals(id) ? new Conversation() : null; }
+        public Conversation find(String id) {
+            return Arrays.asList("thread", "other", "third", "group").contains(id) ? new Conversation(id) : null;
+        }
         public List<Conversation> all() { return Collections.emptyList(); }
     }
     public static final class Conversation {
-        public String id() { return "thread"; }
+        final String id;
+        public Conversation(String id) { this.id = id; }
+        public String id() { return id; }
         public List<Long> members() { return Arrays.asList(100L, 200L); }
         public Core core() { return new Core(); }
-        public boolean single() { return true; }
+        public boolean single() { return !"group".equals(id); }
     }
     public static final class Core { public String name() { return "目标用户"; } }
     public static final class Text { public String text; public static Text create(String value) { Text text = new Text(); text.text = value; return text; } }
     public static final class Sender {
         final Sdk sdk; final IRequestListener listener;
-        public Sender(Sdk sdk, IRequestListener listener) { this.sdk = sdk; this.listener = listener; }
-        public void send(Message message, Map<String, String> extras) { sdk.sends++; sdk.last = message; listener.onSuccess(message); }
+        public Sender(Sdk sdk, IRequestListener listener) {
+            this.sdk = sdk; this.listener = listener;
+            sdk.beforeSender.run();
+        }
+        public void send(Message message, Map<String, String> extras) {
+            sdk.sends++; sdk.last = message;
+            if (sdk.suppressCallbacks) return;
+            if (sdk.failNext) {
+                sdk.failNext = false;
+                listener.onFailure(new IllegalStateException("Rejected by native SDK"));
+            } else listener.onSuccess(message);
+        }
+    }
+
+    private final class LimitedReplies implements AutoCloseable {
+        final Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        final ManualExecutor worker = new ManualExecutor();
+        final AutomationDispatcher dispatcher = new AutomationDispatcher(activity, ignored -> { }, worker);
+        final NativeMessagingHooksTest.Framework framework = new NativeMessagingHooksTest.Framework();
+        final Map<String, Object> values = new HashMap<>();
+        final Database database = new Database();
+        final NativeMessagingHooks hook;
+        final ScheduledThreadPoolExecutor scheduled;
+        int serverId = 8000;
+
+        LimitedReplies(String... limits) throws Exception {
+            FollowListSnapshot.reset();
+            values.put("native_auto_reply", true);
+            values.put("reply_global", true);
+            values.put("reply_group_chats", true);
+            values.put("reply_save_history", true);
+            values.put("auto_message_text", "reply");
+            for (int i = 0; i < limits.length; i += 2) values.put(limits[i], limits[i + 1]);
+            LocalOptions options = new LocalOptions(values);
+            dispatcher.setOptions(options);
+            List<String> diagnostics = new ArrayList<>();
+            hook = NativeMessagingHooks.install(framework.api, report(), getClass().getClassLoader(),
+                    activity, options, diagnostics::add, dispatcher);
+            assertTrue(diagnostics.toString(), hook.supports("native_reply"));
+            scheduled = (ScheduledThreadPoolExecutor) HostTargets.read(hook, "worker");
+            for (Runnable task : scheduled.getQueue()) ((java.util.concurrent.Future<?>) task).cancel(false);
+            scheduled.getQueue().clear();
+        }
+
+        void receive(long sender, String conversation) throws Throwable {
+            ContentValues incoming = new ContentValues();
+            incoming.put("conversation_id", conversation);
+            incoming.put("conversation_type", "group".equals(conversation) ? 2 : 1);
+            incoming.put("sender", sender);
+            incoming.put("msg_server_id", Integer.toString(++serverId));
+            incoming.put("created_time", System.currentTimeMillis());
+            incoming.put("type", 7);
+            incoming.put("content", "{\"text\":\"incoming\"}");
+            framework.invoke(Database.class.getMethod("insert", String.class, String.class, ContentValues.class),
+                    database, "msg", null, incoming);
+            Runnable reply = scheduled.getQueue().peek();
+            if (reply != null) {
+                scheduled.getQueue().remove(reply);
+                reply.run();
+            }
+            ShadowLooper.idleMainLooper();
+        }
+
+        void flush() {
+            worker.runAll();
+            ShadowLooper.idleMainLooper();
+            worker.runAll();
+        }
+
+        List<AutomationHistoryStore.Entry> history() { return new AutomationHistoryStore(activity).read("reply"); }
+
+        @Override public void close() {
+            hook.close(); dispatcher.close(); ShadowLooper.idleMainLooper(); worker.runAll(); activity.finish();
+            FollowListSnapshot.reset();
+        }
     }
 
     private static HostScanReport report() throws Exception {

@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.function.Consumer;
+import java.util.function.IntConsumer;
 
 /** Provider-aware text client for module-local model profiles. */
 public final class ChatCompletionClient {
@@ -68,6 +69,12 @@ public final class ChatCompletionClient {
     public synchronized String reply(String conversation, String prompt, List<ChatImage> images,
                                      AiModelSettings settings, String secondaryPrompt, boolean remember,
                                      String document) throws Exception {
+        return reply(conversation, prompt, images, settings, secondaryPrompt, remember, document, ignored -> { });
+    }
+
+    public synchronized String reply(String conversation, String prompt, List<ChatImage> images,
+                                     AiModelSettings settings, String secondaryPrompt, boolean remember,
+                                     String document, IntConsumer requestSent) throws Exception {
         AiModelConfig config = settings.selected();
         String secondary = secondaryPrompt == null ? "" : secondaryPrompt;
         List<ChatImage> attachments = images == null ? Collections.emptyList() : new ArrayList<>(images);
@@ -76,7 +83,8 @@ public final class ChatCompletionClient {
             if (image == null) throw new IllegalArgumentException("图片内容为空");
         }
         return send(config, conversation == null ? "" : conversation, prompt == null ? "" : prompt,
-                Collections.unmodifiableList(attachments), secondary, remember, document == null ? "" : document);
+                Collections.unmodifiableList(attachments), secondary, remember, document == null ? "" : document,
+                requestSent == null ? ignored -> { } : requestSent);
     }
 
     /** Automatic replies enter model context only after the host acknowledges sending. */
@@ -200,7 +208,7 @@ public final class ChatCompletionClient {
 
     private synchronized String send(AiModelConfig config, String conversation, String prompt,
                                      List<ChatImage> images, String secondaryPrompt, boolean remember,
-                                     String document) throws Exception {
+                                     String document, IntConsumer requestSent) throws Exception {
         if (Thread.currentThread().isInterrupted()) throw cancelled();
         config.validate(true);
         if (prompt.trim().isEmpty() && images.isEmpty() && document.isEmpty()) throw new IllegalArgumentException("消息不能为空");
@@ -247,6 +255,8 @@ public final class ChatCompletionClient {
             connection.setFixedLengthStreamingMode(bytes.length);
             ensureActive(request);
             try (java.io.OutputStream output = connection.getOutputStream()) { output.write(bytes); }
+            try { requestSent.accept(images.size()); }
+            catch (RuntimeException ignored) { }
             diagnostic(config, secondaryPrompt, prior.size(), "sent", 0);
             ensureActive(request);
             int status = connection.getResponseCode();

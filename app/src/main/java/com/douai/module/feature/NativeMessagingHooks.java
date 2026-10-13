@@ -31,6 +31,7 @@ import java.util.Set;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
@@ -39,6 +40,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
     private final Context context;
     private final SharedPreferences state;
     private final StreakSendLedger streakLedger;
+    private final AutomationRateLimiter rateLimiter;
     private final Consumer<String> log;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ScheduledThreadPoolExecutor worker = new ScheduledThreadPoolExecutor(1);
@@ -104,6 +106,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
         this.dispatcher.setOptions(options);
         state = context.getSharedPreferences("douai_message_state", Context.MODE_PRIVATE);
         streakLedger = new StreakSendLedger(state);
+        rateLimiter = new AutomationRateLimiter(context);
         resetToken = state.getString("streak.reset_token", "");
         recall = new BehaviorHookGroup("prevent_message_recall", this.log);
         receive = new BehaviorHookGroup("native_reply", this.log);
@@ -192,7 +195,9 @@ public final class NativeMessagingHooks implements AutoCloseable {
 
     private static boolean automationOptionsChanged(LocalOptions previous, LocalOptions next) {
         for (String key : new String[]{"native_auto_reply", "reply_global", "reply_targets",
-                "reply_mode", "reply_prompt", "reply_delay_seconds", "auto_message_text", "reply_keywords",
+                "reply_mode", "reply_prompt", "reply_delay_seconds", "reply_daily_limit",
+                "reply_user_cooldown_minutes",
+                "auto_message_text", "reply_keywords",
                 "reply_scope_mode", "reply_scope_relations", "reply_scope_fields", "reply_scope_keywords",
                 "reply_filter_mode", "reply_filter_keywords", "reply_filter_fields",
                 "reply_private_chats", "reply_group_chats",
@@ -367,6 +372,8 @@ public final class NativeMessagingHooks implements AutoCloseable {
         if (!NativeFollowLists.ensureAccount(Long.toString(account))) return;
         ReplyPolicy.Incoming incoming = ReplyPolicy.incoming(values, account, startedAt, current);
         if (incoming == null) return;
+        String recipient = Long.toString(incoming.sender);
+        if (!rateLimiter.canSend(AutomationHistoryStore.REPLY, account, recipient, current)) return;
         String conversation = incoming.conversation;
         String text = incoming.text;
         String identity = account + ":" + conversation + ":" + incoming.serverId;
@@ -377,6 +384,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
         java.util.concurrent.ScheduledFuture<?> future = worker.schedule(() -> {
             if (generation.get() != epoch || ownUid() != account || !automatic("native_auto_reply", options)) return;
             if (!replyStillAllowed(values, account, current)) return;
+            if (!rateLimiter.canSend(AutomationHistoryStore.REPLY, account, recipient, options)) return;
             if (!conversationExists(conversation, incoming.group)) return;
             try {
                 String modelName = "";
@@ -398,16 +406,32 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 dispatcher.prepare(AutomationHistoryStore.REPLY, identity, conversation, name,
                         incoming.imageUrls.isEmpty() ? text : "[图片] " + text, response, modelName,
                         () -> generation.get() == epoch && ownUid() == account && automatic("native_auto_reply", options)
-                                && replyStillAllowed(values, account, current),
+                                && replyStillAllowed(values, account, current)
+                                && rateLimiter.canSend(AutomationHistoryStore.REPLY, account, recipient, options),
                         done -> {
                             if (!replyStillAllowed(values, account, current)) { done.accept("cancelled"); return; }
-                            sendText(conversation, response, account, epoch, incoming.group, success -> {
-                                if (success && models != null) {
-                                    try { ai.rememberReply("reply:" + account + ":" + conversation, text, images, models, secondary, response); }
-                                    catch (Exception failure) { safeLog("Could not retain acknowledged reply context"); }
-                                }
-                                done.accept(success ? "sent" : "failed");
-                            });
+                            AtomicReference<AutomationRateLimiter.Reservation> reservation = new AtomicReference<>();
+                            try {
+                                sendText(conversation, response, account, epoch, incoming.group, success -> {
+                                    AutomationRateLimiter.Reservation active = reservation.get();
+                                    if (!success && active != null) rateLimiter.release(active);
+                                    if (success && models != null) {
+                                        try { ai.rememberReply("reply:" + account + ":" + conversation, text, images, models, secondary, response); }
+                                        catch (Exception failure) { safeLog("Could not retain acknowledged reply context"); }
+                                    }
+                                    done.accept(success ? "sent" : active == null ? "cancelled" : "failed");
+                                }, () -> {
+                                    if (!automatic("native_auto_reply", options)
+                                            || !replyStillAllowed(values, account, options)) return false;
+                                    reservation.set(rateLimiter.tryReserve(AutomationHistoryStore.REPLY,
+                                            account, recipient, options));
+                                    return reservation.get() != null;
+                                });
+                            } catch (IllegalAccessException | IllegalArgumentException failure) {
+                                AutomationRateLimiter.Reservation active = reservation.get();
+                                if (active != null) rateLimiter.release(active);
+                                throw failure;
+                            }
                         });
             } catch (Exception failure) {
                 if (generation.get() == epoch && ownUid() == account && automatic("native_auto_reply", options)) {
@@ -433,11 +457,6 @@ public final class NativeMessagingHooks implements AutoCloseable {
     private boolean replyStillAllowed(ContentValues values, long account, LocalOptions current) {
         return NativeFollowLists.ensureAccount(Long.toString(account))
                 && ReplyPolicy.incoming(values, account, startedAt, current) != null;
-    }
-
-    private void sendText(String id, String text, long account, long epoch, boolean group,
-                          Consumer<Boolean> done) throws Exception {
-        sendText(id, text, account, epoch, group, done, () -> automatic("native_auto_reply", options));
     }
 
     private void sendText(String id, String text, long account, long epoch, boolean group,

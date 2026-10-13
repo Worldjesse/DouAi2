@@ -173,6 +173,7 @@ final class AutomationHistoryDialog {
         TextView text = label("对象：" + entry.targetName + "\n标识：" + entry.targetId + "\n状态："
                 + status(entry.status) + "\n模型：" + entry.modelName + "\n时间："
                 + DateFormat.getDateTimeInstance().format(new Date(entry.createdAt))
+                + (AutomationHistoryStore.COMMENT.equals(entry.kind) ? "\n" + imageRequest(entry) : "")
                 + "\n\n原内容\n" + entry.input + "\n\n生成内容\n" + entry.output);
         text.setTextIsSelectable(true);
         text.setPadding(dp(16), dp(12), dp(16), dp(12));
@@ -203,6 +204,13 @@ final class AutomationHistoryDialog {
             case "sending": return "结果未确认";
             default: return "尚未提交";
         }
+    }
+
+    private static String imageRequest(Entry entry) {
+        if (entry.requestImageCount < 0) return "图片请求：未记录";
+        if (!entry.modelRequestSent) return "图片请求：未确认发送";
+        return entry.requestImageCount == 0 ? "图片请求：未携带图片"
+                : "图片请求：已携带 " + entry.requestImageCount + " 张图片";
     }
 
     private TextView label(String value) {

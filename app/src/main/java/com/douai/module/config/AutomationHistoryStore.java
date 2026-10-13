@@ -56,7 +56,15 @@ public final class AutomationHistoryStore {
             if (preferences.contains("cleared_at_" + entry.kind)
                     && entry.createdAt <= preferences.getLong("cleared_at_" + entry.kind, 0)) return;
             List<Entry> entries = readAll();
-            entries.removeIf(previous -> previous.kind.equals(entry.kind) && previous.id.equals(entry.id));
+            for (Entry previous : entries) {
+                if (previous.kind.equals(entry.kind) && previous.id.equals(entry.id)
+                        && previous.modelRequestSent && !entry.modelRequestSent) {
+                    entry = requestMetadata(entry, previous.requestImageCount);
+                    break;
+                }
+            }
+            Entry updated = entry;
+            entries.removeIf(previous -> previous.kind.equals(updated.kind) && previous.id.equals(updated.id));
             entries.add(entry);
             entries.sort(Comparator.comparingLong((Entry item) -> item.createdAt)
                     .thenComparing(item -> item.id));
@@ -64,6 +72,27 @@ public final class AutomationHistoryStore {
             trimKind(entries, COMMENT);
             persist(entries);
         }
+    }
+
+    public void markModelRequestSent(String kind, String id, int imageCount) {
+        requireKind(kind);
+        synchronized (LOCK) {
+            List<Entry> entries = readAll();
+            for (int index = 0; index < entries.size(); index++) {
+                Entry previous = entries.get(index);
+                if (kind.equals(previous.kind) && id.equals(previous.id)) {
+                    entries.set(index, requestMetadata(previous, imageCount));
+                    persist(entries);
+                    return;
+                }
+            }
+        }
+    }
+
+    private static Entry requestMetadata(Entry entry, int imageCount) {
+        return new Entry(entry.id, entry.kind, entry.targetId, entry.targetName,
+                entry.input, entry.output, entry.modelName, entry.status, entry.createdAt, entry.updatedAt,
+                imageCount, true);
     }
 
     private static void trimKind(List<Entry> entries, String kind) {
@@ -91,7 +120,8 @@ public final class AutomationHistoryStore {
                             json.optString("targetId"), json.optString("targetName"),
                             json.optString("input"), json.optString("output"),
                             json.optString("modelName"), json.optString("status"),
-                            json.optLong("createdAt"), json.optLong("updatedAt")));
+                            json.optLong("createdAt"), json.optLong("updatedAt"),
+                            json.optInt("requestImageCount", -1), json.optBoolean("modelRequestSent", false)));
                 } catch (IllegalArgumentException ignored) { }
             }
         } catch (JSONException ignored) { }
@@ -115,7 +145,8 @@ public final class AutomationHistoryStore {
                         .put("targetId", entry.targetId).put("targetName", entry.targetName)
                         .put("input", entry.input).put("output", entry.output)
                         .put("modelName", entry.modelName).put("status", entry.status)
-                        .put("createdAt", entry.createdAt).put("updatedAt", entry.updatedAt));
+                        .put("createdAt", entry.createdAt).put("updatedAt", entry.updatedAt)
+                        .put("requestImageCount", entry.requestImageCount).put("modelRequestSent", entry.modelRequestSent));
             } catch (JSONException impossible) { throw new IllegalStateException(impossible); }
         }
         return array.toString();
@@ -143,10 +174,19 @@ public final class AutomationHistoryStore {
         public final String status;
         public final long createdAt;
         public final long updatedAt;
+        public final int requestImageCount;
+        public final boolean modelRequestSent;
 
         public Entry(String id, String kind, String targetId, String targetName,
                      String input, String output, String modelName, String status,
                      long createdAt, long updatedAt) {
+            this(id, kind, targetId, targetName, input, output, modelName, status,
+                    createdAt, updatedAt, -1, false);
+        }
+
+        public Entry(String id, String kind, String targetId, String targetName,
+                     String input, String output, String modelName, String status,
+                     long createdAt, long updatedAt, int requestImageCount, boolean modelRequestSent) {
             requireKind(kind);
             if (id == null || id.isEmpty()) throw new IllegalArgumentException("Entry ID is required");
             if (!"pending".equals(status) && !"cancelled".equals(status) && !"sent".equals(status)
@@ -163,6 +203,8 @@ public final class AutomationHistoryStore {
             this.status = status;
             this.createdAt = Math.max(0, createdAt);
             this.updatedAt = Math.max(this.createdAt, updatedAt);
+            this.requestImageCount = Math.max(-1, Math.min(4, requestImageCount));
+            this.modelRequestSent = this.requestImageCount >= 0 && modelRequestSent;
         }
     }
 }
