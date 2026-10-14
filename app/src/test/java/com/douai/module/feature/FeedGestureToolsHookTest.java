@@ -1,6 +1,7 @@
 package com.douai.module.feature;
 
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.ThirdPartyDownloadSettings;
 import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
@@ -49,6 +50,8 @@ import static org.junit.Assert.assertTrue;
 public final class FeedGestureToolsHookTest {
     public static final class Aweme {
         final String aid;
+        public String share_url;
+        public DownloadActionHookTest.VideoFixture video;
         Aweme(String aid) { this.aid = aid; }
         public String getAid() { return aid; }
     }
@@ -57,7 +60,8 @@ public final class FeedGestureToolsHookTest {
         public FrameLayout w;
         public ItemParams A2;
         public String aid = "video-1";
-        public Aweme getAweme() { return new Aweme(aid); }
+        Aweme downloadAweme;
+        public Aweme getAweme() { return downloadAweme == null ? new Aweme(aid) : downloadAweme; }
         public void selected() { }
         public void resume() { }
         public void pause() { }
@@ -199,6 +203,153 @@ public final class FeedGestureToolsHookTest {
         boolean focused = true;
         FeedRoot(Context context) { super(context); }
         @Override public boolean hasWindowFocus() { return focused; }
+    }
+
+    @Test @Config(sdk = 28)
+    public void gestureMenuSaveUsesOnlyThirdPartyAndNeverFallsBackAfterFailure() throws Throwable {
+        try (okhttp3.mockwebserver.MockWebServer server = new okhttp3.mockwebserver.MockWebServer()) {
+            server.start();
+            server.enqueue(new okhttp3.mockwebserver.MockResponse().addHeader("Content-Type", "application/json")
+                    .setBody("{\"data\":{\"id\":\"gesture_work\",\"text\":\"caption\",\"video\":[\""
+                            + server.url("/third.mp4") + "\"]}}"));
+            server.enqueue(new okhttp3.mockwebserver.MockResponse().addHeader("Content-Type", "video/mp4")
+                    .setBody("third-party-video"));
+            Map<String, Object> values = new HashMap<>();
+            values.put("long_press_top_left", "menu");
+            values.put(ThirdPartyDownloadSettings.METHOD, ThirdPartyDownloadSettings.THIRD_PARTY);
+            values.put(ThirdPartyDownloadSettings.GET_TEMPLATE, server.url("/parse") + "?ID=75107541&link={url}");
+            values.put(ThirdPartyDownloadSettings.APP_SECRET, "old-secret");
+            values.put(ThirdPartyDownloadSettings.SIGNATURE_MODE, ThirdPartyDownloadSettings.SIGNATURE_NONE);
+            values.put(ThirdPartyDownloadSettings.NAMING_FIELDS, "[\"data.id\"]");
+            values.put(LocalOptions.DOWNLOAD_SAVE_TREE, DownloadDocumentTreeTest.TREE);
+            DownloadDocumentTreeTest.RecordingDocuments documents = DownloadDocumentTreeTest.register();
+            try (Fixture f = new Fixture(values)) {
+                Aweme work = new Aweme("7696151596120622001");
+                work.share_url = "https://v.douyin.com/XVo-IAGSo2s/";
+                work.video = new DownloadActionHookTest.VideoFixture();
+                work.video.play_addr = new DownloadActionHookTest.UrlFixture(server.url("/official.mp4").toString());
+                f.holder.downloadAweme = work;
+                f.select();
+                clickSaveFromGestureMenu(f);
+                okhttp3.mockwebserver.RecordedRequest request = server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS);
+                assertNotNull(request);
+                assertEquals("/parse", request.getRequestUrl().encodedPath());
+                assertEquals(work.share_url, request.getRequestUrl().queryParameter("link"));
+                assertEquals("75107541", request.getRequestUrl().queryParameter("ID"));
+                assertNull(request.getRequestUrl().queryParameter("app_id"));
+                assertNull(request.getHeader("Sign"));
+                assertEquals("/third.mp4", server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS).getPath());
+                awaitDownloadToast("已保存");
+                assertEquals(3, documents.names.size());
+                assertEquals(2, documents.files.size());
+                assertTrue(documents.names.containsValue("gesture_work.txt"));
+
+                server.enqueue(new okhttp3.mockwebserver.MockResponse().setResponseCode(503));
+                clickSaveFromGestureMenu(f);
+                assertEquals("/parse", server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS).getRequestUrl().encodedPath());
+                awaitDownloadToast("第三方下载失败");
+                assertEquals(3, server.getRequestCount());
+                android.app.DownloadManager manager = (android.app.DownloadManager)
+                        f.activity.getSystemService(Context.DOWNLOAD_SERVICE);
+                org.robolectric.shadows.ShadowDownloadManager downloads = org.robolectric.shadow.api.Shadow.extract(manager);
+                assertEquals(0, downloads.getRequestCount());
+            }
+        }
+    }
+
+    @Test @Config(sdk = 28)
+    public void gestureMenuSaveInOfficialModeNeverRequestsConfiguredThirdPartyApi() throws Throwable {
+        try (okhttp3.mockwebserver.MockWebServer server = new okhttp3.mockwebserver.MockWebServer()) {
+            server.start();
+            server.enqueue(new okhttp3.mockwebserver.MockResponse().addHeader("Content-Type", "video/mp4").setBody("official-video"));
+            try (Fixture f = new Fixture(Map.of("long_press_top_left", "menu", "download_method", "official",
+                    ThirdPartyDownloadSettings.GET_TEMPLATE, server.url("/parse") + "?url={url}"))) {
+                org.robolectric.shadows.ShadowApplication application =
+                        org.robolectric.shadow.api.Shadow.extract(f.activity.getApplication());
+                application.grantPermissions(android.Manifest.permission.WRITE_EXTERNAL_STORAGE);
+                Aweme work = new Aweme("work");
+                work.share_url = "https://v.douyin.com/XVo-IAGSo2s/";
+                work.video = new DownloadActionHookTest.VideoFixture();
+                work.video.play_addr = new DownloadActionHookTest.UrlFixture(server.url("/official.mp4").toString());
+                f.holder.downloadAweme = work;
+                f.select();
+                clickSaveFromGestureMenu(f);
+                assertEquals("/official.mp4", server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS).getPath());
+                awaitDownloadToast("已加入系统下载队列");
+                assertEquals(1, server.getRequestCount());
+                android.app.DownloadManager manager = (android.app.DownloadManager)
+                        f.activity.getSystemService(Context.DOWNLOAD_SERVICE);
+                org.robolectric.shadows.ShadowDownloadManager downloads = org.robolectric.shadow.api.Shadow.extract(manager);
+                assertEquals(1, downloads.getRequestCount());
+            }
+        }
+    }
+
+    private static void clickSaveFromGestureMenu(Fixture fixture) throws Throwable {
+        fixture.longPress(0, 0);
+        android.app.AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
+        assertNotNull(dialog);
+        assertEquals("保存媒体", dialog.getListView().getAdapter().getItem(1));
+        dialog.getListView().performItemClick(null, 1, 1);
+        ShadowLooper.idleMainLooper();
+    }
+
+    @Test @Config(sdk = 28)
+    public void officialGestureSaveUsesTheSameCustomDirectoryAsThirdParty() throws Throwable {
+        DownloadDocumentTreeTest.RecordingDocuments documents = DownloadDocumentTreeTest.register();
+        try (okhttp3.mockwebserver.MockWebServer server = new okhttp3.mockwebserver.MockWebServer()) {
+            server.start();
+            server.enqueue(new okhttp3.mockwebserver.MockResponse().addHeader("Content-Type", "video/mp4").setBody("official-video"));
+            try (Fixture f = new Fixture(Map.of("long_press_top_left", "menu", "download_method", "official",
+                    LocalOptions.DOWNLOAD_SAVE_TREE, DownloadDocumentTreeTest.TREE))) {
+                Aweme work = new Aweme("work");
+                work.video = new DownloadActionHookTest.VideoFixture();
+                work.video.play_addr = new DownloadActionHookTest.UrlFixture(server.url("/official.mp4").toString());
+                f.holder.downloadAweme = work;
+                f.select();
+                clickSaveFromGestureMenu(f);
+                assertEquals("/official.mp4", server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS).getPath());
+                awaitDownloadToast("媒体已保存到所选目录");
+                assertEquals(1, documents.names.size());
+                String id = documents.files.keySet().iterator().next();
+                assertEquals("root", documents.parents.get(id));
+                assertEquals("official-video", java.nio.file.Files.readString(documents.files.get(id).toPath()));
+            }
+        }
+    }
+
+    @Test @Config(sdk = 28)
+    public void parameterlessThirdPartyApiIsRequestedExactlyWithoutRequiringAWorkLink() throws Throwable {
+        DownloadDocumentTreeTest.RecordingDocuments documents = DownloadDocumentTreeTest.register();
+        try (okhttp3.mockwebserver.MockWebServer server = new okhttp3.mockwebserver.MockWebServer()) {
+            server.start();
+            server.enqueue(new okhttp3.mockwebserver.MockResponse().addHeader("Content-Type", "application/json")
+                    .setBody("{\"data\":{\"id\":\"fixed_api\",\"video\":[\""
+                            + server.url("/media.mp4") + "\"]}}"));
+            server.enqueue(new okhttp3.mockwebserver.MockResponse().addHeader("Content-Type", "video/mp4").setBody("video"));
+            try (Fixture f = new Fixture(Map.of("long_press_top_left", "menu", "download_method", "third_party",
+                    ThirdPartyDownloadSettings.GET_TEMPLATE, server.url("/latest").toString(),
+                    LocalOptions.DOWNLOAD_SAVE_TREE, DownloadDocumentTreeTest.TREE))) {
+                f.select();
+                clickSaveFromGestureMenu(f);
+                assertEquals("/latest", server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS).getPath());
+                assertEquals("/media.mp4", server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS).getPath());
+                awaitDownloadToast("已保存");
+                assertEquals(2, documents.files.size());
+                assertTrue(documents.names.containsValue("fixed_api.txt"));
+            }
+        }
+    }
+
+    private static void awaitDownloadToast(String expected) {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+        do {
+            ShadowLooper.idleMainLooper();
+            String toast = ShadowToast.getTextOfLatestToast();
+            if (toast != null && toast.contains(expected)) return;
+            java.util.concurrent.locks.LockSupport.parkNanos(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(5));
+        } while (System.nanoTime() < deadline);
+        assertTrue("Expected " + expected + ", received " + ShadowToast.getTextOfLatestToast(), false);
     }
 
     @Test public void lateInstallationRecoversForegroundFromSelectedFocusedHolder() throws Throwable {

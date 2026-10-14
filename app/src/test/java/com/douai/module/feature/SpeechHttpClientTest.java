@@ -1,0 +1,152 @@
+package com.douai.module.feature;
+
+import com.douai.module.config.LocalOptions;
+import com.douai.module.config.SpeechSettings;
+
+import okhttp3.mockwebserver.MockResponse;
+import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
+import okhttp3.mockwebserver.SocketPolicy;
+import okio.Buffer;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.annotation.Config;
+
+import java.util.Map;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.Assert.*;
+
+@RunWith(RobolectricTestRunner.class)
+@Config(manifest = Config.NONE, sdk = 35)
+public final class SpeechHttpClientTest {
+    @Test public void arbitraryParameterNamesBindTextAndVoiceWithFullUrlEncoding() throws Exception {
+        try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            server.enqueue(new MockResponse().setBody("{\"url\":\"https://example.test/sound.mp3\"}"));
+            server.start();
+            String url = SpeechHttpClient.resolveTemplate(server.url("/speech/") + "{voice}?ID=7&content={text}",
+                    "你好 & + /? #", "voice/1&x=2");
+            request.fetchText(url, "{\"X-Key\":\"fixture\"}");
+            RecordedRequest sent = server.takeRequest(2, TimeUnit.SECONDS);
+            assertEquals("你好 & + /? #", sent.getRequestUrl().queryParameter("content"));
+            assertEquals("7", sent.getRequestUrl().queryParameter("ID"));
+            assertEquals("/speech/voice%2F1%26x%3D2", sent.getRequestUrl().encodedPath());
+            assertEquals("fixture", sent.getHeader("X-Key"));
+        }
+    }
+
+    @Test public void independentVoiceGetUsesItsOwnParametersAndHeaders() throws Exception {
+        try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            server.enqueue(new MockResponse().setBody("{\"sounds\":[{\"ID\":3,\"label\":\"Warm\"}]}"));
+            server.start();
+            SpeechSettings settings = new SpeechSettings(new LocalOptions(Map.of(
+                    SpeechSettings.VOICE_GET_TEMPLATE, server.url("/voices") + "?access=voice-key",
+                    SpeechSettings.VOICE_HEADERS, "{\"X-Voice\":\"list-only\"}",
+                    SpeechSettings.HEADERS, "{\"Authorization\":\"main-only\"}",
+                    SpeechSettings.VOICE_LIST_PATH, "sounds", SpeechSettings.VOICE_ID_PATH, "ID",
+                    SpeechSettings.VOICE_NAME_PATH, "label")));
+            assertEquals("3", request.fetchVoices(settings).get(0).id);
+            RecordedRequest sent = server.takeRequest(2, TimeUnit.SECONDS);
+            assertEquals("list-only", sent.getHeader("X-Voice"));
+            assertNull(sent.getHeader("Authorization"));
+            assertEquals("voice-key", sent.getRequestUrl().queryParameter("access"));
+        }
+    }
+
+    @Test public void acceptsBinaryAudioOrSelectedNestedJsonAndTxtLinks() throws Exception {
+        try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            server.enqueue(new MockResponse().addHeader("Content-Type", "audio/wav")
+                    .setBody(new Buffer().writeUtf8("RIFF0000WAVEfixture")));
+            server.start();
+            SpeechHttpClient.Resource binary = request.fetchResource(server.url("/speech").toString(), "{}");
+            assertTrue(binary.isAudio());
+            assertEquals("https://example.test/a.mp3", SpeechHttpClient.audioUrl(
+                    "{\"data\":{\"speech\":[\"https://example.test/a.mp3\"]},\"cover\":\"https://example.test/c.jpg\"}",
+                    "data.speech"));
+            assertEquals("https://example.test/a.mp3", SpeechHttpClient.audioUrl(
+                    "audio: https://example.test/a.mp3\nname: Warm", "audio"));
+            assertEquals("https://example.test/a.mp3", SpeechHttpClient.audioUrl(
+                    "{\"data\":{\"audio_url\":\"https://example.test/a.mp3\"},\"cover\":\"https://example.test/c.jpg\"}", ""));
+            assertEquals("https://example.test/a.mp3", SpeechHttpClient.audioUrl("https://example.test/a.mp3", ""));
+            assertEquals("https://example.test/a.mp3", SpeechHttpClient.audioUrl("https://example.test/a.mp3", "url"));
+            assertEquals("https://example.test/a.mp3", SpeechHttpClient.audioUrl("\"https://example.test/a.mp3\"", "url"));
+            assertEquals("https://example.test/b.mp3", SpeechHttpClient.audioUrl(
+                    "{\"data\":{\"audio\":[\"https://example.test/a.mp3\",\"https://example.test/b.mp3\"]}}", "data.audio[1]"));
+        }
+        assertThrows(IllegalArgumentException.class, () -> SpeechHttpClient.audioUrl(
+                "{\"one\":\"https://example.test/a.mp3\",\"two\":\"https://example.test/b.mp3\"}", ""));
+        assertThrows(IllegalArgumentException.class, () -> SpeechHttpClient.audioUrl(
+                "{\"url\":\"https://example.test/a.mp3\"}", "missing"));
+    }
+
+    @Test public void charsetIsHonoredAndMalformedTextFailsWithSafeMessages() throws Exception {
+        try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            server.enqueue(new MockResponse().addHeader("Content-Type", "text/plain; charset=ISO-8859-1")
+                    .setBody(new Buffer().write(new byte[]{'c', 'a', 'f', (byte) 0xe9})));
+            server.enqueue(new MockResponse().setBody(new Buffer().write(new byte[]{(byte) 0xc3, 0x28})));
+            server.start();
+            assertEquals("caf\u00e9", request.fetchText(server.url("/voices").toString(), "{}"));
+            Exception failure = assertThrows(IllegalArgumentException.class,
+                    () -> request.fetchText(server.url("/voices").toString(), "{}"));
+            assertNull(failure.getCause());
+        }
+    }
+
+    @Test public void rejectsRedirectsAndInvalidHeadersWithoutForwardingSecrets() throws Exception {
+        try (MockWebServer server = new MockWebServer(); MockWebServer other = new MockWebServer();
+             SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            server.start(); other.start();
+            server.enqueue(new MockResponse().setResponseCode(302).addHeader("Location", other.url("/capture")));
+            Exception failure = assertThrows(IllegalArgumentException.class, () -> request.fetchText(
+                    server.url("/speech") + "?apikey=private-key&text=private-text", "{\"Authorization\":\"private-token\"}"));
+            assertFalse(failure.getMessage().contains("private"));
+            assertNull(failure.getCause());
+            assertEquals(0, other.getRequestCount());
+            for (String headers : new String[]{"[]", "{\"Host\":\"fixture\"}", "{\"X-Key\":42}",
+                    "{\"X-Key\":\"private-token\\r\\nInjected: value\"}"}) {
+                assertThrows(IllegalArgumentException.class, () -> request.fetchText(server.url("/speech").toString(), headers));
+            }
+            assertEquals(1, server.getRequestCount());
+        }
+    }
+
+    @Test public void boundsTextAndAudioResponsesWithKnownAndChunkedLengths() throws Exception {
+        try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            server.enqueue(new MockResponse().setBody("x").setHeader("Content-Length", SpeechHttpClient.MAX_AUDIO_BYTES + 1));
+            server.enqueue(new MockResponse().setChunkedBody("x".repeat(SpeechHttpClient.MAX_TEXT_BYTES + 1), 8192));
+            server.start();
+            assertTrue(assertThrows(IllegalArgumentException.class,
+                    () -> request.fetchResource(server.url("/audio").toString(), "{}")).getMessage().contains("20 MiB"));
+            assertTrue(assertThrows(IllegalArgumentException.class,
+                    () -> request.fetchText(server.url("/voices").toString(), "{}")).getMessage().contains("2 MiB"));
+        }
+    }
+
+    @Test public void stoppingDisconnectsBlockedRequestsAndPreventsFurtherRequests() throws Exception {
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            server.start();
+            Future<String> future = worker.submit(() -> request.fetchText(server.url("/voices").toString(), "{}"));
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            request.cancel();
+            ExecutionException failure = assertThrows(ExecutionException.class, () -> future.get(3, TimeUnit.SECONDS));
+            assertTrue(failure.getCause() instanceof CancellationException);
+            assertThrows(CancellationException.class, () -> request.fetchText(server.url("/voices").toString(), "{}"));
+            assertEquals(1, server.getRequestCount());
+        } finally { worker.shutdownNow(); }
+    }
+
+    @Test public void originsIncludeSchemeHostAndEffectivePort() {
+        assertTrue(SpeechHttpClient.sameOrigin("https://api.test/speech?key=abc", "https://api.test:443/audio.mp3"));
+        assertFalse(SpeechHttpClient.sameOrigin("http://api.test/a", "https://api.test/b"));
+        assertFalse(SpeechHttpClient.sameOrigin("https://api.test/a", "https://cdn.test/b"));
+        assertFalse(SpeechHttpClient.sameOrigin("https://api.test:444/a", "https://api.test/b"));
+    }
+}

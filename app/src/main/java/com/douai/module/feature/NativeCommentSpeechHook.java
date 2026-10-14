@@ -34,7 +34,8 @@ public final class NativeCommentSpeechHook implements AutoCloseable {
     private volatile Context context;
     private volatile LocalOptions options;
     private volatile boolean closed;
-    private LocalSpeechSynthesis pending;
+    private SpeechSynthesis pending;
+    private long generation;
     private volatile java.util.function.Predicate<Object> automaticPublish = ignored -> false;
 
     private NativeCommentSpeechHook(Class<?> model, Class<?> attachment, Class<?> audio,
@@ -84,8 +85,12 @@ public final class NativeCommentSpeechHook implements AutoCloseable {
     }
 
     public synchronized void setOptions(LocalOptions options) {
+        boolean changed = !this.options.samePrefix(options, "tts_");
         this.options = options;
-        if (!options.enabled("comment_tts") && pending != null) { pending.close(); pending = null; }
+        if (!options.enabled("comment_tts") || changed) {
+            generation++;
+            if (pending != null) { pending.close(); pending = null; }
+        }
     }
 
     private Object intercept(XposedInterface.Chain chain, Method submit) throws Throwable {
@@ -111,11 +116,16 @@ public final class NativeCommentSpeechHook implements AutoCloseable {
                 return null;
             }
             toast("正在生成评论语音");
-            pending = LocalSpeechSynthesis.synthesize(context, speechText, current, (result, failure) -> {
-                synchronized (NativeCommentSpeechHook.this) { pending = null; }
-                if (closed || !options.enabled("comment_tts")) return;
+            long epoch = generation;
+            pending = SpeechSynthesis.synthesize(context, speechText, current, (result, failure) -> {
+                synchronized (NativeCommentSpeechHook.this) {
+                    if (closed || epoch != generation || !options.enabled("comment_tts")) {
+                        if (result != null) result.file.delete();
+                        return;
+                    }
+                    pending = null;
+                }
                 if (result == null) { toast(failure); safeLog("Comment speech failed: " + failure); return; }
-                if (result.durationMillis > 30_000) { toast("评论语音不能超过 30 秒"); return; }
                 try {
                     Object audio = audioConstructor.newInstance(result.file, Collections.emptyList(), result.durationMillis);
                     audioField.set(copied, audio);
@@ -129,7 +139,10 @@ public final class NativeCommentSpeechHook implements AutoCloseable {
                     Throwable cause = error instanceof InvocationTargetException ? ((InvocationTargetException) error).getCause() : error;
                     safeLog("Native comment speech publish failed: " + cause);
                     toast("评论语音提交失败，请重试");
-                } finally { reentry.remove(); }
+                } finally {
+                    reentry.remove();
+                    new Handler(Looper.getMainLooper()).postDelayed(result.file::delete, 600_000);
+                }
             });
         }
         return null;
@@ -146,6 +159,7 @@ public final class NativeCommentSpeechHook implements AutoCloseable {
 
     @Override public synchronized void close() {
         closed = true;
+        generation++;
         options = new LocalOptions(Collections.emptyMap());
         if (pending != null) { pending.close(); pending = null; }
         for (int index = handles.size() - 1; index >= 0; index--) {

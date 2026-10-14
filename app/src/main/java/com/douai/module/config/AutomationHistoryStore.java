@@ -17,6 +17,9 @@ import java.util.List;
 public final class AutomationHistoryStore {
     public static final String REPLY = "reply";
     public static final String COMMENT = "comment";
+    public static final String DELIVERY_UNKNOWN = "unknown";
+    public static final String DELIVERY_TEXT = "text";
+    public static final String DELIVERY_VOICE = "voice";
     private static final String FILE = "douai_automation_history";
     private static final String KEY = "entries_v1";
     private static final int MAX_PER_KIND = 200;
@@ -92,7 +95,7 @@ public final class AutomationHistoryStore {
     private static Entry requestMetadata(Entry entry, int imageCount) {
         return new Entry(entry.id, entry.kind, entry.targetId, entry.targetName,
                 entry.input, entry.output, entry.modelName, entry.status, entry.createdAt, entry.updatedAt,
-                imageCount, true);
+                imageCount, true, entry.deliveryMode);
     }
 
     private static void trimKind(List<Entry> entries, String kind) {
@@ -121,7 +124,8 @@ public final class AutomationHistoryStore {
                             json.optString("input"), json.optString("output"),
                             json.optString("modelName"), json.optString("status"),
                             json.optLong("createdAt"), json.optLong("updatedAt"),
-                            json.optInt("requestImageCount", -1), json.optBoolean("modelRequestSent", false)));
+                            json.optInt("requestImageCount", -1), json.optBoolean("modelRequestSent", false),
+                            json.optString("deliveryMode", DELIVERY_UNKNOWN)));
                 } catch (IllegalArgumentException ignored) { }
             }
         } catch (JSONException ignored) { }
@@ -146,7 +150,8 @@ public final class AutomationHistoryStore {
                         .put("input", entry.input).put("output", entry.output)
                         .put("modelName", entry.modelName).put("status", entry.status)
                         .put("createdAt", entry.createdAt).put("updatedAt", entry.updatedAt)
-                        .put("requestImageCount", entry.requestImageCount).put("modelRequestSent", entry.modelRequestSent));
+                        .put("requestImageCount", entry.requestImageCount).put("modelRequestSent", entry.modelRequestSent)
+                        .put("deliveryMode", entry.deliveryMode));
             } catch (JSONException impossible) { throw new IllegalStateException(impossible); }
         }
         return array.toString();
@@ -176,17 +181,33 @@ public final class AutomationHistoryStore {
         public final long updatedAt;
         public final int requestImageCount;
         public final boolean modelRequestSent;
+        public final String deliveryMode;
 
         public Entry(String id, String kind, String targetId, String targetName,
                      String input, String output, String modelName, String status,
                      long createdAt, long updatedAt) {
             this(id, kind, targetId, targetName, input, output, modelName, status,
-                    createdAt, updatedAt, -1, false);
+                    createdAt, updatedAt, -1, false, DELIVERY_UNKNOWN);
+        }
+
+        public Entry(String id, String kind, String targetId, String targetName,
+                     String input, String output, String modelName, String status,
+                     long createdAt, long updatedAt, String deliveryMode) {
+            this(id, kind, targetId, targetName, input, output, modelName, status,
+                    createdAt, updatedAt, -1, false, deliveryMode);
         }
 
         public Entry(String id, String kind, String targetId, String targetName,
                      String input, String output, String modelName, String status,
                      long createdAt, long updatedAt, int requestImageCount, boolean modelRequestSent) {
+            this(id, kind, targetId, targetName, input, output, modelName, status,
+                    createdAt, updatedAt, requestImageCount, modelRequestSent, DELIVERY_UNKNOWN);
+        }
+
+        public Entry(String id, String kind, String targetId, String targetName,
+                     String input, String output, String modelName, String status,
+                     long createdAt, long updatedAt, int requestImageCount, boolean modelRequestSent,
+                     String deliveryMode) {
             requireKind(kind);
             if (id == null || id.isEmpty()) throw new IllegalArgumentException("Entry ID is required");
             if (!"pending".equals(status) && !"cancelled".equals(status) && !"sent".equals(status)
@@ -205,6 +226,8 @@ public final class AutomationHistoryStore {
             this.updatedAt = Math.max(this.createdAt, updatedAt);
             this.requestImageCount = Math.max(-1, Math.min(4, requestImageCount));
             this.modelRequestSent = this.requestImageCount >= 0 && modelRequestSent;
+            this.deliveryMode = DELIVERY_TEXT.equals(deliveryMode) || DELIVERY_VOICE.equals(deliveryMode)
+                    ? deliveryMode : DELIVERY_UNKNOWN;
         }
     }
 }

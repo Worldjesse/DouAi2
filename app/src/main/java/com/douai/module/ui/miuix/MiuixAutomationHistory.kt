@@ -30,7 +30,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 class MiuixAutomationHistory(
     context: Context,
     private val onEntry: Consumer<Entry>,
-    private val statusText: Function<String, String>,
+    private val rowTitle: Function<Entry, String>,
 ) {
     private var currentEntries by mutableStateOf<List<Entry>>(emptyList())
     private var stateText by mutableStateOf("暂无记录")
@@ -51,7 +51,7 @@ class MiuixAutomationHistory(
                     } else {
                         itemsIndexed(currentEntries, key = { index, entry -> "${entry.id}:$index" }) { _, entry ->
                             BasicComponent(
-                                title = entry.targetName + " · " + statusText.apply(entry.status),
+                                title = rowTitle.apply(entry),
                                 summary = DateFormat.getDateTimeInstance().format(Date(entry.createdAt)),
                                 modifier = Modifier.testTag("automation.history.${entry.id}"),
                                 onClick = { onEntry.accept(entry) },

@@ -86,12 +86,12 @@ public final class ModuleSettingsReferenceTest {
                 {"FILTER", "过滤总开关", "中断开关", "去广告开关", "去直播开关", "去推荐卡片开关",
                         "去推荐商家开关", "去小游戏开关", "去长视频开关", "长视频时间界定",
                         "去低赞视频开关", "去图集开关", "过滤字符串", "过滤短视频", "最短时长（秒）"},
-                {"DOWNLOAD", "启用下载菜单", "是否启用抖音下载自定义命名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
+                {"DOWNLOAD", "启用下载菜单", "下载方式", "保存位置", "是否启用抖音下载自定义命名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
                 {"AUTOPLAY", "自动滑动到下一个视频", "自动倍速播放", "倍速数值", "打开评论时,不滑动视频",
                         "滑动智能判断上下", "互动自动化"},
-                {"AUTO_REPLY", "开启自动回复", "回复模式", "回复内容", "接收私聊", "私聊范围", "接收群聊", "群聊范围",
+                {"AUTO_REPLY", "开启自动回复", "回复模式", "回复内容", "语音回复", "接收私聊", "私聊范围", "接收群聊", "群聊范围",
                         "每日最大回复数", "同一用户回复间隔（分钟）", "发送与记录"},
-                {"AUTO_COMMENT", "开启自动评论", "评论模式", "评论内容", "作品范围", "素材识别",
+                {"AUTO_COMMENT", "开启自动评论", "评论模式", "评论内容", "语音评论", "作品范围", "素材识别",
                         "每日最大评论数", "同一作者评论间隔（分钟）", "发送与记录"},
                 {"COMMENT", "评论自动添加后缀", "后缀内容", "替换语音文件",
                         "评论自动文本转语音(文本前面输入\"#\"符号将自动转换)", "长按操作", "彩色评论", "彩色评论类型"},
@@ -100,7 +100,7 @@ public final class ModuleSettingsReferenceTest {
                 {"MESSAGE", "消息防撤回", "自己撤回的消息", "对方撤回的消息", "撤回的背景色", "替换私聊语音",
                         "自动文本转语音(文本前面输入\"#\"符号将自动转换)"},
                 {"SPOOF", "伪装总开关", "获赞数量", "关注数量", "粉丝数量", "互关数量", "版本信息"},
-                {"EXTENSION", "AI 模型设置", "文本转语音设置", "关于"}
+                {"EXTENSION", "AI 模型设置", "文本转语音设置"}
         };
         for (String[] reference : references) {
             View page = openCategory(reference[0]);
@@ -155,6 +155,20 @@ public final class ModuleSettingsReferenceTest {
         comment = openCategory("AUTO_COMMENT");
         assertEquals("40", ((TextView) comment.findViewWithTag("settings.value.每日最大评论数")).getText().toString());
         assertEquals("60", ((TextView) comment.findViewWithTag("settings.value.同一作者评论间隔（分钟）")).getText().toString());
+    }
+
+    @Test public void automaticVoiceSwitchesDefaultOffAndPersistIndependently() {
+        View reply = openCategory("AUTO_REPLY");
+        assertFalse(toggle(reply, "语音回复").isChecked());
+        toggle(reply, "语音回复").setChecked(true);
+        assertTrue(store.getBoolean("reply_voice", false));
+        assertFalse(store.getBoolean("comment_voice", false));
+        screen.dismissChildPages();
+        View comment = openCategory("AUTO_COMMENT");
+        assertFalse(toggle(comment, "语音评论").isChecked());
+        toggle(comment, "语音评论").setChecked(true);
+        assertTrue(store.getBoolean("comment_voice", false));
+        assertTrue(store.getBoolean("reply_voice", false));
     }
 
     @Test

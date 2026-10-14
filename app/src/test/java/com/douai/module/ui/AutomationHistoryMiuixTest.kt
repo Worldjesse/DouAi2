@@ -53,6 +53,7 @@ class AutomationHistoryMiuixTest {
                     "comment-$index", AutomationHistoryStore.COMMENT, "target-$index",
                     "作者 $index", "原作品 $index", "生成评论 $index", "模型", "sent",
                     index.toLong() + 1, index.toLong() + 1,
+                    if (index == 199) AutomationHistoryStore.DELIVERY_VOICE else AutomationHistoryStore.DELIVERY_TEXT,
                 ))
             }
             page = AutomationHistoryDialog(compose.activity, AutomationHistoryStore.COMMENT, true, worker)
@@ -61,6 +62,7 @@ class AutomationHistoryMiuixTest {
         compose.waitForIdle()
         worker.runNextOnThread()
         compose.onNodeWithTag("automation.history.comment-199").assertIsDisplayed()
+        compose.onNodeWithText("作者 199 · 发送成功 · 语音").assertIsDisplayed()
         compose.runOnIdle {
             val root = page!!.dialog().window!!.decorView
             val history = root.findViewWithTag<View>("automation.history")
@@ -79,6 +81,7 @@ class AutomationHistoryMiuixTest {
         compose.runOnIdle {
             assertTrue(containsText(detail.window!!.decorView, "原作品 0"))
             assertTrue(containsText(detail.window!!.decorView, "生成评论 0"))
+            assertTrue(containsText(detail.window!!.decorView, "发送方式：文本"))
         }
         compose.runOnUiThread { detail.dismiss() }
         compose.onNodeWithTag("miuix.dialog.button.${Dialog.BUTTON_NEUTRAL}").performClick()

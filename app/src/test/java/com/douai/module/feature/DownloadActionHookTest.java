@@ -191,6 +191,22 @@ public final class DownloadActionHookTest {
         }
     }
 
+    @Test public void thirdPartyModeExposesOnlyItsDownloadActionAndDoesNotFallbackToOfficial() throws Throwable {
+        ActivityController<Activity> activity = Robolectric.buildActivity(Activity.class).setup();
+        AtomicReference<XposedInterface.Hooker> installed = new AtomicReference<>();
+        DownloadModuleFixture module = new DownloadModuleFixture();
+        try (DownloadActionHook hook = install(installed, true)) {
+            hook.setOptions(CommentEnhancementsHookTest.options("download_method", "third_party"));
+            View row = (View) installed.get().intercept(createChain(module, activity.get()));
+            assertTrue(row.performLongClick());
+            AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
+            assertEquals(2, dialog.getListView().getAdapter().getCount());
+            assertEquals("第三方下载", dialog.getListView().getAdapter().getItem(0));
+            clickDialogItem(0);
+            assertEquals(0, module.nativeClickCalls);
+        } finally { activity.pause().stop().destroy(); }
+    }
+
     private static DownloadActionHook install(AtomicReference<XposedInterface.Hooker> installed,
                                               boolean enabled) throws Exception {
         return DownloadActionHook.install(createFramework(installed, new AtomicBoolean()),

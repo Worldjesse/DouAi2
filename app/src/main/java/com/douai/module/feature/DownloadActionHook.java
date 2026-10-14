@@ -14,6 +14,7 @@ import io.github.libxposed.api.XposedInterface;
 
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.ThirdPartyDownloadSettings;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -114,8 +115,20 @@ public final class DownloadActionHook implements AutoCloseable {
     }
 
     private Object beforeNativeClick(XposedInterface.Chain chain) throws Throwable {
+        if (enabled && new ThirdPartyDownloadSettings(options).thirdParty) {
+            Object view = chain.getArg(0);
+            if (view instanceof View) {
+                try {
+                    ThirdPartyDownload.start(((View) view).getContext(),
+                            currentAweme(chain.getThisObject()), options, this::safeLog);
+                } catch (ReflectiveOperationException | RuntimeException failure) {
+                    showToast(((View) view).getContext(), "无法读取当前作品链接");
+                }
+            }
+            return null;
+        }
         if (!enabled || !(settings.removeWatermark || options.enabled("download_custom_name")
-                || options.enabled("remove_download_limits"))) return chain.proceed();
+                || options.enabled("remove_download_limits") || !options.downloadSaveTree().isEmpty())) return chain.proceed();
         Context context = null;
         List<MediaAsset> assets = Collections.emptyList();
         try {
@@ -129,7 +142,8 @@ public final class DownloadActionHook implements AutoCloseable {
             safeLog("Local download source unavailable: " + failure.getMessage());
         }
         if (!assets.isEmpty()) {
-            if (Build.VERSION.SDK_INT < 29 && context.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            if (options.downloadSaveTree().isEmpty() && Build.VERSION.SDK_INT < 29
+                    && context.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
                     != PackageManager.PERMISSION_GRANTED) return chain.proceed();
             try {
                 saveAssets(context, assets);
@@ -138,6 +152,10 @@ public final class DownloadActionHook implements AutoCloseable {
                 safeLog("Local download queue failed: " + failure.getMessage());
                 showToast(context, "创建下载任务失败");
             }
+            return null;
+        }
+        if (!options.downloadSaveTree().isEmpty()) {
+            if (context != null) showToast(context, "当前作品没有可保存到所选目录的媒体来源");
             return null;
         }
         return chain.proceed();
@@ -236,6 +254,10 @@ public final class DownloadActionHook implements AutoCloseable {
 
     private void selectAction(Object module, View row, MenuAction action, Context context,
                               Object aweme) {
+        if (action.kind == MenuAction.THIRD_PARTY) {
+            ThirdPartyDownload.start(context, aweme, options, this::safeLog);
+            return;
+        }
         if (action.kind == MenuAction.NATIVE) {
             try {
                 invokeNativeDownload(nativeClickMethod, module, row);
@@ -257,9 +279,15 @@ public final class DownloadActionHook implements AutoCloseable {
 
     private List<MenuAction> buildMenuActions(Object aweme) {
         ArrayList<MenuAction> actions = new ArrayList<>();
+        if (new ThirdPartyDownloadSettings(options).thirdParty) {
+            actions.add(new MenuAction("第三方下载", MenuAction.THIRD_PARTY, null, null));
+            actions.add(new MenuAction("复制作品源数据", MenuAction.COPY_SOURCE, null, null));
+            return actions;
+        }
         int awemeType = readIntMethod(aweme, "getAwemeType", -1);
         String nativeLabel = awemeType == 68 ? "使用抖音原生保存图集"
                 : awemeType < 0 ? "使用抖音原生保存此作品" : "使用抖音原生保存视频";
+        if (!options.downloadSaveTree().isEmpty()) nativeLabel = "保存当前作品到所选目录";
         actions.add(new MenuAction(nativeLabel, MenuAction.NATIVE, null, safeFileName(aweme)));
 
         String audioUrl = findAudioUrl(aweme);
@@ -382,8 +410,8 @@ public final class DownloadActionHook implements AutoCloseable {
     private void saveAssets(Context context, List<MediaAsset> assets) {
         for (MediaAsset asset : assets) {
             boolean accepted = asset.image
-                    ? MediaStoreDownloader.downloadImage(context, asset.url, asset.name, this::safeLog)
-                    : MediaStoreDownloader.download(context, asset.url, asset.name, false, this::safeLog);
+                    ? MediaStoreDownloader.downloadImage(context, asset.url, asset.name, options.downloadSaveTree(), this::safeLog)
+                    : MediaStoreDownloader.download(context, asset.url, asset.name, false, options.downloadSaveTree(), this::safeLog);
             if (!accepted) showToast(context, "下载地址无效");
         }
     }
@@ -494,7 +522,7 @@ public final class DownloadActionHook implements AutoCloseable {
 
     private void enqueueDownload(Context context, String url, String fileName, boolean audio) {
         if (!MediaStoreDownloader.download(context, url, fileName, audio,
-                message -> safeLog(message))) {
+                options.downloadSaveTree(), message -> safeLog(message))) {
             showToast(context, "下载地址无效");
         }
     }
@@ -539,6 +567,7 @@ public final class DownloadActionHook implements AutoCloseable {
         static final int COPY_SOURCE = 3;
         static final int PLAY_VIDEO = 4;
         static final int GALLERY = 5;
+        static final int THIRD_PARTY = 6;
 
         final String label;
         final int kind;

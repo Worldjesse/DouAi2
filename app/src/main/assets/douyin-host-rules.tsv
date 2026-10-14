@@ -142,6 +142,7 @@ auto_comment_work_context	auto_comment	method	LX/0yEs;		LIZ	(Lcom/ss/android/ugc
 auto_comment_checked_request	auto_comment	method	Lcom/ss/android/ugc/aweme/comment/data/publish/CommentPublishRequest;		LJIILLIIL	(LX/0yFs;)Z								
 auto_comment_publish_success	auto_comment	method	Lcom/ss/android/ugc/aweme/comment/data/publish/CommentPublishRequest;		LJIJI	(LX/0y7U;LX/0yFs;)V								
 auto_comment_publish_failure	auto_comment	method	Lcom/ss/android/ugc/aweme/comment/data/publish/CommentPublishRequest;		LJIJ	(Ljava/lang/Exception;)V								
+auto_comment_audio_upload	auto_comment	method	Lcom/ss/android/ugc/aweme/comment/helper/AudioUploader;		LJFF	(LX/0yFr;Ljava/lang/String;LY/AObjectS313S0200000_35;LY/AObjectS814S0100000_35;)V								
 adv_im_cell_bind	message	method	Lcom/ss/android/ugc/aweme/im/business/chat/msgcell/common/CellComposeAdapter;		onBindViewHolder	(Landroidx/recyclerview/widget/RecyclerView$ViewHolder;ILjava/util/List;)V								
 adv_im_cell_message	message	method	Lcom/ss/android/ugc/aweme/im/business/chat/msgcell/common/CellComposeAdapter;		LJLLLL	(I)Lcom/bytedance/im/core/model/Message;								
 adv_im_message_uuid	message	method	Lcom/bytedance/im/core/model/Message;		getUuid	()Ljava/lang/String;								
@@ -188,3 +189,13 @@ relation_following_list	method_scan	method			queryFollowingList	(Ljava/util/Map;
 relation_follower_list	method_scan	method			queryFollowerList	(Ljava/util/Map;)Lio/reactivex/Observable;								
 relation_retrofit_service	method_scan	method	Lcom/ss/android/ugc/aweme/services/RetrofitService;		LIZIZ	()Lcom/ss/android/ugc/aweme/framework/services/IRetrofitService;								
 relation_im_user_cache	method_scan	method	Lcom/ss/android/ugc/aweme/im/sdk/core/IMUserRepository;		LJIILL	()Lcom/bytedance/im/core/model/cache/IMMemoryCache;								
+dm_auto_audio_type	message_voice	method	LX/12ve;		LJ	()I								
+dm_auto_audio_content	message_voice	class	Lcom/ss/android/ugc/aweme/im/sdk/chat/model/AudioContent;											duration|waveList|md5
+dm_auto_audio_encrypted_content	message_voice	class	Lcom/ss/android/ugc/aweme/im/business/mediaselectpage/sender/audio/model/EncryptAudioNewContent;											
+dm_auto_audio_content_type	message_voice	method	Lcom/ss/android/ugc/aweme/im/sdk/chat/model/BaseContent;		LJJIZ	(I)V								
+dm_auto_audio_attachment	message_voice	class	Lcom/bytedance/im/core/model/Attachment;											
+dm_auto_audio_message_status	message_voice	method	Lcom/bytedance/im/core/model/Message;		setMsgStatus	(I)V								
+dm_auto_audio_message_server_id	message_voice	method	Lcom/bytedance/im/core/model/Message;		setMsgId	(J)V								
+dm_auto_audio_local_path	message_voice	method	LX/12yj;		LJFF	(Lcom/bytedance/im/core/model/Message;Ljava/lang/String;)V								
+dm_auto_audio_insert	message_voice	method	LX/12uT;		LIZ	(Lcom/bytedance/im/core/model/Message;Ljava/lang/Runnable;Lcom/bytedance/im/core/client/callback/IRequestListener;LX/0r5Z;)V								
+dm_auto_audio_uploader	message_voice	method	LX/12vM;		LIZIZ	()Ljava/lang/Object;								

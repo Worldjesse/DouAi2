@@ -1089,18 +1089,23 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     }
 
     private void saveMedia(Context context, Object aweme) {
-        if (Build.VERSION.SDK_INT < 29 && context.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        LocalOptions current = options == null ? new LocalOptions(Collections.emptyMap()) : options;
+        if (current.downloadSaveTree().isEmpty() && Build.VERSION.SDK_INT < 29
+                && context.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 != PackageManager.PERMISSION_GRANTED) {
             toast(context, "请先授予抖音存储权限"); return;
         }
-        LocalOptions current = options == null ? new LocalOptions(Collections.emptyMap()) : options;
+        if (new com.douai.module.config.ThirdPartyDownloadSettings(current).thirdParty) {
+            ThirdPartyDownload.start(context, aweme, current, this::safeLog);
+            return;
+        }
         List<DownloadActionHook.MediaAsset> assets = DownloadActionHook.mediaAssets(aweme,
                 current.enabled("remove_watermark", true), current);
         if (assets.isEmpty()) { toast(context, "当前视频没有可保存的媒体地址"); return; }
         for (DownloadActionHook.MediaAsset asset : assets) {
             boolean queued = asset.image
-                    ? MediaStoreDownloader.downloadImage(context, asset.url, asset.name, this::safeLog)
-                    : MediaStoreDownloader.download(context, asset.url, asset.name, false, this::safeLog);
+                    ? MediaStoreDownloader.downloadImage(context, asset.url, asset.name, current.downloadSaveTree(), this::safeLog)
+                    : MediaStoreDownloader.download(context, asset.url, asset.name, false, current.downloadSaveTree(), this::safeLog);
             if (!queued) toast(context, "下载地址无效");
         }
     }

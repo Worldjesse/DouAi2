@@ -25,8 +25,8 @@ android {
         applicationId = "io.github.yudigaga.douai"
         minSdk = 28
         targetSdk = 35
-        versionCode = 54
-        versionName = "0.1.53"
+        versionCode = 61
+        versionName = "0.1.60"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

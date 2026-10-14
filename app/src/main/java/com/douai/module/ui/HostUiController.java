@@ -501,7 +501,9 @@ public final class HostUiController implements Application.ActivityLifecycleCall
         if (resumedActivity.get() != activity) return;
         resumedActivity.clear();
         dismissScanDialog();
-        if (!HostImagePicker.isPending(activity)) dismissSettingsDialog();
+        if (!HostImagePicker.isPending(activity) && !HostDownloadDirectoryPicker.isPending(activity)) {
+            dismissSettingsDialog();
+        }
     }
 
     @Override

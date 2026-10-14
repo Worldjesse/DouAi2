@@ -42,4 +42,29 @@ public final class CommentOutputPolicyTest {
         assertTrue(task.contains("\"comment\""));
         assertTrue(task.contains("解释"));
     }
+
+    @Test public void voicePreservesCompleteCommentBeyondTheTextCommentLimit() throws Exception {
+        String prose = "作品细节值得认真欣赏。".repeat(120) + "\n\uD83D\uDC4D";
+        String output = new JSONObject().put("comment", prose).toString();
+        assertTrue(prose.length() > 1000);
+        assertTrue(output.length() <= 4000);
+        assertEquals(prose, CommentOutputPolicy.parse(output, true));
+        assertThrows(IllegalArgumentException.class, () -> CommentOutputPolicy.parse(output));
+    }
+
+    @Test public void voiceKeepsStrictStructureAndNonCommentValidationWithoutLengthCaps() {
+        String[] invalid = {
+                "```json\n{\"comment\":\"内容\"}\n```", "{\"comment\":\"内容\"}额外文字",
+                "{\"comment\":\"内容\",\"reason\":\"解释\"}", "{\"comment\":123}",
+                "{\"comment\":null}", "{\"comment\":\"甲\",\"comment\":\"乙\"}",
+                "{\"comment\":\"   \"}", "{\"comment\":\"请提供作品内容，我才能生成评论。\"}",
+                "{\"comment\":\"I cannot write a comment without the video.\"}",
+                "{\"comment\":\"以下是为你生成的评论：作品很好。\"}"
+        };
+        for (String output : invalid) {
+            assertThrows("Unexpectedly accepted voice output: " + output,
+                    IllegalArgumentException.class, () -> CommentOutputPolicy.parse(output, true));
+        }
+        assertEquals("", CommentOutputPolicy.parse("{\"comment\":\"\"}", true));
+    }
 }

@@ -1004,6 +1004,481 @@ public final class AutoCommentHookTest {
                 AutoCommentHook.workInput(new GetterOnlyWork()));
     }
 
+    @Test public void voiceCommentPublishesAudioWithEmptyTextAndCleansOnAcknowledgment() throws Throwable {
+        java.io.File audio = voiceFile();
+        useVoicePreparer((context, text, options, maximum, valid) -> {
+            assertEquals("固定评论", text);
+            assertEquals(Long.MAX_VALUE, maximum);
+            assertTrue(valid.getAsBoolean());
+            return new SpeechPreparation.Audio(audio, 1200);
+        });
+        setOptions(voiceOptions(false));
+        generate(); flushDispatch();
+        assertEquals(1, Request.attempts);
+        assertVoiceModel(Request.models.get(0), audio);
+        assertEquals("sent", entry("work").status);
+        assertEquals("voice", entry("work").deliveryMode);
+        assertFalse(audio.exists());
+    }
+
+    @Test public void textFallbackKeepsItsOwnThreePublishAttemptsAfterVoiceFailures() throws Throwable {
+        java.io.File audio = voiceFile();
+        int[] preparations = {0};
+        useVoicePreparer((context, text, options, maximum, valid) -> {
+            preparations[0]++;
+            return new SpeechPreparation.Audio(audio, 1200);
+        });
+        Request.failuresRemaining = 5;
+        setOptions(voiceOptions(false));
+        generate(); flushDispatch();
+        advanceSeconds(1); advanceSeconds(2); advanceSeconds(3); advanceSeconds(1); advanceSeconds(2);
+        assertEquals(6, Request.attempts);
+        assertEquals(1, preparations[0]);
+        for (int index = 0; index < 3; index++) assertVoiceModel(Request.models.get(index), audio);
+        for (int index = 3; index < 6; index++) {
+            assertEquals("固定评论", Request.models.get(index).a);
+            assertNull(Request.models.get(index).A);
+        }
+        assertEquals("sent", entry("work").status);
+        assertEquals("text", entry("work").deliveryMode);
+        assertFalse(audio.exists());
+    }
+
+    @Test public void longFixedVoiceCommentPublishesCompleteSpeechWithoutTextFallback() throws Throwable {
+        String prose = "作品细节值得认真欣赏。".repeat(120) + "\n\uD83D\uDC4D";
+        assertTrue(prose.length() > 1000);
+        java.io.File audio = voiceFile();
+        long duration = 120_001;
+        useVoicePreparer((context, text, options, maximum, valid) -> {
+            assertEquals(prose, text);
+            assertEquals(Long.MAX_VALUE, maximum);
+            assertTrue(valid.getAsBoolean());
+            return new SpeechPreparation.Audio(audio, duration);
+        });
+        Map<String, Object> values = baseOptions(false);
+        values.put("auto_comment_text", prose);
+        values.put(LocalOptions.COMMENT_VOICE, true);
+        setOptions(new LocalOptions(values));
+        generate(); flushDispatch();
+        assertEquals(1, Request.attempts);
+        assertVoiceModel(Request.models.get(0), audio, duration);
+        assertEquals(prose, entry("work").output);
+        assertEquals("sent", entry("work").status);
+        assertFalse(audio.exists());
+    }
+
+    @Test public void longAiVoiceCommentKeepsFullJsonContentAndPublishesOnlyAudio() throws Throwable {
+        String prose = "作品细节值得认真欣赏。".repeat(120) + "\n\uD83D\uDC4D";
+        String output = new JSONObject().put("comment", prose).toString();
+        assertTrue(prose.length() > 1000);
+        assertTrue(output.length() <= 4000);
+        java.io.File audio = voiceFile();
+        long duration = 120_001;
+        useVoicePreparer((context, text, options, maximum, valid) -> {
+            assertEquals(prose, text);
+            assertEquals(Long.MAX_VALUE, maximum);
+            assertTrue(valid.getAsBoolean());
+            return new SpeechPreparation.Audio(audio, duration);
+        });
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(modelResponse(output));
+            Map<String, Object> values = aiOptions(server, false);
+            values.put(LocalOptions.COMMENT_VOICE, true);
+            setOptions(new LocalOptions(values));
+            generate(); flushDispatch();
+            assertEquals(1, server.getRequestCount());
+            assertEquals(1, Request.attempts);
+            assertVoiceModel(Request.models.get(0), audio, duration);
+            assertEquals("sent", entry("work").status);
+            assertFalse(audio.exists());
+        }
+    }
+
+    @Test public void voiceCommentStillUsesTheOriginalAiOutputLimit() throws Throwable {
+        String prose = "作品细节值得认真欣赏。".repeat(400);
+        String output = new JSONObject().put("comment", prose).toString();
+        assertTrue(output.length() > 4000);
+        useVoicePreparer((context, text, options, maximum, valid) -> {
+            throw new AssertionError("Overlong AI output must not enter synthesis");
+        });
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(modelResponse(output));
+            Map<String, Object> values = aiOptions(server, false);
+            values.put(LocalOptions.COMMENT_VOICE, true);
+            setOptions(new LocalOptions(values));
+            generate(); flushDispatch();
+            assertEquals(1, server.getRequestCount());
+            assertEquals(0, Request.attempts);
+            assertTrue(logs.stream().anyMatch(value -> value.contains("generation failed")
+                    && value.contains("stage=model_request")));
+        }
+    }
+
+    @Test public void failedVoicePublishReusesPreparedAudioAcrossNativeRetries() throws Throwable {
+        java.io.File audio = voiceFile();
+        int[] preparations = {0};
+        useVoicePreparer((context, text, options, maximum, valid) -> {
+            preparations[0]++;
+            return new SpeechPreparation.Audio(audio, 1200);
+        });
+        Request.failuresRemaining = 2;
+        setOptions(voiceOptions(false));
+        generate(); flushDispatch();
+        assertEquals(1, Request.attempts);
+        assertTrue(audio.exists());
+        advanceSeconds(1);
+        assertEquals(2, Request.attempts);
+        assertTrue(audio.exists());
+        advanceSeconds(2);
+        assertEquals(3, Request.attempts);
+        assertEquals(1, preparations[0]);
+        for (Model model : Request.models) assertVoiceModel(model, audio);
+        assertEquals("sent", entry("work").status);
+        assertFalse(audio.exists());
+    }
+
+    @Test public void threeVoiceGenerationFailuresFallBackToTheSameAiCommentAsText() throws Throwable {
+        List<String> synthesized = new ArrayList<>();
+        useVoicePreparer((context, text, options, maximum, valid) -> {
+            synthesized.add(text);
+            throw new IllegalStateException("voice unavailable");
+        });
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(modelResponse("{\"comment\":\"同一份作品评论\"}"));
+            Map<String, Object> values = aiOptions(server, false);
+            values.put(LocalOptions.COMMENT_VOICE, true);
+            setOptions(new LocalOptions(values));
+            generate(); flushDispatch();
+            assertEquals(1, synthesized.size());
+            assertEquals(0, Request.attempts);
+            advanceSeconds(1);
+            assertEquals(2, synthesized.size());
+            assertEquals(0, Request.attempts);
+            advanceSeconds(2); advanceSeconds(10);
+            assertEquals(Arrays.asList("同一份作品评论", "同一份作品评论", "同一份作品评论"), synthesized);
+            assertEquals(1, server.getRequestCount());
+            assertEquals(1, Request.attempts);
+            assertEquals("同一份作品评论", Request.models.get(0).a);
+            assertNull(Request.models.get(0).A);
+            assertEquals("sent", entry("work").status);
+            assertEquals("text", entry("work").deliveryMode);
+        }
+    }
+
+    @Test public void threeConfirmedVoicePublishFailuresFallBackToTextWithoutResynthesizing() throws Throwable {
+        java.io.File audio = voiceFile();
+        int[] preparations = {0};
+        useVoicePreparer((context, text, options, maximum, valid) -> {
+            preparations[0]++;
+            return new SpeechPreparation.Audio(audio, 1200);
+        });
+        Request.asyncAudioUpload = true;
+        setOptions(voiceOptions(false));
+        generate(); flushDispatch();
+        Request.complete(Request.instances.get(0), false); flushDispatch();
+        advanceSeconds(1);
+        Request.complete(Request.instances.get(1), false); flushDispatch();
+        advanceSeconds(2);
+        Request.complete(Request.instances.get(2), false); flushDispatch();
+        advanceSeconds(10);
+        assertEquals(4, Request.attempts);
+        assertEquals(3, AudioUploader.calls);
+        assertEquals(1, preparations[0]);
+        for (int index = 0; index < 3; index++) assertVoiceModel(Request.models.get(index), audio);
+        assertEquals("固定评论", Request.models.get(3).a);
+        assertNull(Request.models.get(3).A);
+        assertEquals("sent", entry("work").status);
+        assertEquals("text", entry("work").deliveryMode);
+        assertFalse(audio.exists());
+    }
+
+    @Test public void aiFailuresDoNotConsumeTheThreeSpeechAttemptsBeforeTextFallback() throws Throwable {
+        List<String> synthesized = new ArrayList<>();
+        useVoicePreparer((context, text, options, maximum, valid) -> {
+            synthesized.add(text);
+            throw new IllegalStateException("voice unavailable");
+        });
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setResponseCode(503));
+            server.enqueue(new MockResponse().setResponseCode(503));
+            server.enqueue(modelResponse("{\"comment\":\"同一份作品评论\"}"));
+            Map<String, Object> values = aiOptions(server, false);
+            values.put(LocalOptions.COMMENT_VOICE, true);
+            setOptions(new LocalOptions(values));
+            generate(); flushDispatch();
+            advanceSeconds(1); advanceSeconds(2);
+            assertEquals(1, synthesized.size());
+            assertEquals(0, Request.attempts);
+            advanceSeconds(3);
+            assertEquals(2, synthesized.size());
+            assertEquals(0, Request.attempts);
+            advanceSeconds(1);
+            assertEquals(3, synthesized.size());
+            assertEquals(0, Request.attempts);
+            advanceSeconds(2);
+            assertEquals(1, Request.attempts);
+            assertEquals(3, server.getRequestCount());
+            assertEquals("同一份作品评论", Request.models.get(0).a);
+            assertEquals("text", entry("work").deliveryMode);
+            assertEquals("sent", entry("work").status);
+        }
+    }
+
+    @Test public void textFallbackSubmitsTheCompleteLongSpeechTextForHostValidation() throws Throwable {
+        String prose = "作品细节值得认真欣赏。".repeat(120);
+        assertTrue(prose.length() > 1000);
+        int[] preparations = {0};
+        useVoicePreparer((context, text, options, maximum, valid) -> {
+            assertEquals(prose, text);
+            preparations[0]++;
+            throw new IllegalStateException("voice unavailable");
+        });
+        Map<String, Object> values = baseOptions(false);
+        values.put(LocalOptions.COMMENT_VOICE, true);
+        values.put("auto_comment_text", prose);
+        setOptions(new LocalOptions(values));
+        generate(); flushDispatch();
+        advanceSeconds(1); advanceSeconds(2); advanceSeconds(3);
+        assertEquals(3, preparations[0]);
+        assertEquals(1, Request.attempts);
+        assertEquals(prose, Request.models.get(0).a);
+        assertNull(Request.models.get(0).A);
+        assertEquals("text", entry("work").deliveryMode);
+        assertEquals("sent", entry("work").status);
+    }
+
+    @Test public void disabledVoiceCommentPublishesOnlyTextAndRecordsTextMode() throws Throwable {
+        useVoicePreparer((context, text, options, maximum, valid) -> {
+            throw new AssertionError("Disabled voice comments must not synthesize");
+        });
+        setOptions(options(false));
+        generate(); flushDispatch();
+        assertEquals(1, Request.attempts);
+        assertEquals(0, AudioUploader.calls);
+        assertEquals("固定评论", Request.models.get(0).a);
+        assertNull(Request.models.get(0).A);
+        assertEquals("sent", entry("work").status);
+        assertEquals("text", entry("work").deliveryMode);
+    }
+
+    @Test public void emptyAiVoiceCommentNeverFallsBackOrSynthesizes() throws Throwable {
+        useVoicePreparer((context, text, options, maximum, valid) -> {
+            throw new AssertionError("Empty AI comments must not synthesize");
+        });
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(modelResponse("{\"comment\":\"\"}"));
+            Map<String, Object> values = aiOptions(server, false);
+            values.put(LocalOptions.COMMENT_VOICE, true);
+            setOptions(new LocalOptions(values));
+            generate(); flushDispatch(); advanceSeconds(10);
+            assertEquals(1, server.getRequestCount());
+            assertEquals(0, Request.attempts);
+            assertEquals("", entry("work").output);
+        }
+    }
+
+    @Test public void aiVoiceGenerationFailureWithoutCommentNeverFallsBackToText() throws Throwable {
+        useVoicePreparer((context, text, options, maximum, valid) -> {
+            throw new AssertionError("AI failures without text must not synthesize");
+        });
+        try (MockWebServer server = new MockWebServer()) {
+            for (int index = 0; index < 3; index++) server.enqueue(new MockResponse().setResponseCode(503).setBody("unavailable"));
+            Map<String, Object> values = aiOptions(server, false);
+            values.put(LocalOptions.COMMENT_VOICE, true);
+            setOptions(new LocalOptions(values));
+            generate(); flushDispatch();
+            advanceSeconds(1); advanceSeconds(2); advanceSeconds(10);
+            assertEquals(3, server.getRequestCount());
+            assertEquals(0, Request.attempts);
+            assertEquals("failed", entry("work").status);
+            assertEquals("", entry("work").output);
+        }
+    }
+
+    @Test public void cancellingVoicePreviewDeletesAudioBeforeNativePublication() throws Throwable {
+        java.io.File audio = voiceFile();
+        useVoicePreparer((context, text, options, maximum, valid) -> new SpeechPreparation.Audio(audio, 1200));
+        setOptions(voiceOptions(true));
+        generate(); flushDispatch();
+        assertEquals(0, Request.attempts);
+        assertTrue(audio.exists());
+        notice().performLongClick(); flushDispatch();
+        assertEquals("cancelled", entry("work").status);
+        assertFalse(audio.exists());
+        assertEquals(0, Request.attempts);
+    }
+
+    @Test public void unknownVoiceSubmissionRetainsAudioUntilLateNativeCallback() throws Throwable {
+        java.io.File audio = voiceFile();
+        useVoicePreparer((context, text, options, maximum, valid) -> new SpeechPreparation.Audio(audio, 1200));
+        Request.autoCallback = false;
+        setOptions(voiceOptions(false));
+        generate(); flushDispatch();
+        advanceSeconds(31);
+        assertEquals("submitted", entry("work").status);
+        assertTrue(audio.exists());
+        assertEquals(1, Request.attempts);
+        assertEquals("voice", entry("work").deliveryMode);
+        advanceSeconds(20);
+        assertEquals(1, Request.attempts);
+        Request.complete(Request.instances.get(0), true); flushDispatch();
+        assertEquals("sent", entry("work").status);
+        assertEquals("voice", entry("work").deliveryMode);
+        assertFalse(audio.exists());
+    }
+
+    @Test public void asynchronousVoiceUploadReturningFalsePublishesOnlyOnceAndRecordsSuccess() throws Throwable {
+        java.io.File audio = voiceFile();
+        useVoicePreparer((context, text, options, maximum, valid) -> new SpeechPreparation.Audio(audio, 1200));
+        Request.asyncAudioUpload = true;
+        setOptions(voiceOptions(true));
+        generate(); advanceSeconds(8);
+        advanceSeconds(2);
+        assertEquals(1, Request.attempts);
+        assertEquals(1, AudioUploader.calls);
+        assertTrue(audio.exists());
+        assertEquals("publishing", ((CommentRingView) notice()).getPhase());
+        assertNotEquals("failed", entry("work").status);
+        assertVoiceModel(Request.models.get(0), audio);
+        Request.complete(Request.instances.get(0), true); flushDispatch();
+        assertEquals("sent", entry("work").status);
+        assertNull(failureNotice());
+        assertFalse(audio.exists());
+        selectWork(); advanceSeconds(10);
+        assertEquals(1, Request.attempts);
+        assertEquals(1, AudioUploader.calls);
+        assertEquals(1, history().size());
+    }
+
+    @Test public void asynchronousVoiceUploadTimeoutRemainsSubmittedAndLateSuccessUpdatesHistory() throws Throwable {
+        java.io.File audio = voiceFile();
+        useVoicePreparer((context, text, options, maximum, valid) -> new SpeechPreparation.Audio(audio, 1200));
+        Request.asyncAudioUpload = true;
+        setOptions(voiceOptions(false));
+        generate(); flushDispatch();
+        advanceSeconds(31);
+        assertEquals(1, Request.attempts);
+        assertEquals(1, AudioUploader.calls);
+        assertEquals("submitted", entry("work").status);
+        assertTrue(audio.exists());
+        assertNull(failureNotice());
+        assertEquals("voice", entry("work").deliveryMode);
+        advanceSeconds(20);
+        assertEquals(1, Request.attempts);
+        assertEquals(1, AudioUploader.calls);
+        Request.complete(Request.instances.get(0), true); flushDispatch();
+        assertEquals("sent", entry("work").status);
+        assertEquals("voice", entry("work").deliveryMode);
+        assertFalse(audio.exists());
+        selectWork(); advanceSeconds(10);
+        assertEquals(1, Request.attempts);
+        assertEquals(1, history().size());
+    }
+
+    @Test public void rejectedVoiceRequestThenRejectedTextExhaustsThreeAttemptsForEachMode() throws Throwable {
+        java.io.File audio = voiceFile();
+        useVoicePreparer((context, text, options, maximum, valid) -> new SpeechPreparation.Audio(audio, 1200));
+        Request.reject = true;
+        setOptions(voiceOptions(false));
+        generate(); flushDispatch();
+        advanceSeconds(1); advanceSeconds(2); advanceSeconds(3); advanceSeconds(1); advanceSeconds(2);
+        assertEquals(6, Request.attempts);
+        assertEquals(0, AudioUploader.calls);
+        for (int index = 0; index < 3; index++) assertVoiceModel(Request.models.get(index), audio);
+        for (int index = 3; index < 6; index++) {
+            assertEquals("固定评论", Request.models.get(index).a);
+            assertNull(Request.models.get(index).A);
+        }
+        assertEquals("failed", entry("work").status);
+        assertEquals("text", entry("work").deliveryMode);
+        assertFalse(audio.exists());
+        assertFalse(activity.getSharedPreferences("douai_comment_state", Context.MODE_PRIVATE)
+                .contains("comment:100:work"));
+    }
+
+    @Test public void immediateSuccessDuringVoiceUploadReturningFalseIsNotRetried() throws Throwable {
+        java.io.File audio = voiceFile();
+        useVoicePreparer((context, text, options, maximum, valid) -> new SpeechPreparation.Audio(audio, 1200));
+        Request.asyncAudioUpload = true;
+        Request.immediateAudioSuccess = true;
+        setOptions(voiceOptions(false));
+        generate(); flushDispatch();
+        advanceSeconds(10);
+        assertEquals(1, Request.attempts);
+        assertEquals(1, AudioUploader.calls);
+        assertEquals("sent", entry("work").status);
+        assertFalse(audio.exists());
+    }
+
+    @Test public void realAsynchronousVoiceFailureReleasesQuotaAndRetriesPreparedAudio() throws Throwable {
+        java.io.File audio = voiceFile();
+        int[] preparations = {0};
+        useVoicePreparer((context, text, options, maximum, valid) -> {
+            preparations[0]++;
+            return new SpeechPreparation.Audio(audio, 1200);
+        });
+        Request.asyncAudioUpload = true;
+        Map<String, Object> values = baseOptions(false);
+        values.put(LocalOptions.COMMENT_VOICE, true);
+        values.put("comment_daily_limit", "1");
+        setOptions(new LocalOptions(values));
+        generate(); flushDispatch();
+        Request.complete(Request.instances.get(0), false); flushDispatch();
+        advanceSeconds(1);
+        assertEquals(2, Request.attempts);
+        assertTrue(audio.exists());
+        Request.complete(Request.instances.get(1), true); flushDispatch();
+        advanceSeconds(10);
+        assertEquals(2, Request.attempts);
+        assertEquals(2, AudioUploader.calls);
+        assertEquals(1, preparations[0]);
+        assertEquals("sent", entry("work").status);
+        assertFalse(audio.exists());
+    }
+
+    @Test public void voiceConfigurationChangeCancelsPreparedComment() throws Throwable {
+        java.io.File audio = voiceFile();
+        useVoicePreparer((context, text, options, maximum, valid) -> new SpeechPreparation.Audio(audio, 1200));
+        setOptions(voiceOptions(true));
+        generate(); flushDispatch();
+        Map<String, Object> changed = baseOptions(true);
+        changed.put(LocalOptions.COMMENT_VOICE, true);
+        changed.put("tts_selected_voice", "2");
+        setOptions(new LocalOptions(changed)); flushDispatch();
+        assertFalse(audio.exists());
+        assertEquals(0, Request.attempts);
+    }
+
+    private void useVoicePreparer(SpeechPreparation.Preparer preparer) throws Exception {
+        HostTargets.field(AutoCommentHook.class, "speechPreparer").set(hook, preparer);
+    }
+
+    private java.io.File voiceFile() throws Exception {
+        java.io.File file = java.io.File.createTempFile("comment-voice", ".m4a", activity.getCacheDir());
+        java.nio.file.Files.write(file.toPath(), new byte[]{1, 2, 3});
+        return file;
+    }
+
+    private static LocalOptions voiceOptions(boolean tip) {
+        Map<String, Object> values = baseOptions(tip);
+        values.put(LocalOptions.COMMENT_VOICE, true);
+        return new LocalOptions(values);
+    }
+
+    private static void assertVoiceModel(Model model, java.io.File file) {
+        assertVoiceModel(model, file, 1200);
+    }
+
+    private static void assertVoiceModel(Model model, java.io.File file, long duration) {
+        assertEquals("", model.a);
+        assertTrue(model.d.isEmpty());
+        assertNotNull(model.A);
+        assertEquals("", model.A.text.toString());
+        Audio audio = (Audio) model.A.audio;
+        assertEquals(file, audio.file);
+        assertEquals(Long.valueOf(duration), audio.duration);
+    }
+
     @Test public void serializedHostFieldsTakePriorityOverStaleGetterValues() {
         assertEquals("作品作者：字段作者\n作品标题：字段标题\n作品文案：字段标题",
                 AutoCommentHook.workInput(new MixedWork()));
@@ -1158,15 +1633,30 @@ public final class AutoCommentHookTest {
     }
     public static final class Model {
         public String a; public ContextState y; public String n; public Attachment A;
+        public List<Object> d = Collections.emptyList();
         public Model copy() { Model result = new Model(); result.a = a; result.y = y; result.n = n; result.A = A; return result; }
     }
     public static final class Attachment {
         public Object audio; public List<Object> imageList = Collections.emptyList();
+        public CharSequence text = "";
         public Attachment copy() { return new Attachment(); }
     }
-    public static final class Audio { public Audio(java.io.File file, List<Object> wave, Long duration) { } }
+    public static final class Audio {
+        public final java.io.File file;
+        public final Long duration;
+        public Audio(java.io.File file, List<Object> wave, Long duration) { this.file = file; this.duration = duration; }
+    }
     public static final class Comment { public String cid = "comment-id"; public String awemeId; }
     public static final class Response { public int status_code; public Comment comment = new Comment(); }
+    public static final class UploadCallback {
+        public final Model l0;
+        public final Request l1;
+        public UploadCallback(Request request, Model model) { l0 = model; l1 = request; }
+    }
+    public static final class AudioUploader {
+        static int calls;
+        public static void upload(Object state, String path, UploadCallback callback, Object listener) { calls++; }
+    }
     public static final class Request {
         static Framework framework;
         static int attempts;
@@ -1174,16 +1664,29 @@ public final class AutoCommentHookTest {
         static boolean autoCallback;
         static boolean reject;
         static boolean throwAfterSubmit;
+        static boolean asyncAudioUpload;
+        static boolean immediateAudioSuccess;
         static final List<Model> models = new ArrayList<>();
         static final List<Request> instances = new ArrayList<>();
         static void reset(Framework selected) {
             framework = selected; attempts = 0; failuresRemaining = 0; autoCallback = true; reject = false;
             throwAfterSubmit = false;
+            asyncAudioUpload = false; AudioUploader.calls = 0;
+            immediateAudioSuccess = false;
             models.clear(); instances.clear();
         }
         public boolean checked(Model model) {
             attempts++; models.add(model); instances.add(this);
             if (reject) return false;
+            if (asyncAudioUpload && model.A != null && model.A.audio instanceof Audio) {
+                try {
+                    framework.invoke(AudioUploader.class.getMethod("upload", Object.class, String.class,
+                                    UploadCallback.class, Object.class), null, model.y,
+                            ((Audio) model.A.audio).file.getAbsolutePath(), new UploadCallback(this, model), null);
+                } catch (Throwable failure) { throw new AssertionError(failure); }
+                if (immediateAudioSuccess) complete(this, true);
+                return false;
+            }
             if (throwAfterSubmit) throw new IllegalStateException("Host threw after starting submission");
             if (autoCallback) {
                 boolean success = failuresRemaining == 0;
@@ -1214,6 +1717,10 @@ public final class AutoCommentHookTest {
         add(rules, "auto_comment_checked_request", Request.class.getMethod("checked", Model.class));
         add(rules, "auto_comment_publish_success", Request.class.getMethod("success", Response.class));
         add(rules, "auto_comment_publish_failure", Request.class.getMethod("failed", Exception.class));
+        add(rules, "auto_comment_audio_upload", AudioUploader.class.getMethod("upload", Object.class, String.class,
+                UploadCallback.class, Object.class));
+        rules.add(new RuleScanResult("comment_audio_model", "comment", Collections.singletonList(new HostCandidate(
+                "fixture.apk", "classes.dex", HostTargets.descriptor(Audio.class), null, null))));
         return new HostScanReport("fixture", rules, false);
     }
 
@@ -1237,6 +1744,8 @@ public final class AutoCommentHookTest {
                             });
                 });
         Object invoke(Method target, Object receiver, Object... input) throws Throwable {
+            XposedInterface.Hooker hooker = hooks.get(target);
+            if (hooker == null) return target.invoke(receiver, input);
             XposedInterface.Chain chain = (XposedInterface.Chain) Proxy.newProxyInstance(XposedInterface.Chain.class.getClassLoader(),
                     new Class<?>[]{XposedInterface.Chain.class}, (proxy, method, arguments) -> {
                         switch (method.getName()) {
@@ -1247,7 +1756,7 @@ public final class AutoCommentHookTest {
                             default: throw new UnsupportedOperationException(method.getName());
                         }
                     });
-            return hooks.get(target).intercept(chain);
+            return hooker.intercept(chain);
         }
     }
 

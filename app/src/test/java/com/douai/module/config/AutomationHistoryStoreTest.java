@@ -104,10 +104,50 @@ public final class AutomationHistoryStoreTest {
         AutomationHistoryStore.Entry loaded = new AutomationHistoryStore(context).read("comment").get(0);
         assertEquals(-1, loaded.requestImageCount);
         assertFalse(loaded.modelRequestSent);
+        assertEquals(AutomationHistoryStore.DELIVERY_UNKNOWN, loaded.deliveryMode);
         store.upsert(entry("legacy", "comment", "sent", 10, "作品内容", "评论内容"));
         loaded = new AutomationHistoryStore(context).read("comment").get(0);
         assertEquals(-1, loaded.requestImageCount);
         assertFalse(loaded.modelRequestSent);
+        assertEquals(AutomationHistoryStore.DELIVERY_UNKNOWN, loaded.deliveryMode);
+    }
+
+    @Test public void deliveryModesPersistAndModelRequestMetadataPreservesThem() {
+        for (String mode : new String[]{AutomationHistoryStore.DELIVERY_TEXT, AutomationHistoryStore.DELIVERY_VOICE}) {
+            store.upsert(new AutomationHistoryStore.Entry(mode, "comment", "target-id", "目标用户",
+                    "作品内容", "评论内容", "test-model", "sent", 10, 20, mode));
+            store.markModelRequestSent("comment", mode, 2);
+        }
+
+        List<AutomationHistoryStore.Entry> loaded = new AutomationHistoryStore(context).read("comment");
+        assertEquals(2, loaded.size());
+        for (AutomationHistoryStore.Entry entry : loaded) {
+            assertEquals(entry.id, entry.deliveryMode);
+            assertTrue(entry.modelRequestSent);
+            assertEquals(2, entry.requestImageCount);
+        }
+    }
+
+    @Test public void textFallbackReplacesVoiceModeAndRetainsModelRequestMetadata() {
+        store.upsert(new AutomationHistoryStore.Entry("fallback", "comment", "target-id", "目标用户",
+                "作品内容", "评论内容", "test-model", "failed", 10, 20, AutomationHistoryStore.DELIVERY_VOICE));
+        store.markModelRequestSent("comment", "fallback", 1);
+        store.upsert(new AutomationHistoryStore.Entry("fallback", "comment", "target-id", "目标用户",
+                "作品内容", "评论内容", "test-model", "sent", 10, 30, AutomationHistoryStore.DELIVERY_TEXT));
+
+        AutomationHistoryStore.Entry loaded = new AutomationHistoryStore(context).read("comment").get(0);
+        assertEquals(AutomationHistoryStore.DELIVERY_TEXT, loaded.deliveryMode);
+        assertEquals("sent", loaded.status);
+        assertTrue(loaded.modelRequestSent);
+        assertEquals(1, loaded.requestImageCount);
+    }
+
+    @Test public void unrecognizedDeliveryModesRemainUnknown() {
+        store.upsert(new AutomationHistoryStore.Entry("unexpected", "comment", "target-id", "目标用户",
+                "作品内容", "评论内容", "test-model", "sent", 10, 20, "unsupported"));
+
+        assertEquals(AutomationHistoryStore.DELIVERY_UNKNOWN,
+                new AutomationHistoryStore(context).read("comment").get(0).deliveryMode);
     }
 
     @Test public void sentImageAndTextOnlyRequestsPersistAcrossStoreInstances() {

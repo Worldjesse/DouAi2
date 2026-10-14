@@ -178,8 +178,10 @@ object MiuixSettingsViews {
                         title = titles[index],
                         modifier = Modifier.testTag("settings.category.$index"),
                         endActions = {
-                            Text(if (counts[index] == 0) "未适配" else "${counts[index]}项",
-                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                            if (counts[index] >= 0) {
+                                Text(if (counts[index] == 0) "未适配" else "${counts[index]}项",
+                                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                            }
                             Icon(MiuixIcons.Basic.ArrowRight, contentDescription = null)
                         },
                         onClick = { onCategory.accept(index) },

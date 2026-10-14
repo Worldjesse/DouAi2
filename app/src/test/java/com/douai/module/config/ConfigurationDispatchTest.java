@@ -9,6 +9,7 @@ import com.douai.module.feature.AutoCommentHook;
 import com.douai.module.feature.AutoCommentHookTest;
 import com.douai.module.feature.AutomationDispatcher;
 import com.douai.module.feature.FeedGestureToolsHook;
+import com.douai.module.feature.DownloadActionHook;
 import com.douai.module.feature.FollowListPager;
 import com.douai.module.feature.NativeFollowLists;
 import com.douai.module.feature.NativeMessagingHooks;
@@ -38,6 +39,34 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class ConfigurationDispatchTest {
+    @Test public void changingDownloadMethodAndParserOptionsUpdatesBothSaveEntrypoints() throws Exception {
+        DouAiModule module = module();
+        Map<String, Object> values = new HashMap<>();
+        Constructor<DownloadActionHook> constructor = DownloadActionHook.class.getDeclaredConstructor(
+                Method.class, FeatureSettings.class, Consumer.class);
+        constructor.setAccessible(true);
+        try (DownloadActionHook download = constructor.newInstance(null, FeatureSettings.defaults(),
+                (Consumer<String>) ignored -> { });
+             FeedGestureToolsHook gesture = gesture(new LocalOptions(values))) {
+            setField(module, "downloadActionHook", download);
+            setField(module, "feedGestureToolsHook", gesture);
+            update(module, values);
+            for (String key : new String[]{ThirdPartyDownloadSettings.METHOD,
+                    ThirdPartyDownloadSettings.GET_TEMPLATE, ThirdPartyDownloadSettings.APP_SECRET,
+                    ThirdPartyDownloadSettings.SIGNATURE_MODE, ThirdPartyDownloadSettings.SIGNATURE_HEADER,
+                    ThirdPartyDownloadSettings.DOWNLOAD_FIELDS, ThirdPartyDownloadSettings.NAMING_FIELDS,
+                    LocalOptions.DOWNLOAD_SAVE_TREE}) {
+                LocalOptions previous = options(download);
+                values.put(key, "changed");
+                update(module, values);
+                LocalOptions current = (LocalOptions) field(module, "localOptions");
+                assertNotSame(previous, current);
+                assertSame(key, current, options(download));
+                assertSame(key, current, options(gesture));
+            }
+        }
+    }
+
     @Test public void changingOnlyPlaybackSpeedUpdatesPlaybackAndGestureSnapshots() throws Exception {
         DouAiModule module = module();
         Map<String, Object> values = new HashMap<>();
@@ -99,6 +128,37 @@ public final class ConfigurationDispatchTest {
 
     @Test public void changingOnlyCommentCooldownUpdatesCommentAndDispatcherSnapshots() throws Exception {
         assertAutomationLimitDispatch("comment_user_cooldown_minutes");
+    }
+
+    @Test public void voiceProviderConfigurationUpdatesBothAutomationSnapshots() throws Exception {
+        DouAiModule module = module();
+        Map<String, Object> values = new HashMap<>();
+        LocalOptions initial = new LocalOptions(values);
+        try (AutomationDispatcher dispatcher = new AutomationDispatcher(RuntimeEnvironment.getApplication(), ignored -> { });
+             NativeMessagingHooks reply = messaging(initial, dispatcher);
+             AutoCommentHook comment = comments(initial, dispatcher)) {
+            setField(module, "automationDispatcher", dispatcher);
+            setField(module, "nativeMessagingHooks", reply);
+            setField(module, "autoCommentDraftHook", comment);
+            update(module, values);
+            for (String key : new String[]{SpeechSettings.PROVIDER, SpeechSettings.GET_TEMPLATE,
+                    SpeechSettings.SELECTED_VOICE, SpeechSettings.HEADERS, SpeechSettings.AUDIO_FIELD}) {
+                values.put(key, "changed");
+                update(module, values);
+                LocalOptions current = (LocalOptions) field(module, "localOptions");
+                assertSame(key, current, options(reply));
+                assertSame(key, current, options(comment));
+                assertSame(key, current, options(dispatcher));
+            }
+            for (String key : new String[]{LocalOptions.REPLY_VOICE, LocalOptions.COMMENT_VOICE}) {
+                Object selected = LocalOptions.REPLY_VOICE.equals(key) ? reply : comment;
+                values.put(key, true);
+                update(module, values);
+                LocalOptions current = (LocalOptions) field(module, "localOptions");
+                assertSame(key, current, options(selected));
+                assertTrue(options(selected).enabled(key));
+            }
+        } finally { ShadowLooper.idleMainLooper(); }
     }
 
     private static void assertAutomationLimitDispatch(String key) throws Exception {

@@ -36,7 +36,7 @@ public final class HostFeatureCatalog {
             feature("auto_comment", "自动评论", "auto_comment_hook_installed",
                     "feed_holder_selected", "image_holder_page_selected", "auto_comment_checked_request",
                     "auto_comment_work_context", "portrait_comment_aweme_resolver",
-                    "auto_comment_publish_success", "auto_comment_publish_failure"),
+                    "auto_comment_publish_success", "auto_comment_publish_failure", "auto_comment_audio_upload"),
             feature("auto_message", "私聊草稿", "auto_message_hook_installed",
                     "auto_message_editor_bind", "auto_message_editor_fields", "auto_message_editor_getter",
                     "auto_message_text_api", "auto_message_session_id", "auto_message_input_logic",

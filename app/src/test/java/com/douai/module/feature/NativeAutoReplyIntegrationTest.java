@@ -127,6 +127,87 @@ public final class NativeAutoReplyIntegrationTest {
         }
     }
 
+    @Test public void voiceReplyUsesAudioOnlyInPrivateAndGroupChatsAndRecordsAfterRemoteAck() throws Throwable {
+        for (String conversation : Arrays.asList("thread", "group")) {
+            try (LimitedReplies fixture = new LimitedReplies("reply_voice", "true")) {
+                NativeAudioMessageSenderTest.Uploader.count = 0;
+                NativeAudioMessageSenderTest.Uploader.kind = 17;
+                NativeAudioMessageSenderTest.LocalInsert.fail = false;
+                NativeAudioMessageSenderTest.LocalInsert.defer = false;
+                java.util.concurrent.atomic.AtomicReference<SpeechPreparation.Audio> generated = new java.util.concurrent.atomic.AtomicReference<>();
+                fixture.hook.speechPreparer = (context, text, options, maximum, valid) -> {
+                    assertEquals("reply", text); assertEquals(120_000, maximum); assertTrue(valid.getAsBoolean());
+                    SpeechPreparation.Audio audio = NativeAudioMessageSenderTest.audio(); generated.set(audio); return audio;
+                };
+                fixture.receive(200, conversation);
+                fixture.flush();
+                assertEquals(0, fixture.database.imSdkContext.sends);
+                assertEquals(1, NativeAudioMessageSenderTest.Uploader.count);
+                Message message = (Message) NativeAudioMessageSenderTest.Uploader.last;
+                assertEquals(17, message.type);
+                assertEquals(conversation, message.conversation.id());
+                assertEquals(100, message.sender);
+                assertEquals("group".equals(conversation) ? 2 : 1, message.conversationType);
+                assertEquals(501, message.orderIndex);
+                org.json.JSONObject body = new org.json.JSONObject(message.content);
+                assertEquals(1250, body.getLong("duration")); assertFalse(body.has("text"));
+                assertEquals("sending", fixture.history().get(0).status);
+                assertTrue(generated.get().file.exists());
+                message.localExt.put("s:status_code", "0");
+                fixture.framework.invoke(NativeAudioMessageSenderTest.Message.class.getMethod("setMsgStatus", int.class), message, 2);
+                fixture.framework.invoke(NativeAudioMessageSenderTest.Message.class.getMethod("setMsgId", long.class), message, 900L);
+                fixture.flush();
+                assertEquals("sent", fixture.history().get(0).status);
+                assertFalse(generated.get().file.exists());
+            }
+        }
+    }
+
+    @Test public void voiceSynthesisFailureNeverFallsBackToTextOrConsumesAllowance() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies("reply_voice", "true", "reply_daily_limit", "1")) {
+            fixture.hook.speechPreparer = (context, text, options, maximum, valid) -> { throw new IllegalStateException("provider failed"); };
+            fixture.receive(200, "thread"); fixture.flush();
+            assertEquals(0, fixture.database.imSdkContext.sends);
+            assertEquals("failed", fixture.history().get(0).status);
+            assertTrue(new AutomationRateLimiter(fixture.activity)
+                    .canSend("reply", 100, "200", new LocalOptions(fixture.values)));
+        }
+    }
+
+    @Test public void changingSpeechSettingsAfterPreparationCancelsVoiceAndDeletesPreparedFile() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies("reply_voice", "true")) {
+            java.util.concurrent.atomic.AtomicReference<SpeechPreparation.Audio> generated = new java.util.concurrent.atomic.AtomicReference<>();
+            fixture.hook.speechPreparer = (context, text, options, maximum, valid) -> {
+                SpeechPreparation.Audio audio = NativeAudioMessageSenderTest.audio(); generated.set(audio); return audio;
+            };
+            fixture.receive(200, "thread");
+            fixture.values.put("tts_voice", "changed");
+            LocalOptions changed = new LocalOptions(fixture.values);
+            fixture.hook.setOptions(changed); fixture.dispatcher.setOptions(changed); fixture.flush();
+            assertEquals(0, fixture.database.imSdkContext.sends);
+            assertEquals("cancelled", fixture.history().get(0).status);
+            assertFalse(generated.get().file.exists());
+        }
+    }
+
+    @Test public void voiceReplyKeepsUnknownSendAllowanceAndFileAfterDispatcherTimeout() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies("reply_voice", "true", "reply_daily_limit", "1")) {
+            NativeAudioMessageSenderTest.LocalInsert.fail = false; NativeAudioMessageSenderTest.LocalInsert.defer = false;
+            java.util.concurrent.atomic.AtomicReference<SpeechPreparation.Audio> generated = new java.util.concurrent.atomic.AtomicReference<>();
+            fixture.hook.speechPreparer = (context, text, options, maximum, valid) -> {
+                SpeechPreparation.Audio audio = NativeAudioMessageSenderTest.audio(); generated.set(audio); return audio;
+            };
+            fixture.receive(200, "thread"); fixture.flush();
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(31)); fixture.flush();
+            assertEquals("submitted", fixture.history().get(0).status);
+            assertTrue(generated.get().file.exists());
+            assertFalse(new AutomationRateLimiter(fixture.activity)
+                    .canSend("reply", 100, "201", new LocalOptions(fixture.values)));
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMinutes(10));
+            assertFalse(generated.get().file.exists());
+        }
+    }
+
     private void flow(boolean cancel) throws Throwable {
         flow(cancel, false);
     }
@@ -235,10 +316,17 @@ public final class NativeAutoReplyIntegrationTest {
         Message message = new Message();
         public void type(int type) { message.type = type; }
         public void content(String content) { message.content = content; }
-        public void conversation(Conversation conversation) { message.conversation = conversation; }
-        public Message build() { return message; }
+        public void conversation(Conversation conversation) {
+            message.conversation = conversation;
+            message.conversationType = conversation.single() ? 1 : 2;
+            message.orderIndex = 501;
+        }
+        public Message build() { message.sender = 100; return message; }
     }
-    public static final class Message { int type; String content; Conversation conversation; }
+    public static final class Message extends NativeAudioMessageSenderTest.Message {
+        int type; String content; Conversation conversation;
+        long sender; int conversationType; long orderIndex;
+    }
     public static final class Conversations {
         public Conversation find(String id) {
             return Arrays.asList("thread", "other", "third", "group").contains(id) ? new Conversation(id) : null;
@@ -289,7 +377,8 @@ public final class NativeAutoReplyIntegrationTest {
             values.put("reply_group_chats", true);
             values.put("reply_save_history", true);
             values.put("auto_message_text", "reply");
-            for (int i = 0; i < limits.length; i += 2) values.put(limits[i], limits[i + 1]);
+            for (int i = 0; i < limits.length; i += 2) values.put(limits[i],
+                    "reply_voice".equals(limits[i]) ? Boolean.parseBoolean(limits[i + 1]) : limits[i + 1]);
             LocalOptions options = new LocalOptions(values);
             dispatcher.setOptions(options);
             List<String> diagnostics = new ArrayList<>();
@@ -354,6 +443,7 @@ public final class NativeAutoReplyIntegrationTest {
         add(rules, "adv_im_text_content", Text.class.getMethod("create", String.class));
         add(rules, "adv_im_send", Sender.class.getMethod("send", Message.class, Map.class));
         add(rules, "adv_im_db_insert", Database.class.getMethod("insert", String.class, String.class, ContentValues.class));
+        NativeAudioMessageSenderTest.addRules(rules);
         return new HostScanReport("fixture", rules, false);
     }
     private static void add(List<RuleScanResult> rules, String id, Method method) {

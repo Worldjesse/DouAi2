@@ -82,7 +82,7 @@ final class AutomationHistoryDialog {
         if (this.miuix) {
             adapter = null;
             composeRows = new MiuixAutomationHistory(styledContext, this::showDetail,
-                    AutomationHistoryDialog::status);
+                    AutomationHistoryDialog::rowTitle);
             history = composeRows.getView();
         } else {
             composeRows = null;
@@ -173,7 +173,8 @@ final class AutomationHistoryDialog {
         TextView text = label("对象：" + entry.targetName + "\n标识：" + entry.targetId + "\n状态："
                 + status(entry.status) + "\n模型：" + entry.modelName + "\n时间："
                 + DateFormat.getDateTimeInstance().format(new Date(entry.createdAt))
-                + (AutomationHistoryStore.COMMENT.equals(entry.kind) ? "\n" + imageRequest(entry) : "")
+                + (AutomationHistoryStore.COMMENT.equals(entry.kind)
+                ? "\n发送方式：" + deliveryMode(entry) + "\n" + imageRequest(entry) : "")
                 + "\n\n原内容\n" + entry.input + "\n\n生成内容\n" + entry.output);
         text.setTextIsSelectable(true);
         text.setPadding(dp(16), dp(12), dp(16), dp(12));
@@ -203,6 +204,19 @@ final class AutomationHistoryDialog {
             case "cancelled": return "已取消";
             case "sending": return "结果未确认";
             default: return "尚未提交";
+        }
+    }
+
+    private static String rowTitle(Entry entry) {
+        return entry.targetName + " · " + status(entry.status)
+                + (AutomationHistoryStore.COMMENT.equals(entry.kind) ? " · " + deliveryMode(entry) : "");
+    }
+
+    private static String deliveryMode(Entry entry) {
+        switch (entry.deliveryMode) {
+            case AutomationHistoryStore.DELIVERY_TEXT: return "文本";
+            case AutomationHistoryStore.DELIVERY_VOICE: return "语音";
+            default: return "未记录";
         }
     }
 
@@ -263,7 +277,7 @@ final class AutomationHistoryDialog {
                 empty.setPadding(dp(16), dp(20), dp(16), dp(20));
                 return empty;
             }
-            String title = entry.targetName + " · " + status(entry.status);
+            String title = rowTitle(entry);
             String date = DateFormat.getDateTimeInstance().format(new Date(entry.createdAt));
             TextView row = recycled instanceof TextView ? (TextView) recycled : label("");
             row.setTag("automation.history." + entry.id);

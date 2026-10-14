@@ -31,6 +31,7 @@ import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.ThirdPartyDownloadSettings;
 import com.douai.module.feature.AutomationScopePolicy;
 import com.douai.module.feature.FeedGestureToolsHook;
 import com.douai.module.feature.FollowListSnapshot;
@@ -73,6 +74,7 @@ public final class ModuleSettingsScreen {
     private View syncMark;
     private ComponentHideSettingsPage componentHidePage;
     private Dialog categoryDialog;
+    private HostDownloadDirectoryPicker downloadDirectoryPicker;
     private final List<Dialog> optionDialogs = new ArrayList<>();
     private final java.util.Map<Dialog, Runnable> optionDismissActions = new java.util.HashMap<>();
     private final List<EnabledControl> feedFilterControls = new ArrayList<>();
@@ -194,8 +196,9 @@ public final class ModuleSettingsScreen {
             TextView title = text(category.title, 16, TEXT, true);
             row.addView(title, new LinearLayout.LayoutParams(0,
                     ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-            TextView count = text(category.itemCount == 0 ? "未适配" : category.itemCount + "项",
+            TextView count = text(category.itemCount < 0 ? "" : category.itemCount == 0 ? "未适配" : category.itemCount + "项",
                     13, MUTED, false);
+            if (category.itemCount < 0) count.setVisibility(View.GONE);
             count.setGravity(Gravity.CENTER);
             count.setPadding(dp(10), dp(4), dp(10), dp(4));
             count.setBackground(makeRounded(Color.rgb(242, 243, 247),
@@ -217,6 +220,10 @@ public final class ModuleSettingsScreen {
 
     private void openCategory(Category category) {
         settings = repository.load();
+        if (category == Category.ABOUT) {
+            showOptionDialog(AboutDialog.create(context, miuixHome != null, this::showOptionDialog));
+            return;
+        }
         if (category == Category.COMPONENT_HIDE) {
             if (miuixHome != null) {
                 if (miuixComponentHidePage == null) {
@@ -242,6 +249,7 @@ public final class ModuleSettingsScreen {
             if (session != null) session.close();
             if (categoryDialog == dialog) {
                 dismissOptionDialogs();
+                closeDownloadDirectoryPicker();
                 categoryDialog = null;
             }
         });
@@ -347,25 +355,7 @@ public final class ModuleSettingsScreen {
                 buildFeedFilters();
                 break;
             case DOWNLOAD:
-                ToggleControl downloadMenu = addSwitch("启用下载菜单", "控制全部扩展下载入口。", settings.downloadEnabled, true, false,
-                        value -> update(s -> copy(s, value, null)));
-                addSwitch("是否启用抖音下载自定义命名", "按模板保存视频、图集和音频。",
-                        repository.getBoolean("download_custom_name", false), true, value -> {
-                            if (value) downloadMenu.setChecked(true);
-                            repository.putBoolean("download_custom_name", value);
-                        });
-                addEditableOption("文件名模板", "#author#、#desc#、#aid#、#date#、#index#、#ext#",
-                        repository.getString("download_name_template", "#author#_#aid#_#index#.#ext#"),
-                        false, true, false, value -> repository.putString("download_name_template", value));
-                addSwitch("去除下载限制", "允许保存当前作品已有的可读取媒体来源。",
-                        repository.getBoolean("remove_download_limits", false), true, value -> {
-                            if (value) downloadMenu.setChecked(true);
-                            repository.putBoolean("remove_download_limits", value);
-                        });
-                addSwitch("无水印下载图集或者视频",
-                        "通过抖音原生长按下载入口保存；仅对已识别的无水印资源生效。",
-                        settings.removeWatermark, true,
-                        value -> update(s -> copy(s, null, value)));
+                buildDownloadControls();
                 break;
             case AUTOPLAY:
                 addSwitch("自动滑动到下一个视频", "播放结束后跟随最近一次手动滑动方向。",
@@ -397,7 +387,7 @@ public final class ModuleSettingsScreen {
                             if (value) showAudioPathEditor("评论语音文件", "comment_voice_path");
                         });
                 addLocalSwitch("评论自动文本转语音(文本前面输入\"#\"符号将自动转换)",
-                        "由系统离线引擎生成，提交时进入原生语音上传。", "comment_tts");
+                        "", "comment_tts");
                 addCommentLongPressOption();
                 addLocalSwitch("彩色评论", "使用抖音原生文字附加参数；显示取决于客户端支持。", "colored_comment");
                 addChoiceOption("彩色评论类型", "colored_comment_type", new String[]{"类型 0", "类型 33"},
@@ -451,12 +441,158 @@ public final class ModuleSettingsScreen {
             case EXTENSION:
                 addOption("AI 模型设置", "", null, true, this::showAiModelSettings);
                 addOption("文本转语音设置", "", null, true, this::showSpeechSettings);
-                addOption("关于", "", "DouAi " + com.douai.module.BuildConfig.VERSION_NAME, true,
-                        () -> showOptionDialog(AboutDialog.create(context, miuixHome != null)));
                 break;
+            case ABOUT:
             case COMPONENT_HIDE:
                 break;
         }
+    }
+
+    private void buildDownloadControls() {
+        ToggleControl master = addSwitch("启用下载菜单", "控制全部扩展下载入口。",
+                settings.downloadEnabled, true, false, value -> update(s -> copy(s, value, null)));
+        LinearLayout selectedControls = new LinearLayout(context);
+        selectedControls.setOrientation(LinearLayout.VERTICAL);
+        Context composeContext = miuixRowContext;
+        Runnable refresh = () -> {
+            LinearLayout previous = content;
+            Context previousRowContext = miuixRowContext;
+            content = selectedControls;
+            miuixRowContext = composeContext;
+            selectedControls.removeAllViews();
+            try {
+                if (ThirdPartyDownloadSettings.THIRD_PARTY.equals(repository.getString(
+                        ThirdPartyDownloadSettings.METHOD, "official"))) {
+                    buildThirdPartyDownloadControls();
+                } else {
+                    buildOfficialDownloadControls(master);
+                }
+            } finally {
+                content = previous;
+                miuixRowContext = previousRowContext;
+            }
+        };
+        addChoiceOption("下载方式", ThirdPartyDownloadSettings.METHOD,
+                new String[]{"官方下载", "第三方下载"},
+                new String[]{"official", ThirdPartyDownloadSettings.THIRD_PARTY}, "official", refresh);
+        OptionRow[] directory = new OptionRow[1];
+        directory[0] = addOption("保存位置", "", HostDownloadDirectoryPicker.displayName(
+                repository.getString(HostDownloadDirectoryPicker.SETTINGS_KEY, "")), true,
+                () -> showDownloadDirectory(directory[0]));
+        content.addView(selectedControls, matchWrap());
+        refresh.run();
+    }
+
+    private void showDownloadDirectory(OptionRow row) {
+        showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle("保存位置")
+                .setItems(new String[]{"选择文件夹", "恢复默认位置"}, (dialog, which) -> {
+                    if (which == 1) {
+                        repository.putString(HostDownloadDirectoryPicker.SETTINGS_KEY, "");
+                        row.setValue("默认位置");
+                        return;
+                    }
+                    closeDownloadDirectoryPicker();
+                    String configured = repository.getString(HostDownloadDirectoryPicker.SETTINGS_KEY, "");
+                    downloadDirectoryPicker = HostDownloadDirectoryPicker.launch(findOwnerActivity(context),
+                            configured.isEmpty() ? null : android.net.Uri.parse(configured), uri -> {
+                                downloadDirectoryPicker = null;
+                                if (uri == null) return;
+                                repository.putString(HostDownloadDirectoryPicker.SETTINGS_KEY, uri.toString());
+                                row.setValue(HostDownloadDirectoryPicker.displayName(uri.toString()));
+                            }, this::toast);
+                    if (downloadDirectoryPicker == null) toast("无法打开系统文件夹选择器");
+                }).setNegativeButton("取消", null).create());
+    }
+
+    private void closeDownloadDirectoryPicker() {
+        if (downloadDirectoryPicker != null) downloadDirectoryPicker.close();
+        downloadDirectoryPicker = null;
+    }
+
+    private void buildOfficialDownloadControls(ToggleControl master) {
+        addSwitch("是否启用抖音下载自定义命名", "按模板保存视频、图集和音频。",
+                repository.getBoolean("download_custom_name", false), true, value -> {
+                    if (value) master.setChecked(true);
+                    repository.putBoolean("download_custom_name", value);
+                });
+        addEditableOption("文件名模板", "#author#、#desc#、#aid#、#date#、#index#、#ext#",
+                repository.getString("download_name_template", "#author#_#aid#_#index#.#ext#"),
+                false, true, false, value -> repository.putString("download_name_template", value));
+        addSwitch("去除下载限制", "允许保存当前作品已有的可读取媒体来源。",
+                repository.getBoolean("remove_download_limits", false), true, value -> {
+                    if (value) master.setChecked(true);
+                    repository.putBoolean("remove_download_limits", value);
+                });
+        addSwitch("无水印下载图集或者视频",
+                "通过抖音原生长按下载入口保存；仅对已识别的无水印资源生效。",
+                settings.removeWatermark, true, value -> update(s -> copy(s, null, value)));
+    }
+
+    private void buildThirdPartyDownloadControls() {
+        ThirdPartyDownloadEditor editor = new ThirdPartyDownloadEditor(
+                rowContext() == null ? context : rowContext(), repository,
+                miuixHome != null, this::showOptionDialog);
+        OptionRow[] request = new OptionRow[1];
+        OptionRow[] parameters = new OptionRow[1];
+        Runnable requestChanged = () -> {
+            request[0].setValue(editor.valuePreview(ThirdPartyDownloadSettings.GET_TEMPLATE,
+                    ThirdPartyDownloadSettings.DEFAULT_GET_TEMPLATE, false));
+            parameters[0].setValue(editor.parametersPreview());
+        };
+        request[0] = addOption("GET 请求", "", editor.valuePreview(ThirdPartyDownloadSettings.GET_TEMPLATE,
+                ThirdPartyDownloadSettings.DEFAULT_GET_TEMPLATE, false), true,
+                () -> editor.editValue("GET 请求", ThirdPartyDownloadSettings.GET_TEMPLATE,
+                        ThirdPartyDownloadSettings.DEFAULT_GET_TEMPLATE, false, requestChanged));
+        parameters[0] = addOption("请求参数", "", editor.parametersPreview(), true,
+                () -> editor.editParameters(requestChanged));
+        LinearLayout signatureControls = new LinearLayout(context);
+        signatureControls.setOrientation(LinearLayout.VERTICAL);
+        Context composeContext = miuixRowContext;
+        Runnable refreshSignature = () -> {
+            LinearLayout previous = content;
+            Context previousRowContext = miuixRowContext;
+            content = signatureControls;
+            miuixRowContext = composeContext;
+            signatureControls.removeAllViews();
+            try {
+                if (ThirdPartyDownloadSettings.SIGNATURE_MD5.equals(editor.signatureMode())) {
+                    addThirdPartyValue(editor, "签名密钥", ThirdPartyDownloadSettings.APP_SECRET, "", true);
+                    addThirdPartyValue(editor, "签名请求头", ThirdPartyDownloadSettings.SIGNATURE_HEADER, "Sign", false);
+                }
+            } finally {
+                content = previous;
+                miuixRowContext = previousRowContext;
+            }
+        };
+        OptionRow[] signature = new OptionRow[1];
+        signature[0] = addOption("签名方式", "", editor.signaturePreview(), true,
+                () -> editor.chooseSignature(() -> {
+                    signature[0].setValue(editor.signaturePreview());
+                    requestChanged.run();
+                    refreshSignature.run();
+                }));
+        content.addView(signatureControls, matchWrap());
+        refreshSignature.run();
+        addThirdPartyValue(editor, "请求头", ThirdPartyDownloadSettings.HEADERS, "{}", false);
+        OptionRow[] sample = new OptionRow[1];
+        sample[0] = addOption("响应样本", "", editor.samplePreview(), true,
+                () -> editor.editSample(() -> sample[0].setValue(editor.samplePreview())));
+        OptionRow[] fields = new OptionRow[1];
+        fields[0] = addOption("下载字段", "", editor.fieldsPreview(false), true,
+                () -> editor.chooseDownloadFields(() -> fields[0].setValue(editor.fieldsPreview(false))));
+        OptionRow[] names = new OptionRow[1];
+        names[0] = addOption("文件命名字段", "", editor.fieldsPreview(true), true,
+                () -> editor.chooseNamingFields(() -> names[0].setValue(editor.fieldsPreview(true))));
+        addOption("测试 GET", "", null, true,
+                () -> editor.testGet(() -> sample[0].setValue(editor.samplePreview())));
+    }
+
+    private void addThirdPartyValue(ThirdPartyDownloadEditor editor, String title,
+                                    String key, String fallback, boolean secret) {
+        OptionRow[] preview = new OptionRow[1];
+        preview[0] = addOption(title, "", editor.valuePreview(key, fallback, secret), true,
+                () -> editor.editValue(title, key, fallback, secret,
+                        () -> preview[0].setValue(editor.valuePreview(key, fallback, secret))));
     }
 
     private void buildFeedFilters() {
@@ -519,6 +655,8 @@ public final class ModuleSettingsScreen {
         addChoiceOption("回复模式", "reply_mode", new String[]{"固定内容", "AI 模型", "关键词规则", "随机内容"},
                 new String[]{"fixed", "ai", "keyword", "random"}, "fixed");
         addOption("回复内容", "", null, true, this::showReplyContentSettings);
+        addSwitch("语音回复", "", repository.getBoolean(LocalOptions.REPLY_VOICE, false), true,
+                value -> repository.putBoolean(LocalOptions.REPLY_VOICE, value));
         OptionRow[] privateRange = new OptionRow[1];
         addSwitch("接收私聊", "", repository.getBoolean("reply_private_chats", true), true,
                 value -> { repository.putBoolean("reply_private_chats", value); privateRange[0].setValue(privateReplyPreview()); });
@@ -783,6 +921,8 @@ public final class ModuleSettingsScreen {
             media[0].setEnabled(ai);
         });
         addOption("评论内容", "", null, true, this::showCommentContentSettings);
+        addSwitch("语音评论", "", repository.getBoolean(LocalOptions.COMMENT_VOICE, false), true,
+                value -> repository.putBoolean(LocalOptions.COMMENT_VOICE, value));
         OptionRow[] scope = new OptionRow[1];
         scope[0] = addOption("作品范围", "", scopeLabel(ContentScopePolicy.scopeMode("comment", automationScopeOptions("comment"))),
                 true, () -> showCommentScopeSettings(scope[0]));
@@ -1376,20 +1516,8 @@ public final class ModuleSettingsScreen {
     }
 
     private void showSpeechSettings() {
-        LinearLayout previous = content;
-        LinearLayout form = form();
-        content = form;
-        addEditableOption("语音引擎", "留空使用系统默认引擎", repository.getString("tts_engine", ""),
-                false, true, false, value -> repository.putString("tts_engine", value));
-        addEditableOption("语音语言", "", repository.getString("tts_language", "zh-CN"),
-                false, true, false, value -> repository.putString("tts_language", value));
-        addEditableOption("语速", "0.5 至 2", repository.getString("tts_rate", "1"),
-                false, true, false, value -> repository.putString("tts_rate", value));
-        addEditableOption("音调", "0.5 至 2", repository.getString("tts_pitch", "1"),
-                false, true, false, value -> repository.putString("tts_pitch", value));
-        content = previous;
-        showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle("文本转语音设置").setView(form)
-                .setNegativeButton("返回", null).create());
+        SpeechSettingsDialog page = new SpeechSettingsDialog(context, repository, miuixHome != null, this::showOptionDialog);
+        showOptionDialog(page.dialog(), page::close);
     }
 
     private void showGestureSettings(String title, String prefix) {
@@ -1707,6 +1835,7 @@ public final class ModuleSettingsScreen {
     }
 
     public void dismissChildPages() {
+        closeDownloadDirectoryPicker();
         dismissOptionDialogs();
         if (miuixComponentHidePage != null) miuixComponentHidePage.dismiss();
         miuixComponentHidePage = null;
@@ -2128,7 +2257,7 @@ public final class ModuleSettingsScreen {
         BASIC("基本功能", 3),
         INTERFACE("界面相关", 13),
         FILTER("视频筛选", 14),
-        DOWNLOAD("下载相关", 5),
+        DOWNLOAD("下载相关", 11),
         AUTOPLAY("自动播放", 6),
         AUTO_REPLY("自动回复", 10),
         AUTO_COMMENT("自动评论", 8),
@@ -2137,7 +2266,8 @@ public final class ModuleSettingsScreen {
         COMPONENT_HIDE("组件隐藏", 24),
         MESSAGE("消息管理", 6),
         SPOOF("本地伪装", 6),
-        EXTENSION("扩展功能", 3);
+        EXTENSION("扩展功能", 2),
+        ABOUT("关于", -1);
 
         final String title;
         final int itemCount;

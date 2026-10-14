@@ -34,6 +34,7 @@ import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
@@ -41,6 +42,7 @@ import io.github.libxposed.api.XposedInterface;
 
 /** User-triggered private audio sending; automatic reply APIs never enter this adapter. */
 public final class DirectMessageSpeechHook implements AutoCloseable {
+    static final long AUDIO_RETENTION_MILLIS = 10 * 60_000L;
     private static final String AUDIO_LOGIC = "com.ss.android.ugc.aweme.im.business.chat.feature.audio.logic.AudioLogic";
     private final List<XposedInterface.HookHandle> handles = new ArrayList<>();
     private final Map<Object, WeakReference<Object>> audioLogics = new WeakHashMap<>();
@@ -159,10 +161,10 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
     }
 
     public synchronized void setOptions(LocalOptions options) {
+        boolean speechChanged = !this.options.samePrefix(options, "tts_");
         this.options = options;
-        if (!options.enabled("dm_tts") && pending != null) {
-            pending.cancelled = true;
-            if (pending.speech != null) pending.speech.close();
+        if ((!options.enabled("dm_tts") || speechChanged) && pending != null) {
+            pending.cancel();
             pending = null;
         }
         String path = options.enabled("dm_voice_replace") ? options.text("dm_voice_path", "").trim() : "";
@@ -226,16 +228,21 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
             Pending request = new Pending(logic, ui, editor, audioLogic, conversation, draft);
             pending = request;
             toast("正在生成私聊语音");
-            request.speech = LocalSpeechSynthesis.synthesize(context, text, current, (result, failure) -> {
+            request.speech = SpeechSynthesis.synthesize(context, text, current, (result, failure) -> {
                 if (result == null) { finish(request, failure == null ? "私聊语音生成失败" : failure); return; }
-                if (closed || request.cancelled) return;
-                try { worker.execute(() -> {
+                if (closed) request.cancel();
+                if (!request.adoptSource(result.file)) return;
+                FutureTask<Void> encoding = new FutureTask<>(() -> {
                     try {
+                        if (request.cancelled || closed) return null;
                         AudioFile encoded = encode(result.file, context);
-                        main.post(() -> submit(request, encoded));
+                        if (request.adoptEncoded(encoded)) main.post(() -> submit(request, encoded));
                     } catch (Exception error) { finish(request, "私聊语音转码失败：" + safeMessage(error)); }
-                    finally { try { java.nio.file.Files.deleteIfExists(result.file.toPath()); } catch (Exception ignored) { } }
-                }); } catch (java.util.concurrent.RejectedExecutionException stopped) {
+                    finally { request.releaseSource(result.file); }
+                    return null;
+                });
+                if (!request.installEncoding(encoding)) return;
+                try { worker.execute(encoding); } catch (java.util.concurrent.RejectedExecutionException stopped) {
                     finish(request, "私聊语音已停止，草稿已保留");
                 }
             });
@@ -259,10 +266,18 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
             Object event = newRecord(audio);
             Object callback = callbackConstructor.newInstance(target, 1);
             QueueEvidence evidence = new QueueEvidence(audio.file, request.conversation);
+            if (!request.beginNative(audio, main)) {
+                finish(request, "私聊语音已停止，草稿已保留");
+                return;
+            }
             submitting.set(evidence);
             try { recordEvent.invoke(callback, recordComplete, event); }
             finally { submitting.remove(); }
-            if (!evidence.queued) { finish(request, "原生语音未进入发送队列，草稿已保留"); return; }
+            if (!evidence.queued) {
+                request.rejectNative();
+                finish(request, "原生语音未进入发送队列，草稿已保留");
+                return;
+            }
             synchronized (this) {
                 submittedDraft = request.draft; submittedConversation = request.conversation;
                 submittedAt = android.os.SystemClock.elapsedRealtime();
@@ -336,6 +351,7 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
     }
 
     private synchronized void finish(Pending request, String message) {
+        request.cleanup();
         if (pending == request) pending = null;
         if (!request.cancelled && !closed) toast(message);
     }
@@ -362,7 +378,7 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
         } catch (Exception failure) { java.nio.file.Files.deleteIfExists(result.toPath()); throw failure; }
     }
 
-    private static AudioFile encode(File source, Context context) throws Exception {
+    static AudioFile encode(File source, Context context) throws Exception {
         if (context == null) throw new IllegalStateException("私聊上下文不可用");
         File result = File.createTempFile("voice-", ".m4a", audioCache(context));
         MediaExtractor extractor = new MediaExtractor();
@@ -521,7 +537,7 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
     @Override public synchronized void close() {
         closed = true;
         generation.incrementAndGet();
-        if (pending != null) { pending.cancelled = true; if (pending.speech != null) pending.speech.close(); pending = null; }
+        if (pending != null) { pending.cancel(); pending = null; }
         worker.shutdownNow();
         for (int index = handles.size() - 1; index >= 0; index--) {
             try { handles.get(index).unhook(); } catch (Throwable failure) { safeLog("Private speech unhook failed: " + failure.getMessage()); }
@@ -531,7 +547,7 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
         synchronized (recordings) { recordings.clear(); }
     }
 
-    private static final class AudioFile {
+    static final class AudioFile {
         final File file;
         final long durationMillis;
         AudioFile(File file, long durationMillis) { this.file = file; this.durationMillis = durationMillis; }
@@ -542,7 +558,7 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
         boolean queued;
         QueueEvidence(File file, String conversation) { this.file = file; this.conversation = conversation; }
     }
-    private static final class Pending {
+    static final class Pending {
         final WeakReference<Object> logic;
         final WeakReference<Object> ui;
         final WeakReference<EditText> editor;
@@ -550,11 +566,74 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
         final String conversation;
         final String draft;
         volatile boolean cancelled;
-        LocalSpeechSynthesis speech;
+        SpeechSynthesis speech;
+        private boolean stopped;
+        private File source;
+        private AudioFile encoded;
+        private File nativeFile;
+        private FutureTask<Void> encoding;
         Pending(Object logic, Object ui, EditText editor, Object audioLogic, String conversation, String draft) {
             this.logic = new WeakReference<>(logic); this.ui = new WeakReference<>(ui);
             this.editor = new WeakReference<>(editor); this.audioLogic = new WeakReference<>(audioLogic);
             this.conversation = conversation; this.draft = draft;
+        }
+
+        synchronized boolean adoptSource(File file) {
+            if (stopped || cancelled) { delete(file); return false; }
+            source = file;
+            return true;
+        }
+
+        synchronized boolean adoptEncoded(AudioFile audio) {
+            if (stopped || cancelled) { delete(audio.file); return false; }
+            encoded = audio;
+            return true;
+        }
+
+        synchronized boolean installEncoding(FutureTask<Void> task) {
+            if (stopped || cancelled) { task.cancel(true); return false; }
+            encoding = task;
+            return true;
+        }
+
+        synchronized void releaseSource(File file) {
+            if (source == file) source = null;
+            delete(file);
+        }
+
+        synchronized boolean beginNative(AudioFile audio, Handler main) {
+            if (stopped || cancelled || encoded != audio) return false;
+            encoded = null;
+            nativeFile = audio.file;
+            // From this point native code may start an asynchronous upload even if invocation throws.
+            main.postDelayed(() -> delete(audio.file), AUDIO_RETENTION_MILLIS);
+            return true;
+        }
+
+        synchronized void rejectNative() {
+            delete(nativeFile);
+            nativeFile = null;
+        }
+
+        void cancel() {
+            synchronized (this) { cancelled = true; }
+            cleanup();
+            SpeechSynthesis active = speech;
+            if (active != null) active.close();
+        }
+
+        synchronized void cleanup() {
+            stopped = true;
+            if (encoding != null) encoding.cancel(true);
+            delete(source);
+            source = null;
+            if (encoded != null) delete(encoded.file);
+            encoded = null;
+        }
+
+        private static void delete(File file) {
+            if (file == null) return;
+            try { java.nio.file.Files.deleteIfExists(file.toPath()); } catch (Exception ignored) { }
         }
     }
     private void toast(String message) {

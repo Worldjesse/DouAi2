@@ -8,7 +8,7 @@ LSPosed 模块仓库：https://github.com/Xposed-Modules-Repo/io.github.yudigaga
 
 正式包名：`io.github.yudigaga.douai`。Java namespace 保持 `com.douai.module`，Xposed 入口使用完整 Java 类名。
 
-当前正式版本 `0.1.53 / 54`；[更新与验证记录](release-0.1.53.md) 包含最终 APK 的验证结果、校验值和签名指纹。每次交付新的 APK 版本时递增 versionName 的补丁号与 versionCode，同一批修复的重复验证不重复递增。
+当前正式版本 `0.1.60 / 61`；[更新与验证记录](release-0.1.60.md) 记录本版 APK 的验证结果、校验值和签名指纹。每次交付新的 APK 版本时递增 versionName 的补丁号与 versionCode，同一批修复的重复验证不重复递增。
 
 ## 环境
 
@@ -57,7 +57,7 @@ CI 在构建未签名 Release 后提供该路径并运行测试。未配置路�
 
 收录申请：https://github.com/Xposed-Modules-Repo/submission/issues/2133
 
-官方模块仓库按官方要求仅上传模块介绍和 APK，源码托管在个人 GitHub 仓库。正式 APK 两处使用同一产物，官方 Release 标签必须为 `versionCode-versionName`。本版 GitHub 标签为 `v0.1.53`，官方模块仓库标签为 `54-0.1.53`。
+官方模块仓库按官方要求仅上传模块介绍、免责协议和 APK，源码托管在个人 GitHub 仓库。正式 APK 两处使用同一产物，官方 Release 标签必须为 `versionCode-versionName`。本版使用 GitHub 标签 `v0.1.60` 和官方模块仓库标签 `61-0.1.60`，包含此前本地 0.1.54 至 0.1.59 的更新。
 
 ## R8 正式配置验证记录
 

@@ -96,9 +96,11 @@ public final class ApkArtifactContractTest {
         for (String value : new String[]{"androidx.activity.result.ActivityResultCallback",
                 "androidx.activity.result.ActivityResultRegistry",
                 "androidx.activity.result.ActivityResultLauncher",
+                "androidx.activity.result.ActivityResult",
                 "androidx.activity.result.contract.ActivityResultContract",
                 "androidx.activity.result.contract.ActivityResultContracts$OpenDocument",
-                "getActivityResultRegistry", "onActivityResult",
+                "androidx.activity.result.contract.ActivityResultContracts$StartActivityForResult",
+                "getActivityResultRegistry", "onActivityResult", "getResultCode", "getData",
                 "register", "launch", "unregister", "com.google.gson.Gson",
                 "const-string", "invoke-static"}) {
             assertTrue("Missing runtime string: " + value, release.strings.contains(value));

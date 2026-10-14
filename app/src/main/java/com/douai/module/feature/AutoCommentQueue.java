@@ -13,11 +13,13 @@ final class AutoCommentQueue<T> implements AutoCloseable {
     interface Processor<T> { void run(T target, int attempt, Consumer<String> result); }
     interface Observer<T> { void finished(T target, String status, int attempts); }
     interface StateObserver<T> { void changed(T current, int count, int attempts, String phase); }
+    interface RetryPolicy<T> { boolean retry(T target, int attempts); }
     private static final int MAX_PENDING = 32;
     private final Scheduler scheduler;
     private final Processor<T> processor;
     private final Observer<T> observer;
     private final StateObserver<T> stateObserver;
+    private final RetryPolicy<T> retryPolicy;
     private final ArrayDeque<Job<T>> jobs = new ArrayDeque<>();
     private final LinkedHashSet<String> seen = new LinkedHashSet<>();
     private long epoch;
@@ -28,10 +30,16 @@ final class AutoCommentQueue<T> implements AutoCloseable {
     }
 
     AutoCommentQueue(Scheduler scheduler, Processor<T> processor, Observer<T> observer, StateObserver<T> stateObserver) {
+        this(scheduler, processor, observer, stateObserver, (target, attempts) -> attempts < 3);
+    }
+
+    AutoCommentQueue(Scheduler scheduler, Processor<T> processor, Observer<T> observer,
+                     StateObserver<T> stateObserver, RetryPolicy<T> retryPolicy) {
         this.scheduler = scheduler;
         this.processor = processor;
         this.observer = observer;
         this.stateObserver = stateObserver;
+        this.retryPolicy = retryPolicy;
     }
 
     void offer(String identity, T target, long delayMillis) {
@@ -59,7 +67,9 @@ final class AutoCommentQueue<T> implements AutoCloseable {
                 processor.run(job.target, attempt, result -> scheduler.post(() -> {
                     if (closed || epoch != expected || jobs.peek() != job || job.attempts != attempt || job.completedAttempt == attempt) return;
                     job.completedAttempt = attempt;
-                    if ("failed".equals(result) && attempt < 3) { schedule(job, attempt * 1000L); return; }
+                    if ("failed".equals(result) && retryPolicy.retry(job.target, attempt)) {
+                        schedule(job, retryDelay(attempt)); return;
+                    }
                     String status = "sent".equals(result) || "submitted".equals(result) || "cancelled".equals(result) ? result : "failed";
                     jobs.remove();
                     observer.finished(job.target, status, attempt);
@@ -75,7 +85,7 @@ final class AutoCommentQueue<T> implements AutoCloseable {
     private void failSynchronously(Job<T> job, long expected, int attempt) {
         if (closed || epoch != expected || jobs.peek() != job || job.completedAttempt == attempt) return;
         job.completedAttempt = attempt;
-        if (attempt < 3) schedule(job, attempt * 1000L);
+        if (retryPolicy.retry(job.target, attempt)) schedule(job, retryDelay(attempt));
         else {
             jobs.remove();
             observer.finished(job.target, "failed", attempt);
@@ -83,6 +93,8 @@ final class AutoCommentQueue<T> implements AutoCloseable {
             else notifyState();
         }
     }
+
+    private static long retryDelay(int attempts) { return ((attempts - 1) % 3 + 1) * 1000L; }
 
     void reset() {
         scheduler.post(() -> {

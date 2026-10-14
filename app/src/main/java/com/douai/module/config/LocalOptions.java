@@ -10,6 +10,19 @@ import java.util.Map;
 public final class LocalOptions {
     /** Prevents the host from handling long-press gestures when no module action is assigned. */
     public static final String INTERCEPT_NATIVE_LONG_PRESS = "intercept_native_long_press";
+    public static final String DOWNLOAD_SAVE_TREE = "download_directory_uri";
+    public static final String REPLY_VOICE = "reply_voice";
+    public static final String COMMENT_VOICE = "comment_voice";
+
+    public String downloadSaveTree() { return text(DOWNLOAD_SAVE_TREE, "").trim(); }
+
+    public boolean samePrefix(LocalOptions other, String prefix) {
+        Map<String, Object> left = new HashMap<>();
+        Map<String, Object> right = new HashMap<>();
+        values.forEach((key, value) -> { if (key.startsWith(prefix)) left.put(key, value); });
+        other.values.forEach((key, value) -> { if (key.startsWith(prefix)) right.put(key, value); });
+        return left.equals(right);
+    }
 
     private final Map<String, ?> values;
 

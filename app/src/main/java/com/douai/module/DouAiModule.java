@@ -505,7 +505,9 @@ public final class DouAiModule extends XposedModule {
                     "minimum_likes_enabled", "minimum_like_count", "filter_interrupt", "hide_mini_games",
                     "hide_long_videos", "maximum_duration_seconds");
             boolean downloadChanged = initial || changes.any("download_enabled", "remove_watermark",
-                    "download_custom_name", "download_name_template", "remove_download_limits");
+                    "download_custom_name", "download_name_template", "remove_download_limits", "download_method",
+                    LocalOptions.DOWNLOAD_SAVE_TREE)
+                    || changes.hasPrefix("third_party_");
             boolean replyChanged = initial || changes.any("automation_enabled", "native_auto_reply", "reply_global",
                     "reply_targets", "reply_mode", "reply_prompt", "reply_delay_seconds", "auto_message_text",
                     "reply_daily_limit", "reply_user_cooldown_minutes",
@@ -515,14 +517,15 @@ public final class DouAiModule extends XposedModule {
                     "reply_group_targets", "reply_group_mode", "reply_group_members", "reply_random",
                     "ai_model_settings_v2", "streak_enabled", "streak_targets", "streak_content",
                     "streak_content_api", "streak_start", "streak_end", "streak_tip", "streak_reset_token",
-                    "streak_retry_unknown_token");
+                    "streak_retry_unknown_token", LocalOptions.REPLY_VOICE) || changes.hasPrefix("tts_");
             boolean commentAutomationChanged = initial || changes.any("automation_enabled", "native_auto_comment",
                     "comment_mode", "comment_prompt", "comment_delay_seconds", "auto_comment_text",
                     "comment_daily_limit", "comment_user_cooldown_minutes",
                     "comment_recognize_images", "comment_recognize_video", "comment_scope_mode",
                     "comment_scope_relations", "comment_scope_fields", "comment_scope_keywords",
                     "comment_scope_users", "comment_filter_mode", "comment_filter_keywords",
-                    "comment_filter_fields", "ai_model_settings_v2");
+                    "comment_filter_fields", "ai_model_settings_v2", LocalOptions.COMMENT_VOICE)
+                    || changes.hasPrefix("tts_");
             boolean feedUiChanged = initial || changes.any("hide_interface", "video_right_alpha",
                     "component_hide_enabled", "component_hide_uniform_enabled", "component_hide_uniform_alpha",
                     "component_hide_on_switch", "component_hide_open_comments_on_show", "component_hide_show_on_pause",
@@ -533,7 +536,8 @@ public final class DouAiModule extends XposedModule {
                     "double_tap_action", LocalOptions.INTERCEPT_NATIVE_LONG_PRESS, "remove_watermark",
                     "download_custom_name", "download_name_template", "remove_download_limits")
                     || changes.hasPrefix("long_press_") || changes.hasPrefix("double_tap_")
-                    || changes.hasPrefix("toolbar_");
+                    || changes.hasPrefix("toolbar_") || changes.any("download_method", LocalOptions.DOWNLOAD_SAVE_TREE)
+                    || changes.hasPrefix("third_party_");
             boolean messageRecallChanged = initial || changes.any("prevent_message_recall", "recall_self",
                     "recall_other", "recall_background");
             boolean spoofChanged = initial || changes.any("spoof_version", "fake_version_name", "fake_version_code",
@@ -574,8 +578,8 @@ public final class DouAiModule extends XposedModule {
             if (commentVoiceHook != null && (initial || changes.any("comment_voice_replace", "comment_voice_path"))) {
                 commentVoiceHook.setOptions(options);
             }
-            if (nativeCommentSpeechHook != null && (initial || changes.any("comment_tts", "tts_engine", "tts_language",
-                    "tts_rate", "tts_pitch"))) nativeCommentSpeechHook.setOptions(options);
+            if (nativeCommentSpeechHook != null && (initial || changes.any("comment_tts")
+                    || changes.hasPrefix("tts_"))) nativeCommentSpeechHook.setOptions(options);
             AutoLikeHook autoLike = autoLikeHook;
             if (autoLike != null && (initial || changes.any("automation_enabled", "auto_like_enabled"))) {
                 autoLike.setSettings(settings);

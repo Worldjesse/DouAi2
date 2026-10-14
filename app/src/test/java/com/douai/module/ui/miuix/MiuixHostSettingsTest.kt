@@ -12,6 +12,9 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onLast
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -21,6 +24,7 @@ import androidx.compose.ui.test.longClick
 import com.douai.module.config.HostSettingsStore
 import com.douai.module.config.AiModelConfig
 import com.douai.module.config.AiModelSettings
+import com.douai.module.config.ThirdPartyDownloadSettings
 import org.json.JSONObject
 import com.douai.module.ui.ModuleSettingsScreen
 import java.io.File
@@ -85,6 +89,54 @@ class MiuixHostSettingsTest {
         compose.onNodeWithText("下载相关").assertIsDisplayed()
         compose.onNodeWithTag("settings.search").performTextReplacement("不存在的分类")
         compose.onNodeWithText("没有匹配的设置分类").assertIsDisplayed()
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun downloadMethodSwitchesMiuixRowsAndThirdPartyInputsPersist() {
+        compose.onNodeWithTag("settings.search").performTextReplacement("下载")
+        compose.onNodeWithText("下载相关").performClick()
+        compose.onNodeWithTag("settings.option.下载方式").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.1").performClick()
+        compose.onNodeWithTag("settings.option.文件名模板").assertDoesNotExist()
+        compose.onNodeWithTag("settings.option.GET 请求").assertIsDisplayed()
+        compose.onNodeWithTag("settings.option.保存位置").assertIsDisplayed()
+        compose.onNodeWithTag("settings.option.请求参数").assertExists()
+        compose.onNodeWithTag("settings.option.签名方式").assertExists()
+        compose.onNodeWithTag("settings.option.签名密钥").assertDoesNotExist()
+        compose.runOnIdle {
+            assertEquals(ThirdPartyDownloadSettings.THIRD_PARTY,
+                store.getString(ThirdPartyDownloadSettings.METHOD, ""))
+        }
+        saveDialogPreview("host-third-party-download")
+        compose.onNodeWithTag("settings.option.GET 请求").performClick()
+        compose.onNodeWithTag("settings.input.GET 请求")
+            .performTextReplacement("https://example.com/parse?url={url}")
+        compose.onNodeWithTag("miuix.dialog.button.-1").performClick()
+        compose.runOnIdle {
+            assertEquals("https://example.com/parse?url={url}",
+                store.getString(ThirdPartyDownloadSettings.GET_TEMPLATE, ""))
+        }
+        compose.onNodeWithTag("settings.option.请求参数").performClick()
+        compose.onNodeWithTag("third_party.parameter.name.0").performTextReplacement("link")
+        compose.onNodeWithContentDescription("添加参数").performClick()
+        compose.onNodeWithTag("third_party.parameter.name.1").performTextReplacement("ID")
+        compose.onNodeWithTag("third_party.parameter.value.1").performTextReplacement("123")
+        saveDialogPreview("host-third-party-parameters")
+        compose.onNodeWithTag("miuix.dialog.button.-1").performClick()
+        compose.runOnIdle {
+            assertEquals("https://example.com/parse?link={url}&ID=123",
+                store.getString(ThirdPartyDownloadSettings.GET_TEMPLATE, ""))
+        }
+        compose.onNodeWithTag("settings.option.签名方式").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.1").performClick()
+        compose.onNodeWithTag("settings.option.签名密钥").assertExists()
+        compose.onNodeWithTag("settings.option.签名请求头").assertExists()
+        compose.onNodeWithTag("settings.option.下载方式").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.0").performClick()
+        compose.onNodeWithTag("settings.option.GET 请求").assertDoesNotExist()
+        compose.onNodeWithTag("settings.option.保存位置").assertExists()
+        compose.onNodeWithTag("settings.option.文件名模板").assertExists()
     }
 
     @Test
@@ -281,6 +333,63 @@ class MiuixHostSettingsTest {
             assertEquals("草稿记忆\n", AiModelSettings.read(store).selected().systemPrompt)
             assertEquals("https://proxy.example.test/v1", AiModelSettings.read(store).selected().apiEndpoint)
         }
+    }
+
+    @Test
+    @Config(sdk = [28], qualifiers = "w296dp-h560dp-mdpi")
+    fun aboutAndSearchableHelpRemainReadableOnNarrowScreens() {
+        verifyAboutHelp()
+    }
+
+    @Test
+    @Config(sdk = [28], qualifiers = "w640dp-h360dp-land-mdpi")
+    fun aboutAndSearchableHelpRemainReadableInLandscape() {
+        verifyAboutHelp()
+    }
+
+    private fun verifyAboutHelp() {
+        val layout = if (compose.activity.resources.configuration.orientation ==
+            android.content.res.Configuration.ORIENTATION_LANDSCAPE) "landscape" else "narrow"
+        compose.onNodeWithTag("settings.search").performTextReplacement("关于")
+        compose.onNodeWithTag("settings.category.13").assertIsDisplayed().performClick()
+        compose.onNodeWithTag("settings.option.帮助").assertIsDisplayed()
+        saveDialogPreview("about-$layout")
+        compose.runOnUiThread {
+            val page = ShadowDialog.getLatestDialog().window!!.decorView
+                .findViewWithTag<android.widget.ScrollView>("about.page")
+            val details = page.findViewWithTag<android.widget.TextView>("about.details")
+            assertTrue(details.text.toString().contains(com.douai.module.ui.AboutDialog.DISCLAIMER_TEXT))
+            page.fullScroll(View.FOCUS_DOWN)
+        }
+        compose.waitForIdle()
+        saveDialogPreview("about-disclaimer-$layout")
+        compose.runOnUiThread {
+            val page = ShadowDialog.getLatestDialog().window!!.decorView
+                .findViewWithTag<android.widget.ScrollView>("about.page")
+            assertTrue("About disclaimer must be reachable by scrolling", page.scrollY > 0)
+            page.fullScroll(View.FOCUS_UP)
+        }
+        compose.waitForIdle()
+        compose.onNodeWithTag("settings.option.帮助").performClick()
+        compose.onNodeWithTag("help.search").performTextReplacement("{voice}")
+        val section = com.douai.module.ui.HelpContent.search("{voice}").first()
+        compose.onNodeWithTag("settings.option.${section.title}").assertIsDisplayed()
+        saveDialogPreview("help-search-$layout")
+        compose.onNodeWithTag("settings.option.${section.title}").performClick()
+        compose.runOnIdle {
+            val body = ShadowDialog.getLatestDialog().window!!.decorView
+                .findViewWithTag<android.widget.TextView>("help.body")
+            for (part in section.parts) {
+                assertTrue(body.text.toString().contains(part.title))
+                assertTrue(body.text.toString().contains(part.text))
+            }
+            assertTrue(body.isTextSelectable)
+        }
+        saveDialogPreview("help-topic-$layout")
+        compose.onAllNodesWithTag("miuix.dialog.button.${Dialog.BUTTON_NEGATIVE}").onLast().performClick()
+        compose.onNodeWithTag("help.search").assertExists()
+        compose.onAllNodesWithTag("miuix.dialog.button.${Dialog.BUTTON_NEGATIVE}").onLast().performClick()
+        compose.onNodeWithTag("settings.option.帮助").assertIsDisplayed()
     }
 
     @Test

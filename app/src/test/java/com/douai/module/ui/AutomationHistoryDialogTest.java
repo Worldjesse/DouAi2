@@ -138,7 +138,7 @@ public final class AutomationHistoryDialogTest {
 
     @Test public void replyDetailsDoNotShowCommentImageRequestMetadata() throws Exception {
         store.upsert(new AutomationHistoryStore.Entry("reply", "reply", "target", "用户", "消息", "回复",
-                "模型", "sent", 1, 1, 0, true));
+                "模型", "sent", 1, 1, 0, true, AutomationHistoryStore.DELIVERY_VOICE));
         page.dialog().show();
         ShadowLooper.idleMainLooper();
         worker.runNextOnThread();
@@ -147,6 +147,36 @@ public final class AutomationHistoryDialogTest {
 
         AlertDialog detail = (AlertDialog) org.robolectric.shadows.ShadowDialog.getLatestDialog();
         assertFalse(containsText(detail.getWindow().getDecorView(), "图片请求："));
+        assertFalse(containsText(detail.getWindow().getDecorView(), "发送方式："));
+        assertFalse(containsText(list().getAdapter().getView(0, null, list()), "语音"));
+    }
+
+    @Test public void commentRowsAndDetailsShowPersistedDeliveryMode() throws Exception {
+        String[] modes = {AutomationHistoryStore.DELIVERY_UNKNOWN, AutomationHistoryStore.DELIVERY_TEXT,
+                AutomationHistoryStore.DELIVERY_VOICE};
+        String[] labels = {"未记录", "文本", "语音"};
+        for (int index = 0; index < modes.length; index++) {
+            store.upsert(new AutomationHistoryStore.Entry("delivery-" + index, "comment", "target", "作者",
+                    "作品内容", "生成评论", "模型", "sent", index + 1, index + 1, modes[index]));
+        }
+        page.dialog().dismiss();
+        page = new AutomationHistoryDialog(activity, AutomationHistoryStore.COMMENT, false, worker);
+        page.dialog().show();
+        ShadowLooper.idleMainLooper();
+        worker.runNextOnThread();
+        ShadowLooper.idleMainLooper();
+
+        ListView list = list();
+        assertEquals(labels.length, list.getAdapter().getCount());
+        for (int position = 0; position < labels.length; position++) {
+            int index = labels.length - 1 - position;
+            View row = list.getAdapter().getView(position, null, list);
+            assertTrue(containsText(row, "作者 · 发送成功 · " + labels[index]));
+            row.performClick();
+            AlertDialog detail = (AlertDialog) org.robolectric.shadows.ShadowDialog.getLatestDialog();
+            assertTrue(containsText(detail.getWindow().getDecorView(), "发送方式：" + labels[index]));
+            detail.dismiss();
+        }
     }
 
     private ListView list() {

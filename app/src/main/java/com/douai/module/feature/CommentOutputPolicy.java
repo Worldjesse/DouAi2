@@ -33,6 +33,10 @@ final class CommentOutputPolicy {
     }
 
     static String parse(String output) {
+        return parse(output, false);
+    }
+
+    static String parse(String output, boolean voice) {
         if (output == null || output.length() > 8000) throw invalid();
         try (JsonReader reader = new JsonReader(new StringReader(output))) {
             reader.setLenient(false);
@@ -44,7 +48,7 @@ final class CommentOutputPolicy {
             reader.endObject();
             if (reader.peek() != JsonToken.END_DOCUMENT) throw invalid();
             if (comment.isEmpty()) return "";
-            if (comment.trim().isEmpty() || comment.length() > 1000
+            if (comment.trim().isEmpty() || !voice && comment.length() > 1000
                     || NON_COMMENT.matcher(comment).find()) throw invalid();
             return comment;
         } catch (IOException | IllegalStateException failure) {

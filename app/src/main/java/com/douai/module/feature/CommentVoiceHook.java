@@ -60,7 +60,7 @@ public final class CommentVoiceHook implements AutoCloseable {
                 if (hook.closed || !hook.options.enabled("comment_voice_replace") || ready == null
                         || !ready.file.isFile()) return chain.proceed();
                 Object[] args = chain.getArgs().toArray();
-                if (args[1] instanceof String && ((String) args[1]).contains("/douai-tts/")) return chain.proceed();
+                if (isSynthesizedAudio(args[1])) return chain.proceed();
                 args[1] = ready.file.getAbsolutePath();
                 hook.safeLog("Using configured local audio in the native comment uploader");
                 return chain.proceed(args);
@@ -136,6 +136,13 @@ public final class CommentVoiceHook implements AutoCloseable {
 
     static Long durationFor(String id) {
         synchronized (DURATIONS) { return DURATIONS.get(id); }
+    }
+
+    private static boolean isSynthesizedAudio(Object path) {
+        if (!(path instanceof String)) return false;
+        File parent = new File((String) path).getParentFile();
+        return parent != null && ("douai-tts".equals(parent.getName())
+                || "douai-private-voice".equals(parent.getName()));
     }
 
     private static Prepared prepare(Context context, String source, long epoch) throws Exception {

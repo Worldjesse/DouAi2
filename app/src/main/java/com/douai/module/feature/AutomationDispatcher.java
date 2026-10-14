@@ -369,7 +369,8 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
     private static Entry withStatus(Entry entry, String status) {
         return new Entry(entry.id, entry.kind, entry.targetId, entry.targetName,
                 entry.input, entry.output, entry.modelName, status,
-                entry.createdAt, System.currentTimeMillis(), entry.requestImageCount, entry.modelRequestSent);
+                entry.createdAt, System.currentTimeMillis(), entry.requestImageCount, entry.modelRequestSent,
+                entry.deliveryMode);
     }
 
     private void record(Entry entry) {
