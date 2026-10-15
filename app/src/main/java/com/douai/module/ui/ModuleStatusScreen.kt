@@ -1,6 +1,7 @@
 package com.douai.module.ui
 
 import android.content.ActivityNotFoundException
+import android.graphics.drawable.ColorDrawable
 import android.view.View
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -18,16 +19,19 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
 import com.douai.module.BuildConfig
 import com.douai.module.R
 import top.yukonga.miuix.kmp.basic.BasicComponent
@@ -52,6 +56,7 @@ class ModuleStatusScreen(private val activity: ComponentActivity) {
         setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
         setContent {
             DouAiTheme {
+                SyncWindowTheme()
                 StatusContent()
             }
         }
@@ -65,6 +70,24 @@ class ModuleStatusScreen(private val activity: ComponentActivity) {
         frameworkConnected = connected
         frameworkMessage = message.orEmpty()
         frameworkError = error
+    }
+
+    @Suppress("DEPRECATION")
+    @Composable
+    private fun SyncWindowTheme() {
+        val dark = isSystemInDarkTheme()
+        val surface = MiuixTheme.colorScheme.surface.toArgb()
+        SideEffect {
+            // This screen only belongs to the module activity; never theme a host window.
+            val window = activity.window
+            window.setBackgroundDrawable(ColorDrawable(surface))
+            window.statusBarColor = surface
+            window.navigationBarColor = surface
+            WindowCompat.getInsetsController(window, window.decorView).apply {
+                isAppearanceLightStatusBars = !dark
+                isAppearanceLightNavigationBars = !dark
+            }
+        }
     }
 
     @Composable

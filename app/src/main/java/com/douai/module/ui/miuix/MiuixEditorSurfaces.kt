@@ -47,7 +47,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.testTag
@@ -183,7 +182,7 @@ class MiuixChatEditorSurface(activity: Activity, private val model: View, close:
                                     fontWeight = FontWeight.SemiBold,
                                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
                                 SelectionContainer {
-                                    Text(message.text, color = Color(message.color), modifier = Modifier.padding(top = 4.dp)
+                                    Text(message.text, color = hostThemeColor(message.color), modifier = Modifier.padding(top = 4.dp)
                                         .testTag(if (message.user) "ai.chat.user" else "ai.chat.answer"))
                                 }
                                 message.images.forEach { image -> Image(image.asImageBitmap(), contentDescription = "图片",

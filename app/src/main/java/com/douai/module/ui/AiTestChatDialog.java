@@ -180,10 +180,11 @@ final class AiTestChatDialog extends Dialog {
         this(context, config, sessions, worker, historyWorker, useMiuix, ChatImageLoader::thumbnail);
     }
 
-    AiTestChatDialog(Context context, AiModelConfig config, SessionFactory sessions,
+    AiTestChatDialog(Context baseContext, AiModelConfig config, SessionFactory sessions,
                      ExecutorService worker, ExecutorService historyWorker, boolean useMiuix,
                      ThumbnailLoader thumbnailLoader) {
-        super(context, android.R.style.Theme_Material_Light_Dialog_NoActionBar);
+        super(ModuleTheme.themedContext(baseContext), ModuleTheme.dialogTheme(baseContext));
+        Context context = getContext();
         config.validate(true);
         this.sessions = sessions;
         this.worker = worker;
@@ -303,6 +304,7 @@ final class AiTestChatDialog extends Dialog {
             @Override public void afterTextChanged(Editable s) { }
         });
         restoreConversation();
+        ModuleTheme.bind(root);
         Activity activity = ownerActivity();
         if (useMiuix && activity != null && !activity.isFinishing() && !activity.isDestroyed()) {
             setOwnerActivity(activity);

@@ -53,7 +53,8 @@ final class DownloadTasksDialog implements AutoCloseable {
 
     DownloadTasksDialog(Context context, boolean miuix) { this(context, miuix, LIVE); }
 
-    DownloadTasksDialog(Context context, boolean miuix, Tasks tasks) {
+    DownloadTasksDialog(Context baseContext, boolean miuix, Tasks tasks) {
+        Context context = ModuleTheme.themedContext(baseContext);
         this.context = context;
         this.miuix = miuix;
         this.tasks = tasks;

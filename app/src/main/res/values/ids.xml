@@ -1,0 +1,5 @@
+<resources>
+    <item name="module_theme_binding" type="id" />
+    <item name="module_theme_colors" type="id" />
+    <item name="module_theme_preserve" type="id" />
+</resources>

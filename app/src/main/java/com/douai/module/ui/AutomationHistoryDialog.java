@@ -60,7 +60,8 @@ final class AutomationHistoryDialog {
         this(context, kind, miuix, IO);
     }
 
-    AutomationHistoryDialog(Context context, String kind, boolean miuix, ExecutorService io) {
+    AutomationHistoryDialog(Context baseContext, String kind, boolean miuix, ExecutorService io) {
+        Context context = ModuleTheme.themedContext(baseContext);
         this.context = context;
         this.kind = kind;
         if (io == null) throw new IllegalArgumentException("History executor is required");

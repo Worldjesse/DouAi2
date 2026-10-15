@@ -36,8 +36,9 @@ final class PromptEditorDialog extends Dialog {
         this(context, title, value, onSave, false);
     }
 
-    PromptEditorDialog(Context context, String title, String value, Consumer<String> onSave, boolean useMiuix) {
-        super(context);
+    PromptEditorDialog(Context baseContext, String title, String value, Consumer<String> onSave, boolean useMiuix) {
+        super(ModuleTheme.themedContext(baseContext), ModuleTheme.dialogTheme(baseContext));
+        Context context = getContext();
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         setTitle(title);
         LinearLayout root = new LinearLayout(context);
@@ -89,10 +90,13 @@ final class PromptEditorDialog extends Dialog {
             setOwnerActivity(activity);
             miuixSurface = new MiuixPromptEditorSurface(activity, title, input, save, cancel, this::dismiss);
             setContentView(miuixSurface.getView());
-        } else setContentView(root);
+        } else {
+            ModuleTheme.bind(root);
+            setContentView(root);
+        }
         Window window = getWindow();
         if (window != null) {
-            window.setBackgroundDrawable(new ColorDrawable(miuixSurface == null ? Color.WHITE : Color.TRANSPARENT));
+            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
             window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
             WindowManager.LayoutParams attributes = window.getAttributes();
             attributes.dimAmount = 0.42f;

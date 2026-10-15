@@ -1,7 +1,6 @@
 package com.douai.module.ui;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.Context;
 import android.content.ContextWrapper;
@@ -27,6 +26,7 @@ import com.douai.module.config.ComponentHideSettings;
 import com.douai.module.config.ComponentHideSettings.Component;
 import com.douai.module.config.CustomViewLocator;
 import com.douai.module.config.SettingsStore;
+import com.douai.module.ui.miuix.MiuixDialogBuilder;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -46,7 +46,7 @@ public final class ComponentHideSettingsPage {
     private Switch uniformToggle;
 
     public ComponentHideSettingsPage(Context context, SettingsStore store) {
-        this.context = context;
+        this.context = ModuleTheme.themedContext(context);
         this.store = store;
     }
 
@@ -54,7 +54,7 @@ public final class ComponentHideSettingsPage {
         if (isShowing()) return;
         Activity activity = ownerActivity(context);
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
-        Dialog next = new Dialog(context, android.R.style.Theme_Material_Light_Dialog_NoActionBar);
+        Dialog next = new Dialog(context, ModuleTheme.dialogTheme(context));
         next.setOwnerActivity(activity);
         next.setCanceledOnTouchOutside(true);
         next.setOnDismissListener(ignored -> {
@@ -130,6 +130,7 @@ public final class ComponentHideSettingsPage {
                     component.key, settings.individualAlpha(component));
         }
         addCustomViewsSection(settings.customViews);
+        ModuleTheme.bind(panel);
         return panel;
     }
 
@@ -182,7 +183,7 @@ public final class ComponentHideSettingsPage {
     }
 
     private void confirmDelete(CustomViewLocator locator) {
-        new AlertDialog.Builder(context).setTitle("删除自定义视图")
+        new MiuixDialogBuilder(context, false).setTitle("删除自定义视图")
                 .setMessage("删除后会恢复该视图。")
                 .setNegativeButton("取消", null)
                 .setPositiveButton("删除", (dialog, which) -> {

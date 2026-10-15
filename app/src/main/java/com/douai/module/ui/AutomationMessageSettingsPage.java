@@ -61,7 +61,7 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
                                   Context rootRowContext, Context dialogRowContext, LinearLayout root,
                                   String kind, BiConsumer<Dialog, Runnable> presenter,
                                   Runnable showModels, Runnable changed) {
-        this.context = context;
+        this.context = ModuleTheme.themedContext(context);
         this.repository = new AutomationMessageSettings(store, changed);
         this.useMiuix = useMiuix;
         this.rootRowContext = rootRowContext;

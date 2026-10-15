@@ -82,7 +82,7 @@ public final class ModuleSettingsScreen {
     }
 
     public ModuleSettingsScreen(Context context, SettingsStore repository, Runnable onClose) {
-        this.context = context;
+        this.context = ModuleTheme.themedContext(context);
         this.repository = repository;
         this.onClose = onClose;
         this.settings = repository.load();
@@ -116,10 +116,12 @@ public final class ModuleSettingsScreen {
         } else {
             addFrameworkSyncStatus();
             addIndependentSettingsNotice();
+            ModuleTheme.bind(scroll);
             return scroll;
         }
         addCategorySearch();
         addCategoryList();
+        ModuleTheme.bind(scroll);
         return scroll;
     }
 
@@ -238,7 +240,7 @@ public final class ModuleSettingsScreen {
             return;
         }
         if (categoryDialog != null && categoryDialog.isShowing()) return;
-        Dialog dialog = new Dialog(context, android.R.style.Theme_Material_Light_Dialog_NoActionBar);
+        Dialog dialog = new Dialog(context, ModuleTheme.dialogTheme(context));
         Activity owner = findOwnerActivity(context);
         if (owner == null || owner.isFinishing() || owner.isDestroyed()) return;
         dialog.setOwnerActivity(owner);
@@ -293,6 +295,7 @@ public final class ModuleSettingsScreen {
                     ViewGroup.LayoutParams.MATCH_PARENT, dp(58)));
             panel.addView(scroll, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+            ModuleTheme.bind(panel);
             dialog.setContentView(panel);
         }
         categoryDialog = dialog;
@@ -697,6 +700,7 @@ public final class ModuleSettingsScreen {
             for (String color : new String[]{"#2051BA55", "#2066A3FF", "#20F6C344", "#20F06A7D", "#00000000"}) {
                 View swatch = new View(context);
                 swatch.setBackground(makeCircle(Color.parseColor(color)));
+                ModuleTheme.preserveColors(swatch);
                 swatch.setContentDescription(color);
                 swatch.setTooltipText(color);
                 LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(40), 1);
@@ -1268,6 +1272,7 @@ public final class ModuleSettingsScreen {
         }, row::setEnabled, color -> {
             if (colorSwatch[0] == null) {
                 colorSwatch[0] = new View(context);
+                ModuleTheme.preserveColors(colorSwatch[0]);
                 labels.addView(colorSwatch[0], new LinearLayout.LayoutParams(dp(24), dp(24)));
             }
             colorSwatch[0].setBackground(makeCircle(color));

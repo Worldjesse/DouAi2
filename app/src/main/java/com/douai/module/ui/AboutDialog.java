@@ -38,7 +38,8 @@ public final class AboutDialog {
             dialog.show();
         });
     }
-    static AlertDialog create(Context context, boolean miuix, BiConsumer<Dialog, Runnable> presenter) {
+    static AlertDialog create(Context baseContext, boolean miuix, BiConsumer<Dialog, Runnable> presenter) {
+        Context context = ModuleTheme.themedContext(baseContext);
         TextView content = new TextView(context);
         content.setTag("about.details");
         content.setText("DouAi " + BuildConfig.VERSION_NAME + "\n作者：yudigaga"

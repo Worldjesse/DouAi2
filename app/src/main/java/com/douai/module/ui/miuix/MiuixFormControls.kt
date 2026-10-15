@@ -28,7 +28,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.platform.testTag
@@ -220,7 +219,7 @@ private class FormInput(context: Context, label: String, initial: String, secret
                 modifier = Modifier.fillMaxWidth().testTag(state.tag),
             )
             state.error?.let {
-                Text(it, color = Color(0xFFB3261E), fontSize = 12.sp,
+                Text(it, color = hostThemeColor(0xFFB3261E.toInt()), fontSize = 12.sp,
                     modifier = Modifier.padding(start = 12.dp, top = 4.dp).testTag("${state.tag}.error"))
             }
         }
@@ -463,6 +462,7 @@ private fun formView(
     state: ControlState,
     content: @Composable () -> Unit,
 ): ComposeView = ComposeView(context.formComposeContext()).apply {
+    (this.context as? HostComposeContext)?.bindConfiguration(this)
     id = View.generateViewId()
     tag = "miuix.form.surface.$id"
     visibility = proxy.visibility
@@ -488,7 +488,13 @@ private fun hideProxy(view: View) {
 }
 
 private fun Context.formComposeContext(): Context {
-    if (this is HostComposeContext || packageName == BuildConfig.APPLICATION_ID) return this
+    var wrapped: Context = this
+    while (true) {
+        if (wrapped is HostComposeContext) return wrapped
+        if (wrapped !is ContextWrapper || wrapped.baseContext === wrapped) break
+        wrapped = wrapped.baseContext
+    }
+    if (packageName == BuildConfig.APPLICATION_ID) return this
     val activity = formActivity() ?: error("Miuix form controls require an Activity context")
     return HostComposeContext.create(activity)
 }

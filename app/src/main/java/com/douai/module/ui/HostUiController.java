@@ -211,7 +211,7 @@ public final class HostUiController implements Application.ActivityLifecycleCall
         if (closed || !isSettingsPage(activity) || resumedActivity.get() != activity
                 || activity.isFinishing() || activity.isDestroyed()) return;
         if (settingsDialog != null && settingsDialog.isShowing()) return;
-        Dialog dialog = new Dialog(activity, android.R.style.Theme_Material_Light_Dialog_NoActionBar);
+        Dialog dialog = new Dialog(activity, ModuleTheme.dialogTheme(activity));
         dialog.setOwnerActivity(activity);
         dialog.setCanceledOnTouchOutside(true);
         ModuleSettingsScreen screen = new ModuleSettingsScreen(activity, settingsStore, dialog::dismiss);
@@ -298,12 +298,12 @@ public final class HostUiController implements Application.ActivityLifecycleCall
     }
 
     private void createScanDialog(Activity activity) {
-        Dialog dialog = new Dialog(activity, android.R.style.Theme_Material_Light_Dialog_Alert);
+        Dialog dialog = new Dialog(activity, ModuleTheme.alertTheme(activity));
         dialog.setOwnerActivity(activity);
         dialog.setCancelable(false);
         dialog.setCanceledOnTouchOutside(false);
 
-        LinearLayout panel = new LinearLayout(activity);
+        LinearLayout panel = new LinearLayout(ModuleTheme.themedContext(activity));
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(activity, 24), dp(activity, 22), dp(activity, 24), dp(activity, 18));
         panel.setBackground(rounded(Color.WHITE, Color.rgb(232, 237, 237), dp(activity, 16)));
@@ -312,7 +312,7 @@ public final class HostUiController implements Application.ActivityLifecycleCall
         scanDetail = text(activity, "检查抖音版本和扫描缓存", 15, MUTED, false);
         scanDetail.setMinHeight(dp(activity, 48));
         scanDetail.setGravity(Gravity.CENTER_VERTICAL);
-        scanProgress = new ProgressBar(activity, null,
+        scanProgress = new ProgressBar(ModuleTheme.themedContext(activity), null,
                 android.R.attr.progressBarStyleHorizontal);
         scanCount = text(activity, "准备中", 13, MUTED, false);
         scanCount.setGravity(Gravity.END);
@@ -361,6 +361,7 @@ public final class HostUiController implements Application.ActivityLifecycleCall
         actionParams.topMargin = dp(activity, 8);
         panel.addView(scanAction, actionParams);
 
+        ModuleTheme.bind(panel);
         dialog.setContentView(panel);
         Window window = dialog.getWindow();
         if (window != null) {
@@ -462,7 +463,7 @@ public final class HostUiController implements Application.ActivityLifecycleCall
     }
 
     private TextView text(Context context, String value, float size, int color, boolean bold) {
-        TextView view = new TextView(context);
+        TextView view = new TextView(ModuleTheme.themedContext(context));
         view.setText(value);
         view.setTextSize(size);
         view.setTextColor(color);

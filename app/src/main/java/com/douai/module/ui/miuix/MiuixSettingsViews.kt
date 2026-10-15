@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -35,6 +36,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.disabled
@@ -46,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.douai.module.ui.ScanStatus
+import com.douai.module.ui.ModuleTheme
 import java.util.function.Consumer
 import java.util.function.IntConsumer
 import top.yukonga.miuix.kmp.basic.BasicComponent
@@ -58,7 +62,9 @@ import top.yukonga.miuix.kmp.icon.basic.ArrowRight
 import top.yukonga.miuix.kmp.icon.basic.Close
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.theme.LocalContentColor
 import top.yukonga.miuix.kmp.theme.lightColorScheme
+import top.yukonga.miuix.kmp.theme.darkColorScheme
 
 /** Java-facing view adapters. Configuration and option behavior stay in ModuleSettingsScreen. */
 object MiuixSettingsViews {
@@ -69,6 +75,7 @@ object MiuixSettingsViews {
         content: View,
         close: Runnable,
     ): View {
+        ModuleTheme.bind(content)
         val view = ComposeView(environment.context())
         environment.attach(view)
         view.setContent {
@@ -310,6 +317,18 @@ object MiuixSettingsViews {
 
 @Composable
 internal fun HostSettingsTheme(content: @Composable () -> Unit) {
-    // Native rich editors share these dialogs, so the whole host settings surface stays light.
-    MiuixTheme(colors = lightColorScheme(), content = content)
+    // Read configuration so existing module compositions also update on system night changes.
+    LocalConfiguration.current
+    val colors = if (ModuleTheme.isDark(LocalContext.current)) darkColorScheme() else lightColorScheme()
+    MiuixTheme(colors = colors) {
+        // Miuix Text/Icon inherit this separately from the color scheme. Supply it for headers
+        // and editor content rendered outside Miuix Surface/Scaffold containers.
+        CompositionLocalProvider(LocalContentColor provides colors.onBackground, content = content)
+    }
+}
+
+@Composable
+internal fun hostThemeColor(lightColor: Int): Color {
+    LocalConfiguration.current
+    return Color(ModuleTheme.color(LocalContext.current, lightColor))
 }

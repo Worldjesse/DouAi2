@@ -33,7 +33,8 @@ final class HelpDialog {
     private HelpContent.Section current;
     private int indexScroll;
 
-    HelpDialog(Context context, boolean miuix) {
+    HelpDialog(Context baseContext, boolean miuix) {
+        Context context = ModuleTheme.themedContext(baseContext);
         this.context = context;
         this.miuix = miuix;
         content = column();

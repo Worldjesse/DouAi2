@@ -30,6 +30,7 @@ public final class HostDialogBounds {
         window.setGravity(Gravity.CENTER);
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         View decor = window.getDecorView();
+        ModuleTheme.bind(decor);
         decor.setOnApplyWindowInsetsListener((view, insets) -> {
             apply(owner, window, wrapHeight, insets, onHeight);
             return insets;

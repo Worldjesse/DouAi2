@@ -3,6 +3,8 @@ package com.douai.module.ui.miuix
 import android.app.Activity
 import android.app.Application
 import android.app.Dialog
+import android.content.ComponentCallbacks
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
@@ -30,7 +32,7 @@ class HostComposeEnvironment(
     private val activity: Activity,
     onBack: Runnable,
 ) : AutoCloseable, LifecycleOwner, SavedStateRegistryOwner, ViewModelStoreOwner,
-    OnBackPressedDispatcherOwner, Application.ActivityLifecycleCallbacks {
+    OnBackPressedDispatcherOwner, Application.ActivityLifecycleCallbacks, ComponentCallbacks {
 
     init {
         checkMainThread()
@@ -87,6 +89,7 @@ class HostComposeEnvironment(
         view.setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
         view.addOnAttachStateChangeListener(attachmentListener)
         activity.application.registerActivityLifecycleCallbacks(this)
+        activity.application.registerComponentCallbacks(this)
         if (view.isAttachedToWindow) attachmentListener.onViewAttachedToWindow(view)
     }
 
@@ -115,6 +118,7 @@ class HostComposeEnvironment(
         closed = true
         attached = false
         activity.application.unregisterActivityLifecycleCallbacks(this)
+        activity.application.unregisterComponentCallbacks(this)
         val view = ownedView
         ownedView = null
         view?.removeOnAttachStateChangeListener(attachmentListener)
@@ -137,7 +141,20 @@ class HostComposeEnvironment(
     }
 
     override fun onActivityStarted(activity: Activity) = moveHostState(activity, Lifecycle.State.STARTED)
-    override fun onActivityResumed(activity: Activity) = moveHostState(activity, Lifecycle.State.RESUMED)
+    override fun onActivityResumed(activity: Activity) {
+        if (!closed && activity === this.activity) onConfigurationChanged(activity.resources.configuration)
+        moveHostState(activity, Lifecycle.State.RESUMED)
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        if (closed) return
+        viewContext.refreshConfiguration(activity.resources.configuration)
+        // Keep the existing composition, selection, and unsaved inputs alive. Another view may
+        // already have refreshed this shared context, but this owner must still receive delivery.
+        ownedView?.dispatchConfigurationChanged(Configuration(viewContext.resources.configuration))
+    }
+
+    override fun onLowMemory() = Unit
     override fun onActivityPaused(activity: Activity) = moveHostState(activity, Lifecycle.State.STARTED)
     override fun onActivityStopped(activity: Activity) = moveHostState(activity, Lifecycle.State.CREATED)
     override fun onActivityDestroyed(activity: Activity) {

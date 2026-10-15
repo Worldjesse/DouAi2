@@ -2,13 +2,19 @@
 
 抖音增强模块，面向抖音 `com.ss.android.ugc.aweme` 40.6.0，使用 libxposed API 102。
 
-作者：**yudigaga**。当前版本：**0.1.63** / versionCode **64**。
+作者：**yudigaga**。当前正式版：**0.1.64** / versionCode **65**。
 
 - [源码仓库](https://github.com/yudigaga/DouAi)
 - [正式版下载](https://github.com/yudigaga/DouAi/releases)
 - [LSPosed 模块仓库](https://github.com/Xposed-Modules-Repo/io.github.yudigaga.douai)
 
 正式包名：`io.github.yudigaga.douai`。
+
+## 0.1.64 更新
+
+模块界面自动跟随系统深浅色：覆盖独立状态页、抖音内设置、原生与 Miuix 弹窗、编辑器和配置备份。宿主固定浅色时，模块仍读取系统模式；切换配色保留已有编辑内容和自定义颜色预览。真机验证按用户要求跳过。
+
+[完整更新与验证](docs/release-0.1.64.md)。
 
 ## 0.1.63 更新
 

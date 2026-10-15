@@ -53,7 +53,7 @@ final class ThirdPartyDownloadEditor {
 
     ThirdPartyDownloadEditor(Context context, SettingsStore repository, boolean useMiuix,
                              BiConsumer<Dialog, Runnable> presenter) {
-        this.context = context;
+        this.context = ModuleTheme.themedContext(context);
         this.repository = repository;
         this.useMiuix = useMiuix;
         this.presenter = presenter;

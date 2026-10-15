@@ -36,7 +36,8 @@ final class AutomationSettingsDialog implements AutoCloseable {
         this(context, repository, useMiuix, () -> { });
     }
 
-    AutomationSettingsDialog(Context context, SettingsStore repository, boolean useMiuix, Runnable onChanged) {
+    AutomationSettingsDialog(Context baseContext, SettingsStore repository, boolean useMiuix, Runnable onChanged) {
+        Context context = ModuleTheme.themedContext(baseContext);
         this.context = context;
         this.repository = repository;
         this.useMiuix = useMiuix;

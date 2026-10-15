@@ -25,6 +25,7 @@ import android.widget.EditText
 import android.text.InputType
 import android.view.Gravity
 import com.douai.module.ui.HostDialogBounds
+import com.douai.module.ui.ModuleTheme
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -68,14 +69,15 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  * Native form containers host Miuix controls. getButton/getListView expose compatibility proxies
  * for the existing Java validation and selection callbacks.
  */
-class MiuixDialogBuilder(context: Context, private val enabled: Boolean) : AlertDialog.Builder(context) {
+class MiuixDialogBuilder(context: Context, private val enabled: Boolean) :
+    AlertDialog.Builder(context, ModuleTheme.alertTheme(context)) {
     private val sourceContext = context
     private val spec = DialogSpec(context)
 
     companion object {
         @JvmStatic fun prompt(context: Context, enabled: Boolean, title: String, initial: String,
                               save: java.util.function.Consumer<String>): AlertDialog {
-            val input = EditText(context).apply {
+            val input = EditText(ModuleTheme.themedContext(context)).apply {
                 tag = "settings.input.$title"
                 contentDescription = title
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
@@ -97,7 +99,13 @@ class MiuixDialogBuilder(context: Context, private val enabled: Boolean) : Alert
     override fun create(): AlertDialog {
         val activity = sourceContext.findActivity()
         if (!enabled || activity == null || activity.isFinishing || activity.isDestroyed) {
-            return super.create()
+            return super.create().also { dialog ->
+                dialog.window!!.setBackgroundDrawable(GradientDrawable().apply {
+                    setColor(Color.WHITE)
+                    cornerRadius = 20f * sourceContext.resources.displayMetrics.density
+                })
+                ModuleTheme.bind(dialog.window!!.decorView)
+            }
         }
         return MiuixAlertDialog(activity, spec.copyForDialog())
     }
@@ -120,6 +128,7 @@ class MiuixDialogBuilder(context: Context, private val enabled: Boolean) : Alert
 
     override fun setCustomTitle(customTitleView: View?): AlertDialog.Builder {
         super.setCustomTitle(customTitleView)
+        customTitleView?.let(ModuleTheme::bind)
         spec.customTitle = customTitleView
         return this
     }
@@ -199,6 +208,7 @@ class MiuixDialogBuilder(context: Context, private val enabled: Boolean) : Alert
             }
         }
         visit(root)
+        ModuleTheme.bind(root)
     }
 
     override fun setPositiveButton(textId: Int, listener: DialogInterface.OnClickListener?): AlertDialog.Builder =
@@ -419,7 +429,7 @@ private data class ChoiceSpec(
 private class MiuixAlertDialog(
     private val activity: Activity,
     private val spec: DialogSnapshot,
-) : AlertDialog(activity) {
+) : AlertDialog(activity, ModuleTheme.alertTheme(activity)) {
     private var maxContentHeight by mutableStateOf(run {
         val metrics = activity.resources.displayMetrics
         val available = activity.window.decorView.height.takeIf { it > 0 } ?: metrics.heightPixels
@@ -492,16 +502,19 @@ private class MiuixAlertDialog(
 
     override fun setView(view: View?) {
         super.setView(view)
+        view?.let(ModuleTheme::bind)
         customViewState = view
     }
 
     override fun setView(view: View?, viewSpacingLeft: Int, viewSpacingTop: Int, viewSpacingRight: Int, viewSpacingBottom: Int) {
         super.setView(view, viewSpacingLeft, viewSpacingTop, viewSpacingRight, viewSpacingBottom)
+        view?.let(ModuleTheme::bind)
         customViewState = view
     }
 
     override fun setCustomTitle(customTitleView: View?) {
         super.setCustomTitle(customTitleView)
+        customTitleView?.let(ModuleTheme::bind)
         customTitleState = customTitleView
         titleState = null
     }
@@ -524,6 +537,7 @@ private class MiuixAlertDialog(
             true
         }
         configureWindow()
+        ModuleTheme.bind(window!!.decorView)
     }
 
     override fun onStop() {

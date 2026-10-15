@@ -53,9 +53,10 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
     private final android.graphics.drawable.Drawable.ConstantState placeholder;
     private volatile boolean closed;
 
-    public MemberListView(Context context, boolean miuix, List<ProfileListEntry> entries, Set<String> selected,
+    public MemberListView(Context baseContext, boolean miuix, List<ProfileListEntry> entries, Set<String> selected,
                           boolean selectable) {
-        super(context);
+        super(ModuleTheme.themedContext(baseContext));
+        Context context = getContext();
         android.graphics.drawable.Drawable icon;
         try {
             android.content.res.Resources resources = context.getResources();

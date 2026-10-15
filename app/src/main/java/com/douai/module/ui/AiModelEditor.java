@@ -58,7 +58,7 @@ final class AiModelEditor implements AutoCloseable {
 
     AiModelEditor(Context context, SettingsStore repository, AiModelConfig original,
                   boolean useMiuix, Runnable onChanged, ExecutorService requests) {
-        this.context = context;
+        this.context = ModuleTheme.themedContext(context);
         this.repository = repository;
         this.useMiuix = useMiuix;
         this.onChanged = onChanged;

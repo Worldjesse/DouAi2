@@ -26,11 +26,47 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class HostComposeEnvironmentTest {
+    @Test
+    fun activeModuleResourcesFollowSystemNightModeWithoutChangingHostOverrides() {
+        RuntimeEnvironment.setQualifiers("+notnight")
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val activity = controller.get()
+        val session = HostComposeEnvironment(activity, Runnable {})
+        val view = ComposeView(session.context()).also(session::attach)
+        activity.setContentView(view)
+        val loader = session.context().classLoader
+        val theme = activity.theme
+
+        RuntimeEnvironment.setQualifiers("+night")
+        val hostOverride = Configuration(activity.resources.configuration).apply {
+            uiMode = (uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or Configuration.UI_MODE_NIGHT_NO
+        }
+        @Suppress("DEPRECATION")
+        activity.resources.updateConfiguration(hostOverride, activity.resources.displayMetrics)
+        session.onConfigurationChanged(hostOverride)
+
+        assertEquals(Configuration.UI_MODE_NIGHT_YES,
+            session.context().resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK)
+        assertEquals(Configuration.UI_MODE_NIGHT_NO,
+            activity.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK)
+        assertSame(theme, activity.theme)
+        assertSame(loader, session.context().classLoader)
+        assertSame(session, view.findViewTreeLifecycleOwner())
+
+        activity.setContentView(View(activity))
+        RuntimeEnvironment.setQualifiers("+notnight")
+        session.onConfigurationChanged(activity.resources.configuration)
+        assertEquals(Configuration.UI_MODE_NIGHT_YES,
+            session.context().resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK)
+        controller.pause().stop().destroy()
+    }
+
     @Test
     fun moduleResourcesKeepHostActivityServicesAndStorageIdentity() {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()

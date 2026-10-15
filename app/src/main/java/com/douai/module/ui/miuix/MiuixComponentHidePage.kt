@@ -50,6 +50,7 @@ import com.douai.module.config.ComponentHideSettings.Component
 import com.douai.module.config.CustomViewLocator
 import com.douai.module.config.SettingsStore
 import com.douai.module.ui.HostDialogBounds
+import com.douai.module.ui.ModuleTheme
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
@@ -64,7 +65,6 @@ import top.yukonga.miuix.kmp.icon.basic.Close
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.theme.lightColorScheme
 import kotlin.math.roundToInt
 
 /** A separate window keeps the parent settings page and its scroll position intact. */
@@ -83,7 +83,7 @@ class MiuixComponentHidePage(
         val nextSession = HostComposeEnvironment(activity, Runnable(::requestBack))
         val view = ComposeView(nextSession.context())
         nextSession.attach(view)
-        val next = Dialog(nextSession.context(), android.R.style.Theme_Material_Light_Dialog_NoActionBar)
+        val next = Dialog(nextSession.context(), ModuleTheme.dialogTheme(nextSession.context()))
         val editor = ComponentHideEditor(store)
         next.setOwnerActivity(activity)
         next.setCanceledOnTouchOutside(true)
@@ -96,7 +96,7 @@ class MiuixComponentHidePage(
             }
         }
         view.setContent {
-            MiuixTheme(colors = lightColorScheme()) { Content(editor) }
+            HostSettingsTheme { Content(editor) }
         }
         next.setContentView(view)
         next.window?.apply {

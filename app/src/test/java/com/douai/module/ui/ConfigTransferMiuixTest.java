@@ -2,9 +2,11 @@ package com.douai.module.ui;
 
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.Color;
 import android.view.View;
 import android.widget.CheckBox;
 import android.widget.ScrollView;
+import android.widget.TextView;
 import androidx.activity.ComponentActivity;
 import androidx.compose.ui.test.ActionsKt;
 import androidx.compose.ui.test.AssertionsKt;
@@ -41,8 +43,12 @@ public final class ConfigTransferMiuixTest {
     @Test public void narrowBackupPageCanScrollToItsExportActionAndClose() { verify(); }
     @Test @Config(sdk = 28, qualifiers = "w640dp-h360dp-land-mdpi")
     public void landscapeBackupPageCanScrollToItsExportActionAndClose() { verify(); }
+    @Test @Config(sdk = 28, qualifiers = "w296dp-h560dp-night-mdpi")
+    public void darkNarrowBackupPageCanScrollToItsExportActionAndClose() { verify(true); }
 
-    private void verify() {
+    private void verify() { verify(false); }
+
+    private void verify(boolean night) {
         compose.runOnUiThread(() -> {
             page = new ConfigTransferDialog(compose.getActivity(), new ConfigTransferDialogTest.MemoryStore(), true,
                     () -> { }, new ConfigTransferDialog.Files() {
@@ -55,6 +61,10 @@ public final class ConfigTransferMiuixTest {
         compose.waitForIdle();
         compose.runOnUiThread(() -> {
             View decor = page.dialog().getWindow().getDecorView();
+            assertEquals(night, ModuleTheme.isDark(decor.getContext()));
+            TextView note = decor.findViewWithTag("config.backup.note");
+            assertEquals("Backup text must remain legible in the system theme", night,
+                    Color.luminance(note.getCurrentTextColor()) > 0.35f);
             CheckBox checkbox = decor.findViewWithTag("config.backup.secrets");
             assertFalse(checkbox.isChecked());
             ScrollView scroll = decor.findViewWithTag("config.backup.scroll");
@@ -78,7 +88,8 @@ public final class ConfigTransferMiuixTest {
                     File folder = new File(location);
                     assertTrue(folder.isDirectory() || folder.mkdirs());
                     try (FileOutputStream out = new FileOutputStream(new File(folder,
-                            "config-backup-" + decor.getWidth() + "x" + decor.getHeight() + ".png"))) {
+                            "config-backup-" + (night ? "night-" : "light-")
+                                    + decor.getWidth() + "x" + decor.getHeight() + ".png"))) {
                         assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out));
                     } catch (Exception failure) { throw new AssertionError(failure); }
                 } finally { bitmap.recycle(); }

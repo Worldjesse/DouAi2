@@ -80,8 +80,9 @@ final class ConfigTransferDialog implements AutoCloseable {
         }, HostConfigFilePicker::launch, WORKER);
     }
 
-    ConfigTransferDialog(Context context, SettingsStore store, boolean miuix, Runnable changed,
+    ConfigTransferDialog(Context baseContext, SettingsStore store, boolean miuix, Runnable changed,
                          Files files, Picker picker, Executor worker) {
+        Context context = ModuleTheme.themedContext(baseContext);
         this.store = store; this.changed = changed; this.files = files; this.picker = picker; this.worker = worker;
         this.activity = activity(context);
         LinearLayout body = new LinearLayout(context);

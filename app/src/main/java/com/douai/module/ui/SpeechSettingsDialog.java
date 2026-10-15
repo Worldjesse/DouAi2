@@ -73,7 +73,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
 
     SpeechSettingsDialog(Context context, SettingsStore store, boolean miuix,
                          BiConsumer<Dialog, Runnable> presenter) {
-        this.context = context;
+        this.context = ModuleTheme.themedContext(context);
         this.store = store;
         this.miuix = miuix;
         this.presenter = presenter;
