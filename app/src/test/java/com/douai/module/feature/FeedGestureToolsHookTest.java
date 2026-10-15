@@ -48,6 +48,14 @@ import static org.junit.Assert.assertTrue;
 @Config(sdk = 34)
 @LooperMode(LooperMode.Mode.PAUSED)
 public final class FeedGestureToolsHookTest {
+    @org.junit.After public void cancelDownloadsStartedByTheTest() {
+        for (DownloadTasks.Snapshot task : DownloadTasks.snapshots()) if (task.cancellable) DownloadTasks.cancel(task.id);
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3);
+        while (DownloadTasks.snapshots().stream().anyMatch(task -> "running".equals(task.status)
+                || "queued".equals(task.status) || "cancelling".equals(task.status)) && System.nanoTime() < deadline) {
+            java.util.concurrent.locks.LockSupport.parkNanos(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(5));
+        }
+    }
     public static final class Aweme {
         final String aid;
         public String share_url;

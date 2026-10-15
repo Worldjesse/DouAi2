@@ -10,6 +10,7 @@ import android.speech.tts.UtteranceProgressListener;
 import android.speech.tts.Voice;
 
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.SpeechSettings;
 
 import java.io.File;
 import java.util.Locale;
@@ -98,8 +99,9 @@ public final class LocalSpeechSynthesis implements AutoCloseable {
             return;
         }
         current.setVoice(selected);
-        current.setSpeechRate(Math.max(0.5f, Math.min(2f, options.decimal("tts_rate", 1f))));
-        current.setPitch(Math.max(0.5f, Math.min(2f, options.decimal("tts_pitch", 1f))));
+        SpeechSettings settings = new SpeechSettings(options);
+        current.setSpeechRate(settings.rate);
+        current.setPitch(settings.pitch);
         String id = UUID.randomUUID().toString();
         current.setOnUtteranceProgressListener(new UtteranceProgressListener() {
             @Override public void onStart(String utteranceId) { }

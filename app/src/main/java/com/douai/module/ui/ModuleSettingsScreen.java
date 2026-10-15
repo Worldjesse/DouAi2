@@ -27,20 +27,13 @@ import android.widget.TextView;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.AiProviderPresets;
-import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.ThirdPartyDownloadSettings;
-import com.douai.module.feature.AutomationScopePolicy;
 import com.douai.module.feature.FeedGestureToolsHook;
-import com.douai.module.feature.FollowListSnapshot;
 import com.douai.module.feature.TopTabFilterHook;
-import com.douai.module.feature.NativeFollowLists;
 import com.douai.module.feature.ProfileListEntry;
-import com.douai.module.feature.GroupReplyPolicy;
-import com.douai.module.feature.ReplyScopePolicy;
-import com.douai.module.feature.ContentScopePolicy;
 import com.douai.module.feature.NativeMessagingHooks;
 import com.douai.module.ui.miuix.HostComposeEnvironment;
 import com.douai.module.ui.miuix.MiuixComponentHidePage;
@@ -75,6 +68,7 @@ public final class ModuleSettingsScreen {
     private ComponentHideSettingsPage componentHidePage;
     private Dialog categoryDialog;
     private HostDownloadDirectoryPicker downloadDirectoryPicker;
+    private AutomationMessageSettingsPage automationMessagePage;
     private final List<Dialog> optionDialogs = new ArrayList<>();
     private final java.util.Map<Dialog, Runnable> optionDismissActions = new java.util.HashMap<>();
     private final List<EnabledControl> feedFilterControls = new ArrayList<>();
@@ -220,6 +214,12 @@ public final class ModuleSettingsScreen {
 
     private void openCategory(Category category) {
         settings = repository.load();
+        if (category == Category.BACKUP) {
+            ConfigTransferDialog page = new ConfigTransferDialog(context, repository, miuixHome != null,
+                    () -> settings = repository.load());
+            showOptionDialog(page.dialog(), page::close);
+            return;
+        }
         if (category == Category.ABOUT) {
             showOptionDialog(AboutDialog.create(context, miuixHome != null, this::showOptionDialog));
             return;
@@ -246,6 +246,7 @@ public final class ModuleSettingsScreen {
         HostComposeEnvironment session = miuixHome == null ? null
                 : new HostComposeEnvironment(owner, dialog::dismiss);
         dialog.setOnDismissListener(ignored -> {
+            if (categoryDialog == dialog) closeAutomationMessagePage();
             if (session != null) session.close();
             if (categoryDialog == dialog) {
                 dismissOptionDialogs();
@@ -257,20 +258,27 @@ public final class ModuleSettingsScreen {
         scroll.setFillViewport(true);
         scroll.setClipToPadding(false);
         scroll.setBackgroundColor(Color.TRANSPARENT);
-        LinearLayout oldContent = content;
-        content = new LinearLayout(context);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(12), dp(4), dp(12), dp(12));
-        content.setBackgroundColor(Color.TRANSPARENT);
+        LinearLayout categoryContent = new LinearLayout(context);
+        categoryContent.setOrientation(LinearLayout.VERTICAL);
+        categoryContent.setPadding(dp(12), dp(4), dp(12), dp(12));
+        categoryContent.setBackgroundColor(Color.TRANSPARENT);
         feedFilterControls.clear();
         miuixRowContext = session == null ? null : session.context();
         try {
-            buildCategoryControls(category);
+            if (category == Category.AUTO_REPLY || category == Category.AUTO_COMMENT) {
+                closeAutomationMessagePage();
+                automationMessagePage = new AutomationMessageSettingsPage(context, repository, miuixHome != null,
+                        rowContext(), miuixHome == null ? null : miuixHome.getView().getContext(), categoryContent,
+                        category == Category.AUTO_REPLY ? "reply" : "comment", this::showOptionDialog,
+                        this::showAiModelSettings, () -> settings = repository.load());
+            } else {
+                LinearLayout oldContent = content;
+                content = categoryContent;
+                try { buildCategoryControls(category); } finally { content = oldContent; }
+            }
         } finally {
             miuixRowContext = null;
         }
-        LinearLayout categoryContent = content;
-        content = oldContent;
         scroll.addView(categoryContent, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         if (session != null) {
@@ -297,6 +305,7 @@ public final class ModuleSettingsScreen {
             }
             HostDialogBounds.install(owner, dialog, false);
         } catch (RuntimeException failure) {
+            closeAutomationMessagePage();
             if (session != null) session.close();
             categoryDialog = null;
         }
@@ -370,12 +379,6 @@ public final class ModuleSettingsScreen {
                         repository.getBoolean("smart_swipe", true), true,
                         value -> repository.putBoolean("smart_swipe", value));
                 addOption("互动自动化", "", null, true, this::showAutomationSettings);
-                break;
-            case AUTO_REPLY:
-                buildAutoReplyControls();
-                break;
-            case AUTO_COMMENT:
-                buildAutoCommentControls();
                 break;
             case COMMENT:
                 addLocalSwitch("评论自动添加后缀", "在本人提交的文字评论末尾添加。", "comment_append_suffix");
@@ -479,6 +482,10 @@ public final class ModuleSettingsScreen {
         directory[0] = addOption("保存位置", "", HostDownloadDirectoryPicker.displayName(
                 repository.getString(HostDownloadDirectoryPicker.SETTINGS_KEY, "")), true,
                 () -> showDownloadDirectory(directory[0]));
+        addOption("下载任务", "查看进度或取消下载", null, true, () -> {
+            DownloadTasksDialog tasks = new DownloadTasksDialog(context, miuixHome != null);
+            showOptionDialog(tasks.dialog(), tasks::close);
+        });
         content.addView(selectedControls, matchWrap());
         refresh.run();
     }
@@ -643,250 +650,6 @@ public final class ModuleSettingsScreen {
         setFeedFilterControlsEnabled(settings.feedFilterEnabled);
     }
 
-    private void buildAutoReplyControls() {
-        ToggleControl[] master = new ToggleControl[1];
-        master[0] = addSwitch("开启自动回复", repository.getBoolean("native_auto_reply", false) && !settings.automationEnabled
-                        ? "已暂停：自动化总开关关闭" : "",
-                repository.getBoolean("native_auto_reply", false), true, false, value -> {
-                    repository.putBoolean("native_auto_reply", value);
-                    if (value) update(s -> withAutomation(s, true, null, null, null, false));
-                    master[0].setSummary(value && !settings.automationEnabled ? "已暂停：自动化总开关关闭" : "");
-                });
-        addChoiceOption("回复模式", "reply_mode", new String[]{"固定内容", "AI 模型", "关键词规则", "随机内容"},
-                new String[]{"fixed", "ai", "keyword", "random"}, "fixed");
-        addOption("回复内容", "", null, true, this::showReplyContentSettings);
-        addSwitch("语音回复", "", repository.getBoolean(LocalOptions.REPLY_VOICE, false), true,
-                value -> repository.putBoolean(LocalOptions.REPLY_VOICE, value));
-        OptionRow[] privateRange = new OptionRow[1];
-        addSwitch("接收私聊", "", repository.getBoolean("reply_private_chats", true), true,
-                value -> { repository.putBoolean("reply_private_chats", value); privateRange[0].setValue(privateReplyPreview()); });
-        privateRange[0] = addOption("私聊范围", "", privateReplyPreview(), true, () -> showPrivateReplySettings(privateRange[0]));
-        OptionRow[] groupRange = new OptionRow[1];
-        addSwitch("接收群聊", "", repository.getBoolean("reply_group_chats", false), true,
-                value -> { repository.putBoolean("reply_group_chats", value); groupRange[0].setValue(groupReplyPreview()); });
-        groupRange[0] = addOption("群聊范围", "", groupReplyPreview(), true, () -> showGroupReplySettings(groupRange[0]));
-        addAutomationLimitOption("每日最大回复数", "0 不限制；按本地自然日重置", "reply_daily_limit", 1000000);
-        addAutomationLimitOption("同一用户回复间隔（分钟）", "0 不限制；按同一 UID 计算", "reply_user_cooldown_minutes", 525600);
-        addOption("发送与记录", "", null, true, this::showReplyDeliverySettings);
-    }
-
-    private void addAutomationLimitOption(String title, String summary, String key, int maximum) {
-        addEditableOption(title, summary, repository.getString(key, "0"), true, true, false, value -> {
-            if (!value.matches("[0-9]+")) throw new IllegalArgumentException("请输入 0 至 " + maximum + " 的整数");
-            int limit;
-            try { limit = Integer.parseInt(value); }
-            catch (NumberFormatException invalid) { throw new IllegalArgumentException("请输入 0 至 " + maximum + " 的整数"); }
-            if (limit > maximum) throw new IllegalArgumentException("请输入 0 至 " + maximum + " 的整数");
-            repository.putString(key, Integer.toString(limit));
-        });
-    }
-
-    private static String scopeLabel(String mode) {
-        return "whitelist".equals(mode) ? "白名单" : "blacklist".equals(mode) ? "黑名单" : "全部";
-    }
-
-    private String privateReplyPreview() {
-        return repository.getBoolean("reply_private_chats", true)
-                ? scopeLabel(ReplyScopePolicy.scopeMode(replyScopeOptions())) : "未启用";
-    }
-
-    private String groupReplyPreview() {
-        return repository.getBoolean("reply_group_chats", false)
-                ? scopeLabel(repository.getString("reply_group_scope_mode", "all")) : "未启用";
-    }
-
-    private void rebuildAutomationPanel(LinearLayout panel, Runnable build) {
-        panel.removeAllViews();
-        LinearLayout previous = content;
-        content = panel;
-        try { build.run(); } finally { content = previous; }
-    }
-
-    private void showAutomationPanel(String title, LinearLayout panel, Runnable build) {
-        rebuildAutomationPanel(panel, build);
-        showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle(title)
-                .setView(scrolling(panel)).setNegativeButton("返回", null).create());
-    }
-
-    private void showReplyContentSettings() {
-        String mode = repository.getString("reply_mode", "fixed");
-        if ("keyword".equals(mode) || "random".equals(mode)) { showReplyPool("keyword".equals(mode)); return; }
-        LinearLayout panel = form();
-        showAutomationPanel("回复内容", panel, () -> {
-            if ("ai".equals(mode)) {
-                String selected = "未启用模型";
-                try { selected = AiModelSettings.read(repository).selected().name; } catch (RuntimeException ignored) { }
-                addOption("模型配置", "", selected, true, this::showAiModelSettings);
-                addPromptOption("二级提示词", repository.getString("reply_prompt", "自然简洁地回复对方，只输出回复正文。"),
-                        value -> repository.putString("reply_prompt", value));
-            } else {
-                addEditableOption("固定回复内容", "", repository.getString("auto_message_text", ""), false, true, false,
-                        value -> repository.putString("auto_message_text", value));
-            }
-        });
-    }
-
-    private LocalOptions replyScopeOptions() {
-        return automationScopeOptions("reply");
-    }
-
-    private LocalOptions automationScopeOptions(String prefix) {
-        java.util.Map<String, Object> values = new java.util.HashMap<>();
-        for (String suffix : new String[]{"_scope_mode", "_scope_relations", "_scope_keywords", "_scope_fields", "_filter_mode"}) {
-            String key = prefix + suffix;
-            values.put(key, repository.getString(key, ""));
-        }
-        String targets = "reply".equals(prefix) ? "reply_targets" : prefix + "_scope_users";
-        values.put(targets, repository.getString(targets, ""));
-        values.put("reply_global", repository.getBoolean("reply_global", false));
-        values.put(prefix + "_filter_keywords", repository.getString(prefix + "_filter_keywords", repository.getString(prefix + "_scope_keywords", "")));
-        String selectedFields = repository.getString(prefix + "_filter_fields", null);
-        if (selectedFields != null) values.put(prefix + "_filter_fields", selectedFields);
-        return new LocalOptions(values);
-    }
-
-    private void prepareContentFilter(String prefix) {
-        LocalOptions legacy = automationScopeOptions(prefix);
-        if (repository.getString(prefix + "_filter_mode", "").isEmpty()) {
-            repository.putString(prefix + "_filter_fields", ContentScopePolicy.fields(prefix, legacy));
-            repository.putString(prefix + "_filter_keywords", ContentScopePolicy.keywords(prefix, legacy));
-            repository.putString(prefix + "_filter_mode", ContentScopePolicy.filterMode(prefix, legacy));
-            repository.putString(prefix + "_scope_mode", ContentScopePolicy.scopeMode(prefix, legacy));
-        }
-    }
-
-    private void showPrivateReplySettings(OptionRow preview) {
-        prepareContentFilter("reply");
-        LinearLayout panel = form();
-        Runnable[] build = new Runnable[1];
-        build[0] = () -> {
-            String scope = ReplyScopePolicy.scopeMode(replyScopeOptions());
-            addChoiceOption("用户范围", "reply_scope_mode", new String[]{"全部", "白名单", "黑名单"},
-                    new String[]{"all", "whitelist", "blacklist"}, scope, () -> {
-                        preview.setValue(privateReplyPreview());
-                        rebuildAutomationPanel(panel, build[0]);
-                    });
-            if (!"all".equals(scope)) {
-                addMultiChoiceCsvOption("关注关系", "reply_scope_relations", new String[]{"我关注的", "关注我的", "陌生人"},
-                        new String[]{AutomationScopePolicy.FOLLOWING, AutomationScopePolicy.FOLLOWERS, AutomationScopePolicy.STRANGERS});
-                addOption("指定用户", "", repository.getString("reply_targets", ""), true,
-                        () -> showTargetSelection("指定用户", "reply_targets"));
-            }
-            addFollowListsOption();
-            String filter = ReplyScopePolicy.filterMode(replyScopeOptions());
-            addChoiceOption("消息筛选", "reply_filter_mode", new String[]{"不限", "包含关键词", "排除关键词"},
-                    new String[]{"off", "include", "exclude"}, filter, () -> rebuildAutomationPanel(panel, build[0]));
-            if (!ReplyScopePolicy.OFF.equals(filter)) {
-                addEditableOption("筛选关键词", "", ReplyScopePolicy.keywords(replyScopeOptions()), false, true, false,
-                        value -> repository.putString("reply_filter_keywords", value));
-                addMultiChoiceCsvOption("匹配对象", "reply_filter_fields", new String[]{"发送者", "消息内容"},
-                        new String[]{AutomationScopePolicy.AUTHOR, AutomationScopePolicy.CAPTION});
-            }
-        };
-        showAutomationPanel("私聊范围", panel, build[0]);
-    }
-
-    private void showGroupReplySettings(OptionRow preview) {
-        LinearLayout panel = form();
-        Runnable[] build = new Runnable[1];
-        build[0] = () -> {
-            String scope = repository.getString("reply_group_scope_mode", "all");
-            addChoiceOption("群聊作用域", "reply_group_scope_mode",
-                    new String[]{"全部", "白名单", "黑名单"}, new String[]{"all", "whitelist", "blacklist"}, "all", () -> {
-                        preview.setValue(groupReplyPreview());
-                        rebuildAutomationPanel(panel, build[0]);
-                    });
-            if (!"all".equals(scope)) {
-                OptionRow[] groups = new OptionRow[1];
-                groups[0] = addOption("选择群聊", "", selectedGroupPreview(), true, () -> showGroupSelection(groups[0]));
-            }
-            addChoiceOption("触发条件", "reply_group_mode", new String[]{"全员", "指定成员", "仅 @我"},
-                    new String[]{"all", "selected", "mentions"}, "all", () -> rebuildAutomationPanel(panel, build[0]));
-            if ("selected".equals(repository.getString("reply_group_mode", "all"))) {
-                addOption("指定成员", "", repository.getString("reply_group_members", ""), true, this::showGroupMemberSelection);
-            }
-        };
-        showAutomationPanel("群聊范围", panel, build[0]);
-    }
-
-    private void showReplyDeliverySettings() {
-        showDeliverySettings(AutomationHistoryStore.REPLY);
-    }
-
-    private void showDeliverySettings(String kind) {
-        boolean reply = AutomationHistoryStore.REPLY.equals(kind);
-        LinearLayout panel = form();
-        Runnable[] build = new Runnable[1];
-        build[0] = () -> {
-            addEditableOption(reply ? "延迟回复" : "延迟评论", "", repository.getString(kind + "_delay_seconds", reply ? "2" : "3"), true, true, false, value -> {
-                int seconds = Integer.parseInt(value.trim());
-                if (seconds < 2 || seconds > 3600) throw new IllegalArgumentException("延迟应为 2 至 3600 秒");
-                repository.putString(kind + "_delay_seconds", value);
-            });
-            addSwitch("悬浮提示", "", repository.getBoolean(kind + "_tip", false), true, value -> {
-                repository.putBoolean(kind + "_tip", value);
-                rebuildAutomationPanel(panel, build[0]);
-            });
-            if (repository.getBoolean(kind + "_tip", false)) {
-                addEditableOption("提示超时（秒）", "", repository.getString(kind + "_notice_seconds", "8"), true, true, false, value -> {
-                    int seconds = Integer.parseInt(value.trim());
-                    if (seconds < 2 || seconds > 120) throw new IllegalArgumentException("提示超时应为 2 至 120 秒");
-                    repository.putString(kind + "_notice_seconds", value);
-                });
-            }
-            addLocalSwitch("保存历史记录", "", kind + "_save_history");
-            addOption(reply ? "回复历史记录" : "评论历史记录", "", null, true, () -> {
-                AutomationHistoryDialog history = new AutomationHistoryDialog(context, kind, miuixHome != null);
-                showOptionDialog(history.dialog(), history::closeDetails);
-            });
-        };
-        showAutomationPanel("发送与记录", panel, build[0]);
-    }
-
-    private String selectedGroupPreview() {
-        int selected = GroupReplyPolicy.entries(repository.getString("reply_group_targets", "")).size();
-        return selected == 0 ? "未选择" : "已选择 " + selected + " 个群聊";
-    }
-
-    private void showGroupSelection(OptionRow preview) {
-        java.util.Map<String, String> groups = NativeMessagingHooks.availableGroups();
-        java.util.Set<String> selected = GroupReplyPolicy.entries(repository.getString("reply_group_targets", ""));
-        if (groups.isEmpty() && selected.isEmpty()) {
-            showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle("选择群聊")
-                    .setMessage("暂无可用群会话。")
-                    .setNegativeButton("返回", null).create());
-            return;
-        }
-        showProfileSelection("选择群聊", NativeMessagingHooks.availableGroupProfiles(), selected, next -> {
-                    repository.putString("reply_group_targets", String.join(",", next));
-                    preview.setValue(selectedGroupPreview());
-                }, null);
-    }
-
-    private void showGroupMemberSelection() {
-        java.util.Map<String, ProfileListEntry> members = NativeMessagingHooks.availableGroupMembers();
-        java.util.Set<String> selected = new java.util.LinkedHashSet<>(GroupReplyPolicy.entries(
-                repository.getString("reply_group_members", "")));
-        java.util.Set<String> configured = new java.util.LinkedHashSet<>(selected);
-        for (ProfileListEntry entry : members.values()) {
-            if (entry.name.isEmpty()) continue;
-            for (String name : configured) if (name.equalsIgnoreCase(entry.name)) {
-                selected.remove(name);
-                selected.add(entry.uid);
-            }
-        }
-        showProfileSelection("选择群成员", members, selected, next ->
-                repository.putString("reply_group_members", String.join(",", next)), this::showGroupMemberIds);
-    }
-
-    private void showGroupMemberIds() {
-        LinearLayout form = form();
-        EditText input = formInput(form, "成员 UID 或昵称", repository.getString("reply_group_members", ""), false);
-        showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle("指定成员").setView(form)
-                .setNegativeButton("取消", null).setPositiveButton("保存", (dialog, which) ->
-                        repository.putString("reply_group_members", String.join(",", GroupReplyPolicy.entries(input.getText().toString())))).create());
-    }
-
     private void showProfileSelection(String title, java.util.Map<String, ProfileListEntry> available,
                                       java.util.Set<String> selected, java.util.function.Consumer<java.util.Set<String>> saved,
                                       Runnable manual) {
@@ -903,198 +666,6 @@ public final class ModuleSettingsScreen {
         if (manual != null) builder.setNeutralButton("填写 UID", (dialog, which) ->
                 new android.os.Handler(android.os.Looper.getMainLooper()).post(manual));
         showOptionDialog(builder.create(), list::close);
-    }
-
-    private void buildAutoCommentControls() {
-        ToggleControl[] master = new ToggleControl[1];
-        master[0] = addSwitch("开启自动评论", repository.getBoolean("native_auto_comment", false) && !settings.automationEnabled
-                        ? "已暂停：自动化总开关关闭" : "",
-                repository.getBoolean("native_auto_comment", false), true, false, value -> {
-                    repository.putBoolean("native_auto_comment", value);
-                    update(s -> withAutomation(s, value ? true : null, null, null, value, null));
-                    master[0].setSummary(value && !settings.automationEnabled ? "已暂停：自动化总开关关闭" : "");
-                });
-        OptionRow[] media = new OptionRow[1];
-        addChoiceOption("评论模式", "comment_mode", new String[]{"AI 模型", "固定内容"}, new String[]{"ai", "fixed"}, "ai", () -> {
-            boolean ai = "ai".equals(repository.getString("comment_mode", "ai"));
-            media[0].setValue(commentMediaPreview());
-            media[0].setEnabled(ai);
-        });
-        addOption("评论内容", "", null, true, this::showCommentContentSettings);
-        addSwitch("语音评论", "", repository.getBoolean(LocalOptions.COMMENT_VOICE, false), true,
-                value -> repository.putBoolean(LocalOptions.COMMENT_VOICE, value));
-        OptionRow[] scope = new OptionRow[1];
-        scope[0] = addOption("作品范围", "", scopeLabel(ContentScopePolicy.scopeMode("comment", automationScopeOptions("comment"))),
-                true, () -> showCommentScopeSettings(scope[0]));
-        boolean ai = "ai".equals(repository.getString("comment_mode", "ai"));
-        media[0] = addOption("素材识别", "", commentMediaPreview(), ai, () -> showCommentMediaSettings(media[0]));
-        addAutomationLimitOption("每日最大评论数", "0 不限制；按本地自然日重置", "comment_daily_limit", 1000000);
-        addAutomationLimitOption("同一作者评论间隔（分钟）", "0 不限制；按作品作者 UID 计算", "comment_user_cooldown_minutes", 525600);
-        addOption("发送与记录", "", null, true, () -> showDeliverySettings(AutomationHistoryStore.COMMENT));
-    }
-
-    private void showCommentContentSettings() {
-        boolean ai = "ai".equals(repository.getString("comment_mode", "ai"));
-        LinearLayout panel = form();
-        showAutomationPanel("评论内容", panel, () -> {
-            if (ai) {
-                String selected = "未启用模型";
-                try { selected = AiModelSettings.read(repository).selected().name; } catch (RuntimeException ignored) { }
-                addOption("模型配置", "", selected, true, this::showAiModelSettings);
-                addPromptOption("二级提示词", repository.getString("comment_prompt", "根据当前作品自然地写一条简短评论，只输出评论正文。"),
-                        value -> repository.putString("comment_prompt", value));
-            } else {
-                addEditableOption("固定评论内容", "", repository.getString("auto_comment_text", ""), false, true, false,
-                        value -> repository.putString("auto_comment_text", value));
-            }
-        });
-    }
-
-    private void showCommentScopeSettings(OptionRow preview) {
-        prepareContentFilter("comment");
-        LinearLayout panel = form();
-        Runnable[] build = new Runnable[1];
-        build[0] = () -> {
-            String mode = ContentScopePolicy.scopeMode("comment", automationScopeOptions("comment"));
-            addChoiceOption("作者范围", "comment_scope_mode", new String[]{"全部", "白名单", "黑名单"},
-                    new String[]{"all", "whitelist", "blacklist"}, mode, () -> {
-                        preview.setValue(scopeLabel(repository.getString("comment_scope_mode", "all")));
-                        rebuildAutomationPanel(panel, build[0]);
-                    });
-            if (!"all".equals(mode)) {
-                addMultiChoiceCsvOption("关注关系", "comment_scope_relations", new String[]{"我关注的", "关注我的", "陌生人"},
-                        new String[]{AutomationScopePolicy.FOLLOWING, AutomationScopePolicy.FOLLOWERS, AutomationScopePolicy.STRANGERS});
-                addOption("指定作者", "", repository.getString("comment_scope_users", ""), true, this::showCommentAuthorSelection);
-            }
-            addFollowListsOption();
-            String filter = ContentScopePolicy.filterMode("comment", automationScopeOptions("comment"));
-            addChoiceOption("作品筛选", "comment_filter_mode", new String[]{"不限", "包含关键词", "排除关键词"},
-                    new String[]{"off", "include", "exclude"}, filter, () -> rebuildAutomationPanel(panel, build[0]));
-            if (!ContentScopePolicy.OFF.equals(filter)) {
-                addEditableOption("筛选关键词", "", ContentScopePolicy.keywords("comment", automationScopeOptions("comment")),
-                        false, true, false, value -> repository.putString("comment_filter_keywords", value));
-                addMultiChoiceCsvOption("匹配对象", "comment_filter_fields", new String[]{"作者", "文案", "标题"},
-                        new String[]{AutomationScopePolicy.AUTHOR, AutomationScopePolicy.CAPTION, AutomationScopePolicy.TITLE});
-            }
-        };
-        showAutomationPanel("作品范围", panel, build[0]);
-    }
-
-    private void showCommentAuthorSelection() {
-        java.util.Map<String, ProfileListEntry> authors = new java.util.LinkedHashMap<>(NativeMessagingHooks.availableContactProfiles());
-        authors.putAll(NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWING));
-        authors.putAll(NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWERS));
-        showProfileSelection("指定作者", authors, AutomationScopePolicy.targets(repository.getString("comment_scope_users", "")),
-                next -> repository.putString("comment_scope_users", String.join(",", next)),
-                () -> showTargetIds("指定作者 UID", "comment_scope_users"));
-    }
-
-    private String commentMediaPreview() {
-        if (!"ai".equals(repository.getString("comment_mode", "ai"))) return "未启用";
-        boolean images = repository.getBoolean("comment_recognize_images", true);
-        boolean video = repository.getBoolean("comment_recognize_video", false);
-        return images && video ? "图片、视频" : images ? "图片" : video ? "视频" : "不识别";
-    }
-
-    private void showCommentMediaSettings(OptionRow preview) {
-        LinearLayout panel = form();
-        showAutomationPanel("素材识别", panel, () -> {
-            addSwitch("识别图片", "", repository.getBoolean("comment_recognize_images", true), true,
-                    value -> { repository.putBoolean("comment_recognize_images", value); preview.setValue(commentMediaPreview()); });
-            addSwitch("识别视频", "", repository.getBoolean("comment_recognize_video", false), true,
-                    value -> { repository.putBoolean("comment_recognize_video", value); preview.setValue(commentMediaPreview()); });
-        });
-    }
-
-    private void addFollowListsOption() {
-        OptionRow[] preview = new OptionRow[1];
-        preview[0] = addOption("关注与粉丝名单", "", NativeFollowLists.statusText(), true,
-                () -> showFollowLists(preview[0]));
-    }
-
-    private void showFollowLists(OptionRow preview) {
-        LinearLayout form = form();
-        Button following = formButton();
-        following.setText("我关注的");
-        following.setTag("settings.followLists.following");
-        following.setOnClickListener(ignored -> showFollowListMembers(FollowListSnapshot.Kind.FOLLOWING));
-        form.addView(MiuixFormControls.viewFor(following), matchWrap());
-        Button followers = formButton();
-        followers.setText("关注我的");
-        followers.setTag("settings.followLists.followers");
-        followers.setOnClickListener(ignored -> showFollowListMembers(FollowListSnapshot.Kind.FOLLOWERS));
-        LinearLayout.LayoutParams followersParams = matchWrap();
-        followersParams.topMargin = dp(8);
-        form.addView(MiuixFormControls.viewFor(followers), followersParams);
-        AlertDialog dialog = new MiuixDialogBuilder(context, miuixHome != null)
-                .setTitle("关注与粉丝名单").setMessage(NativeFollowLists.statusText()).setView(form)
-                .setNegativeButton("返回", null).setPositiveButton("刷新名单", null).create();
-        showOptionDialog(dialog);
-        Button refresh = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-        refresh.setOnClickListener(ignored -> {
-            refresh.setEnabled(false);
-            boolean started = NativeFollowLists.refresh(() -> {
-                if (!dialog.isShowing()) return;
-                String status = NativeFollowLists.statusText();
-                dialog.setMessage(status);
-                preview.setValue(status);
-                refresh.setEnabled(true);
-            });
-            if (started) {
-                dialog.setMessage(NativeFollowLists.statusText());
-            } else {
-                repository.putString(NativeFollowLists.REFRESH_KEY, Long.toString(System.currentTimeMillis()));
-                String status = "已请求刷新。请打开抖音内的模块设置查看实际名单。";
-                dialog.setMessage(status);
-                preview.setValue(status);
-                refresh.setEnabled(true);
-            }
-        });
-    }
-
-    private void showFollowListMembers(FollowListSnapshot.Kind kind) {
-        java.util.Map<String, String> members = NativeFollowLists.members(kind);
-        FollowListSnapshot.State snapshot = FollowListSnapshot.current();
-        String title = kind == FollowListSnapshot.Kind.FOLLOWING ? "我关注的" : "关注我的";
-        boolean known = kind == FollowListSnapshot.Kind.FOLLOWING
-                ? snapshot.followingKnown : snapshot.followersKnown;
-        java.util.Set<String> ids = kind == FollowListSnapshot.Kind.FOLLOWING
-                ? snapshot.following : snapshot.followers;
-        MiuixDialogBuilder builder = new MiuixDialogBuilder(context, miuixHome != null);
-        builder.setTitle(known ? title + "（" + ids.size() + "人）" : title);
-        if (!snapshot.active) {
-            builder.setMessage(repository.isInHost() ? "尚未读取登录账号。" : "请在抖音内查看实际名单。");
-        } else if (!known) {
-            builder.setMessage("名单尚未加载。\n" + NativeFollowLists.statusText());
-        } else if (ids.isEmpty()) {
-            builder.setMessage("列表为空。");
-        } else {
-            MemberListView list = new MemberListView(miuixHome != null ? rowContext() : context, miuixHome != null,
-                    new ArrayList<>(NativeFollowLists.memberDetails(kind).values()), java.util.Collections.emptySet(), false);
-            builder.setView(list).setNegativeButton("返回", null);
-            showOptionDialog(builder.create(), list::close);
-            return;
-        }
-        builder.setNegativeButton("返回", null);
-        showOptionDialog(builder.create());
-    }
-
-    private void addPromptOption(String title, String value, ValueTextListener listener) {
-        String[] current = {value};
-        OptionRow[] preview = new OptionRow[1];
-        OptionRow row = addOption(title, "", promptPreview(value), true, () -> showOptionDialog(
-                new PromptEditorDialog(context, title, current[0], candidate -> {
-                    listener.onValue(candidate);
-                    current[0] = candidate;
-                    preview[0].setValue(promptPreview(candidate));
-                }, miuixHome != null)));
-        preview[0] = row;
-    }
-
-    private static String promptPreview(String value) {
-        if (value.isEmpty()) return "未设置";
-        int points = value.codePointCount(0, value.length());
-        return value.substring(0, value.offsetByCodePoints(0, Math.min(240, points)));
     }
 
     private void addUnavailable(String detail) {
@@ -1345,61 +916,6 @@ public final class ModuleSettingsScreen {
         catch (RuntimeException failure) { toast(safeError(failure)); }
     }
 
-    private void showReplyPool(boolean keyword) {
-        String key = keyword ? "reply_keywords" : "reply_random";
-        JSONArray saved;
-        try { saved = new JSONArray(repository.getString(key, "[]")); }
-        catch (org.json.JSONException ignored) { saved = new JSONArray(); }
-        LinearLayout form = form();
-        List<EditText[]> editors = new ArrayList<>();
-        Runnable add = () -> {
-            if (editors.size() >= 50) return;
-            LinearLayout entry = form();
-            EditText match = keyword ? formInput(entry, "匹配文字", "", false) : null;
-            EditText response = formInput(entry, "回复内容", "", false);
-            ImageButton remove = new ImageButton(context);
-            remove.setImageResource(android.R.drawable.ic_menu_delete);
-            remove.setContentDescription("删除回复");
-            remove.setTooltipText("删除回复");
-            EditText[] values = {match, response};
-            remove.setOnClickListener(ignored -> { editors.remove(values); form.removeView(entry); });
-            entry.addView(miuixHome == null ? remove : MiuixExtraControls.iconAction(rowContext(),
-                    remove, android.R.drawable.ic_menu_delete), new LinearLayout.LayoutParams(dp(48), dp(48)));
-            editors.add(values);
-            form.addView(entry, matchWrap());
-        };
-        for (int index = 0; index < saved.length(); index++) {
-            add.run();
-            EditText[] entry = editors.get(editors.size() - 1);
-            if (keyword) {
-                JSONObject pair = saved.optJSONObject(index);
-                if (pair != null) { entry[0].setText(pair.optString("keyword")); entry[1].setText(pair.optString("reply")); }
-            } else entry[1].setText(saved.optString(index));
-        }
-        ImageButton addButton = new ImageButton(context);
-        addButton.setImageResource(android.R.drawable.ic_input_add);
-        addButton.setContentDescription("添加回复");
-        addButton.setTooltipText("添加回复");
-        addButton.setOnClickListener(ignored -> add.run());
-        form.addView(miuixHome == null ? addButton : MiuixExtraControls.iconAction(rowContext(),
-                addButton, android.R.drawable.ic_input_add), new LinearLayout.LayoutParams(dp(48), dp(48)));
-        showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle(keyword ? "关键词规则" : "随机内容")
-                .setView(scrolling(form)).setNegativeButton("取消", null).setPositiveButton("保存", (dialog, which) -> {
-                    JSONArray entries = new JSONArray();
-                    for (EditText[] item : editors) {
-                        String reply = item[1].getText().toString().trim();
-                        if (reply.isEmpty()) continue;
-                        try {
-                            if (keyword) {
-                                String match = item[0].getText().toString().trim();
-                                if (!match.isEmpty()) entries.put(new JSONObject().put("keyword", match).put("reply", reply));
-                            } else entries.put(reply);
-                        } catch (org.json.JSONException ignored) { }
-                    }
-                    repository.putString(key, entries.toString());
-                }).create());
-    }
-
     private void addChoiceOption(String title, String key, String[] labels, String[] values, String fallback) {
         addChoiceOption(title, key, labels, values, fallback, null);
     }
@@ -1420,31 +936,6 @@ public final class ModuleSettingsScreen {
                     }).setNegativeButton("取消", null).create());
         });
         preview[0] = row;
-    }
-
-    private void addMultiChoiceCsvOption(String title, String key, String[] labels, String[] values) {
-        OptionRow[] preview = new OptionRow[1];
-        preview[0] = addOption(title, "", scopeLabels(labels, values, repository.getString(key, "")), true, () -> {
-            java.util.Set<String> selected = AutomationScopePolicy.targets(repository.getString(key, ""));
-            boolean[] checked = new boolean[values.length];
-            for (int index = 0; index < values.length; index++) checked[index] = selected.contains(values[index]);
-            showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle(title)
-                    .setMultiChoiceItems(labels, checked, (dialog, which, value) -> checked[which] = value)
-                    .setNegativeButton("取消", null).setPositiveButton("保存", (dialog, which) -> {
-                        List<String> next = new ArrayList<>();
-                        for (int index = 0; index < values.length; index++) if (checked[index]) next.add(values[index]);
-                        String saved = String.join(",", next);
-                        repository.putString(key, saved);
-                        preview[0].setValue(scopeLabels(labels, values, saved));
-                    }).create());
-        });
-    }
-
-    private static String scopeLabels(String[] labels, String[] values, String configured) {
-        java.util.Set<String> selected = AutomationScopePolicy.targets(configured);
-        List<String> result = new ArrayList<>();
-        for (int index = 0; index < values.length; index++) if (selected.contains(values[index])) result.add(labels[index]);
-        return result.isEmpty() ? "未选择" : String.join("、", result);
     }
 
     private void showTargetSelection(String title, String key) {
@@ -1834,7 +1325,13 @@ public final class ModuleSettingsScreen {
         if (action != null) action.run();
     }
 
+    private void closeAutomationMessagePage() {
+        if (automationMessagePage != null) automationMessagePage.close();
+        automationMessagePage = null;
+    }
+
     public void dismissChildPages() {
+        closeAutomationMessagePage();
         closeDownloadDirectoryPicker();
         dismissOptionDialogs();
         if (miuixComponentHidePage != null) miuixComponentHidePage.dismiss();
@@ -2257,7 +1754,7 @@ public final class ModuleSettingsScreen {
         BASIC("基本功能", 3),
         INTERFACE("界面相关", 13),
         FILTER("视频筛选", 14),
-        DOWNLOAD("下载相关", 11),
+        DOWNLOAD("下载相关", 12),
         AUTOPLAY("自动播放", 6),
         AUTO_REPLY("自动回复", 10),
         AUTO_COMMENT("自动评论", 8),
@@ -2267,6 +1764,7 @@ public final class ModuleSettingsScreen {
         MESSAGE("消息管理", 6),
         SPOOF("本地伪装", 6),
         EXTENSION("扩展功能", 2),
+        BACKUP("配置备份", 2),
         ABOUT("关于", -1);
 
         final String title;

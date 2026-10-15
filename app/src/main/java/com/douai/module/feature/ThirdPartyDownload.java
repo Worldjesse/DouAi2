@@ -10,16 +10,10 @@ import android.widget.Toast;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.ThirdPartyDownloadSettings;
 
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /** Runs only after a user invokes a third-party download. */
 public final class ThirdPartyDownload {
-    private static final ThreadPoolExecutor EXECUTOR = new ThreadPoolExecutor(2, 2, 0,
-            TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(4));
-    private static final BoundedMediaQueue QUEUE = new BoundedMediaQueue(EXECUTOR);
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     private ThirdPartyDownload() { }
@@ -44,25 +38,17 @@ public final class ThirdPartyDownload {
         Context application = source.getApplicationContext();
         Context context = application == null ? source : application;
         String key = config.getTemplate + '\n' + link + '\n' + tree;
-        boolean accepted = QUEUE.submit(key, () -> {
-            try {
-                String body = ThirdPartyGetClient.fetch(config, link);
+        boolean accepted = DownloadTasks.submit(context, "third-party\n" + key, "第三方作品", transfer -> {
+                transfer.phase("正在解析作品");
+                String body = new ThirdPartyGetClient.Request(transfer, MediaStoreDownloader.connections).fetch(config, link);
+                transfer.check();
                 ThirdPartyDownloadPlan plan = ThirdPartyDownloadPlan.create(
                         ThirdPartyResponse.parse(body), config, System.currentTimeMillis());
-                MediaStoreDownloader.saveThirdPartyBundle(context, plan, tree);
-                toast(context, "已保存 " + plan.assets.size() + " 个文件和作品信息到 "
-                        + (tree.isEmpty() ? "Download/DouAi" : "所选目录"));
-            } catch (Exception failure) {
-                if (log != null) {
-                    try { log.accept("Third-party download failed: " + failure.getClass().getSimpleName()); }
-                    catch (RuntimeException ignored) { }
-                }
-                String message = failure instanceof IllegalArgumentException
-                        || failure instanceof IllegalStateException ? failure.getMessage() : "请求或文件保存失败";
-                toast(context, "第三方下载失败：" + message);
-            }
-        });
-        toast(context, accepted ? "正在请求第三方解析" : "该作品正在下载或队列已满");
+                MediaStoreDownloader.saveThirdPartyBundle(context, plan, tree, transfer);
+                return "已保存 " + plan.assets.size() + " 个文件和作品信息到 "
+                        + (tree.isEmpty() ? "Download/DouAi" : "所选目录");
+        }, log) != null;
+        toast(context, accepted ? "已加入下载任务，可在设置中查看进度或取消" : "该作品正在下载或队列已满");
     }
 
     static String shareUrl(Object aweme) {

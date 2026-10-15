@@ -50,9 +50,16 @@ public final class ThirdPartyGetClient {
     }
 
     public static final class Request {
+        private final DownloadTransfer transfer;
+        private final DownloadTransfer.Connections connections;
         private boolean cancelled;
         private boolean started;
         private HttpURLConnection connection;
+
+        public Request() { this(null, uri -> (HttpURLConnection) uri.toURL().openConnection()); }
+        Request(DownloadTransfer transfer, DownloadTransfer.Connections connections) {
+            this.transfer = transfer; this.connections = connections;
+        }
 
         public String fetch(String template, String shareText, String appId,
                             String appSecret, String headersJson) throws Exception {
@@ -95,16 +102,19 @@ public final class ThirdPartyGetClient {
             if (active != null) active.disconnect();
         }
 
-        private synchronized void attach(HttpURLConnection opened) {
+        private synchronized void attach(HttpURLConnection opened) throws Exception {
+            if (transfer != null) transfer.attach(opened);
             ensureActive();
             connection = opened;
         }
 
         private synchronized void release(HttpURLConnection opened) {
             if (connection == opened) connection = null;
+            if (transfer != null) transfer.detach(opened);
         }
 
-        private synchronized void ensureActive() {
+        private synchronized void ensureActive() throws Exception {
+            if (transfer != null) transfer.check();
             if (cancelled || Thread.currentThread().isInterrupted()) {
                 throw new CancellationException("Third-party GET request cancelled");
             }
@@ -139,11 +149,11 @@ public final class ThirdPartyGetClient {
 
         HttpURLConnection connection = null;
         try {
-            connection = (HttpURLConnection) endpoint.toURL().openConnection();
+            connection = active.connections.open(endpoint);
             active.attach(connection);
             connection.setRequestMethod("GET");
-            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
-            connection.setReadTimeout(READ_TIMEOUT_MS);
+            connection.setConnectTimeout(active.transfer == null ? CONNECT_TIMEOUT_MS : active.transfer.timeout(CONNECT_TIMEOUT_MS));
+            connection.setReadTimeout(active.transfer == null ? READ_TIMEOUT_MS : active.transfer.timeout(READ_TIMEOUT_MS));
             connection.setInstanceFollowRedirects(false);
             connection.setRequestProperty("Accept", "application/json, text/plain, */*");
             for (Map.Entry<String, String> header : headers.entrySet()) {
@@ -163,7 +173,9 @@ public final class ThirdPartyGetClient {
             if (connection.getContentLengthLong() > MAX_RESPONSE_BYTES) throw tooLarge();
             Charset charset = responseCharset(connection.getContentType());
             byte[] bytes;
-            try (InputStream stream = connection.getInputStream()) {
+            try (InputStream stream = connection.getInputStream();
+                 DownloadTransfer.Streams resources = active.transfer == null ? null : active.transfer.streams()) {
+                if (resources != null) resources.add(stream);
                 ByteArrayOutputStream output = new ByteArrayOutputStream();
                 byte[] buffer = new byte[8192];
                 int count;

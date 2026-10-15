@@ -35,12 +35,15 @@ import java.util.Set;
 import java.util.EnumMap;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 /** Applies feed overlay visibility and right-menu opacity without touching the media root. */
 public final class FeedUiHideHook implements Application.ActivityLifecycleCallbacks, AutoCloseable {
     private static final int MAX_TREE_NODES = 4096;
     private static final int MAX_TREE_DEPTH = 64;
+    // Layout changes request enough bounded drawing callbacks to finish one captured-tree sweep.
+    private static final int MAX_STRUCTURE_CHECKS_PER_FRAME = 256;
     private static final int MAX_CUSTOM_RETRIES = 8;
     private static final String VIEW_FINDER_TAG = "douai.view_finder";
     private static final Map<Component, int[]> COMPONENT_IDS = componentIds();
@@ -79,10 +82,12 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     private final Set<View> knownCards = Collections.newSetFromMap(new WeakHashMap<>());
     private final Set<View> windowRoots = Collections.newSetFromMap(new WeakHashMap<>());
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    Consumer<View> requestStructureFrame = View::postInvalidateOnAnimation;
     private final AtomicInteger selectedCallbacks = new AtomicInteger();
     private final AtomicInteger cardScans = new AtomicInteger();
     private final AtomicInteger preDrawRechecks = new AtomicInteger();
     private final AtomicInteger viewSearches = new AtomicInteger();
+    private final AtomicLong structureNodeChecks = new AtomicLong();
     private final AtomicInteger hiddenViews = new AtomicInteger();
     private final AtomicInteger hostStateResets = new AtomicInteger();
     private final Consumer<String> log;
@@ -329,6 +334,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
 
     public int getPreDrawRechecks() { return preDrawRechecks.get(); }
     public int getViewSearches() { return viewSearches.get(); }
+    public long getStructureNodeChecks() { return structureNodeChecks.get(); }
     public int getResourceMismatchCount() { return resourceMismatches.size(); }
     public int getHostStateResets() { return hostStateResets.get(); }
     public boolean isVideoLifecycleInstalled() { return !closed && videoLifecycleInstalled; }
@@ -1084,7 +1090,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             }
             if (hasAnyEffect() && !closed && activeCards.contains(root)) {
                 preDrawRechecks.incrementAndGet();
-                if (!targetsDirty && !structure.matches()) targetsDirty = true;
+                if (!targetsDirty && !structure.matches(structureNodeChecks)) targetsDirty = true;
                 Map<View, TargetStyle> targets = fixedTargets.get(root);
                 if (!targetsDirty && targets != null) {
                     for (Map.Entry<View, TargetStyle> target : targets.entrySet()) {
@@ -1096,11 +1102,15 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                     refreshCustomTargets(root.getRootView(), true);
                     hiddenViews.addAndGet(hideMatchingViews(root));
                 } else hiddenViews.addAndGet(reapplyCachedTargets(root));
+                if (structure.hasPendingSweep()) requestStructureFrame.accept(root);
             }
             return true;
         }
 
-        @Override public void onGlobalLayout() { targetsDirty = true; }
+        @Override public void onGlobalLayout() {
+            View root = rootReference.get();
+            if (!closed && hasAnyEffect() && root != null && activeCards.contains(root)) structure.beginSweep();
+        }
 
         void remove() {
             View root = rootReference.get();
@@ -1163,7 +1173,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                 return true;
             }
             if (hasWindowEffect()) {
-                if (!targetsDirty && !structure.matches()) targetsDirty = true;
+                if (!targetsDirty && !structure.matches(structureNodeChecks)) targetsDirty = true;
                 if (!targetsDirty) {
                     for (Map.Entry<View, TargetIdentity> entry : identities.entrySet()) {
                         if (!entry.getValue().matches(entry.getKey())) { targetsDirty = true; break; }
@@ -1188,11 +1198,14 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                     changed += applyComponentTarget(entry.getKey(), entry.getValue().alpha, true);
                 }
                 hiddenViews.addAndGet(changed);
+                if (structure.hasPendingSweep()) requestStructureFrame.accept(root);
             }
             return true;
         }
 
-        @Override public void onGlobalLayout() { targetsDirty = true; }
+        @Override public void onGlobalLayout() {
+            if (!closed && hasWindowEffect()) structure.beginSweep();
+        }
 
         void captureTargets(Set<View> targets) {
             identities.clear();
@@ -1355,9 +1368,11 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         }
     }
 
-    /** Shallow checks of known nodes detect insertions without repeating target discovery. */
+    /** Rolling checks catch changes without requiring layout events or scanning the full tree each frame. */
     private static final class ViewStructure {
         private final List<Node> nodes = new ArrayList<>();
+        private int nextCheck;
+        private int pendingSweepChecks;
 
         void capture(View root) {
             capture(root, false);
@@ -1379,13 +1394,28 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             }
         }
 
-        boolean matches() {
+        boolean matches(AtomicLong checks) {
             if (nodes.isEmpty()) return false;
-            for (Node node : nodes) if (!node.matches()) return false;
-            return true;
+            int checked = 0;
+            int budget = Math.min(nodes.size(), MAX_STRUCTURE_CHECKS_PER_FRAME);
+            if (pendingSweepChecks > 0) budget = Math.min(budget, pendingSweepChecks);
+            try {
+                while (checked < budget) {
+                    Node node = nodes.get(nextCheck);
+                    nextCheck = (nextCheck + 1) % nodes.size();
+                    checked++;
+                    if (!node.matches()) return false;
+                }
+                return true;
+            } finally {
+                pendingSweepChecks = Math.max(0, pendingSweepChecks - checked);
+                checks.addAndGet(checked);
+            }
         }
 
-        void clear() { nodes.clear(); }
+        void beginSweep() { pendingSweepChecks = nodes.size(); }
+        boolean hasPendingSweep() { return pendingSweepChecks > 0; }
+        void clear() { nodes.clear(); nextCheck = 0; pendingSweepChecks = 0; }
 
         private static final class Node {
             final WeakReference<View> view;
@@ -1395,6 +1425,8 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             final int childCount;
             final String description;
             final String text;
+            final boolean trackBackground;
+            final boolean hasBackground;
 
             Node(View view, int index, boolean inspectContent) {
                 this.view = new WeakReference<>(view);
@@ -1405,6 +1437,9 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                 description = inspectContent ? TargetIdentity.value(view.getContentDescription()) : null;
                 text = inspectContent && view instanceof TextView
                         ? TargetIdentity.value(((TextView) view).getText()) : null;
+                // Declaration wrappers become targets when the host binds their background later.
+                trackBackground = id == View.NO_ID && view instanceof android.widget.LinearLayout;
+                hasBackground = trackBackground && view.getBackground() != null;
             }
 
             boolean matches() {
@@ -1414,6 +1449,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                 if (description != null && !description.contentEquals(current.getContentDescription() == null
                         ? "" : current.getContentDescription())) return false;
                 if (text != null && !text.contentEquals(((TextView) current).getText())) return false;
+                if (trackBackground && hasBackground != (current.getBackground() != null)) return false;
                 if (index >= 0 && (!(owner instanceof ViewGroup)
                         || ((ViewGroup) owner).getChildAt(index) != current)) return false;
                 return childCount < 0 || ((ViewGroup) current).getChildCount() == childCount;

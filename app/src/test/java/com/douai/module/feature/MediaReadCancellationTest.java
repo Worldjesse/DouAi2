@@ -44,6 +44,8 @@ public final class MediaReadCancellationTest {
         now.addAndGet(1_000_000_000L);
         assertThrows(TimeoutException.class, read::check);
         assertTrue(connection.disconnected);
+        // Transport wrappers recheck cancellation while unwinding the original timeout.
+        assertThrows(TimeoutException.class, read::check);
     }
 
     @Test public void cancelBeforeImageReadDoesNotTouchInput() throws Exception {

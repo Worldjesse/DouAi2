@@ -86,7 +86,7 @@ public final class ModuleSettingsReferenceTest {
                 {"FILTER", "过滤总开关", "中断开关", "去广告开关", "去直播开关", "去推荐卡片开关",
                         "去推荐商家开关", "去小游戏开关", "去长视频开关", "长视频时间界定",
                         "去低赞视频开关", "去图集开关", "过滤字符串", "过滤短视频", "最短时长（秒）"},
-                {"DOWNLOAD", "启用下载菜单", "下载方式", "保存位置", "是否启用抖音下载自定义命名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
+                {"DOWNLOAD", "启用下载菜单", "下载方式", "保存位置", "下载任务", "是否启用抖音下载自定义命名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
                 {"AUTOPLAY", "自动滑动到下一个视频", "自动倍速播放", "倍速数值", "打开评论时,不滑动视频",
                         "滑动智能判断上下", "互动自动化"},
                 {"AUTO_REPLY", "开启自动回复", "回复模式", "回复内容", "语音回复", "接收私聊", "私聊范围", "接收群聊", "群聊范围",
@@ -1146,6 +1146,74 @@ public final class ModuleSettingsReferenceTest {
         category.dismiss();
         ShadowLooper.idleMainLooper();
         assertFalse(automation.isShowing());
+    }
+
+    @Test public void downloadTasksNavigationClosesWithItsParentAndDoesNotChangeSettings() {
+        Map<String, Object> original = new HashMap<>(store.values);
+        View page = openCategory("DOWNLOAD");
+        Dialog category = ShadowDialog.getLatestDialog();
+        option(page, "下载任务").performClick();
+        Dialog tasks = ShadowDialog.getLatestDialog();
+        assertTrue(tasks.isShowing());
+        assertNotNull(tasks.getWindow().getDecorView().findViewWithTag("download.tasks"));
+        assertTrue(containsText(tasks.getWindow().getDecorView(), "关闭此页不会停止下载"));
+        category.dismiss();
+        ShadowLooper.idleMainLooper();
+        assertFalse(tasks.isShowing());
+        assertEquals(original, store.values);
+
+        option(openCategory("DOWNLOAD"), "下载任务").performClick();
+        Dialog reopened = ShadowDialog.getLatestDialog();
+        assertTrue(reopened.isShowing());
+        screen.dismissChildPages();
+        ShadowLooper.idleMainLooper();
+        assertFalse(reopened.isShowing());
+    }
+
+    @Test public void closedReplyAndCommentPagesIgnoreTheirOldControlsAndEditors() {
+        String[][] kinds = {{"AUTO_REPLY", "语音回复", "reply_voice", "回复内容", "固定回复内容", "auto_message_text"},
+                {"AUTO_COMMENT", "语音评论", "comment_voice", "评论内容", "固定评论内容", "auto_comment_text"}};
+        for (String[] kind : kinds) {
+            store.putString("comment_mode", "fixed");
+            store.putString(kind[5], "原内容");
+            View page = openCategory(kind[0]);
+            Switch oldVoice = toggle(page, kind[1]);
+            option(page, kind[3]).performClick();
+            View contentPage = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+            option(contentPage, kind[4]).performClick();
+            AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
+            EditText input = editor.getWindow().getDecorView().findViewWithTag("settings.input." + kind[4]);
+            input.setText("迟到编辑");
+            screen.dismissChildPages();
+            ShadowLooper.idleMainLooper();
+            assertFalse(editor.isShowing());
+            oldVoice.setChecked(true);
+            editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            assertFalse(kind[0], store.getBoolean(kind[2], false));
+            assertEquals(kind[0], "原内容", store.getString(kind[5], ""));
+        }
+    }
+
+    @Test public void replyAndCommentActivationPreservesChangesMadeAfterOpeningTheirPage() {
+        for (String category : new String[]{"AUTO_REPLY", "AUTO_COMMENT"}) {
+            View page = openCategory(category);
+            store.save(new FeatureSettings(true, true, true, true, false, false, false,
+                    true, "新筛选词", true, 19, true, 37, false, true, true, false, false));
+            toggle(page, "AUTO_REPLY".equals(category) ? "开启自动回复" : "开启自动评论").setChecked(true);
+            FeatureSettings current = store.load();
+            assertTrue(category, current.downloadEnabled);
+            assertTrue(category, current.removeWatermark);
+            assertEquals(category, "新筛选词", current.keyword);
+            assertEquals(category, 19, current.minimumDurationSeconds);
+            assertEquals(category, 37, current.minimumLikeCount);
+            assertTrue(category, current.autoLikeEnabled);
+            assertTrue(category, current.autoFollowEnabled);
+            assertTrue(category, current.automationEnabled);
+            screen.dismissChildPages();
+            ShadowLooper.idleMainLooper();
+        }
+        assertTrue(store.getBoolean("native_auto_reply", false));
+        assertTrue(store.getBoolean("native_auto_comment", false));
     }
 
     @Test public void automationDialogRefreshesParentSnapshotAndSurvivesOtherCategorySaves() throws Exception {

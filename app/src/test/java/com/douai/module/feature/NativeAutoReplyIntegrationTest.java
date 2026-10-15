@@ -208,6 +208,156 @@ public final class NativeAutoReplyIntegrationTest {
         }
     }
 
+    @Test public void disablingRepliesDisconnectsBlockedImageAndAllowsNextReply() throws Throwable {
+        for (boolean headers : new boolean[]{true, false}) {
+            BlockingMediaConnection connection = new BlockingMediaConnection(headers);
+            try (LimitedReplies fixture = new LimitedReplies("reply_mode", "ai")) {
+                try {
+                    fixture.startBlockedImage(connection);
+                    fixture.values.put("native_auto_reply", false);
+                    fixture.applyOptions();
+                    awaitDisconnected(connection);
+                    fixture.awaitWorker();
+                    fixture.flush();
+                    assertEquals(0, fixture.database.imSdkContext.sends);
+                    fixture.values.put("native_auto_reply", true);
+                    fixture.values.put("reply_mode", "fixed");
+                    fixture.applyOptions();
+                    fixture.receive(201, "other"); fixture.flush();
+                    assertEquals(1, fixture.database.imSdkContext.sends);
+                    assertEquals("other", fixture.database.imSdkContext.last.conversation.id());
+                } finally { connection.disconnect(); }
+            }
+        }
+    }
+
+    @Test public void accountSwitchWithoutAnotherIncomingMessageDisconnectsBlockedReply() throws Throwable {
+        BlockingMediaConnection connection = new BlockingMediaConnection(true);
+        try (LimitedReplies fixture = new LimitedReplies("reply_mode", "ai")) {
+            try {
+                fixture.startBlockedImage(connection);
+                fixture.database.imSdkContext.account = 101;
+                ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(2));
+                awaitDisconnected(connection);
+                fixture.awaitWorker(); fixture.flush();
+                assertEquals(0, fixture.database.imSdkContext.sends);
+            } finally { connection.disconnect(); }
+        }
+    }
+
+    @Test public void closingRepliesDisconnectsBlockedImageBeforeItsSocketTimeout() throws Throwable {
+        BlockingMediaConnection connection = new BlockingMediaConnection(false);
+        try (LimitedReplies fixture = new LimitedReplies("reply_mode", "ai")) {
+            try {
+                fixture.startBlockedImage(connection);
+                fixture.hook.close();
+                awaitDisconnected(connection);
+                fixture.flush();
+                assertEquals(0, fixture.database.imSdkContext.sends);
+            } finally { connection.disconnect(); }
+        }
+    }
+
+    @Test public void overallReplyDeadlineDisconnectsBlockedImageAndAllowsNextReply() throws Throwable {
+        BlockingMediaConnection connection = new BlockingMediaConnection(true);
+        try (LimitedReplies fixture = new LimitedReplies("reply_mode", "ai")) {
+            try {
+                fixture.startBlockedImage(connection);
+                ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(121));
+                awaitDisconnected(connection);
+                fixture.awaitWorker(); fixture.flush();
+                assertEquals(0, fixture.database.imSdkContext.sends);
+                assertEquals("failed", fixture.history().get(0).status);
+                fixture.values.put("reply_mode", "fixed"); fixture.applyOptions();
+                fixture.receive(201, "other"); fixture.flush();
+                assertEquals(1, fixture.database.imSdkContext.sends);
+            } finally { connection.disconnect(); }
+        }
+    }
+
+    @Test public void lateSpeechPreparationAfterReplyDeadlineDeletesAudioWithoutSending() throws Throwable {
+        java.util.concurrent.CountDownLatch preparing = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        SpeechPreparation.Audio audio = NativeAudioMessageSenderTest.audio();
+        try (LimitedReplies fixture = new LimitedReplies("reply_voice", "true")) {
+            try {
+                fixture.hook.speechPreparer = (context, text, options, maximum, valid) -> {
+                    preparing.countDown();
+                    boolean ready = false;
+                    while (!ready) {
+                        try { ready = release.await(2, TimeUnit.SECONDS); }
+                        catch (InterruptedException ignored) { }
+                    }
+                    return audio;
+                };
+                Runnable reply = fixture.enqueue(200, "thread", false);
+                assertNotNull(reply);
+                fixture.scheduled.execute(reply);
+                assertTrue(preparing.await(2, TimeUnit.SECONDS));
+                ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(121));
+                fixture.flush();
+                assertEquals("failed", fixture.history().get(0).status);
+                release.countDown(); fixture.awaitWorker(); fixture.flush();
+                assertFalse(audio.file.exists());
+                assertEquals(0, fixture.database.imSdkContext.sends);
+                assertEquals(1, fixture.history().size());
+                assertEquals("failed", fixture.history().get(0).status);
+            } finally { release.countDown(); audio.delete(); }
+        }
+    }
+
+    @Test public void installedStreakTickStillRunsWhileReplyImageIsBlocked() throws Throwable {
+        BlockingMediaConnection connection = new BlockingMediaConnection(true);
+        try (LimitedReplies fixture = new LimitedReplies("reply_mode", "ai")) {
+            try {
+                fixture.startBlockedImage(connection);
+                ScheduledThreadPoolExecutor ticker = (ScheduledThreadPoolExecutor)
+                        HostTargets.read(fixture.hook, "streakWorker");
+                Runnable tick = ticker.getQueue().peek();
+                assertNotNull(tick);
+                ticker.getQueue().remove(tick);
+                ticker.execute(tick);
+                assertTrue("Installed streak timer was blocked by reply generation",
+                        fixture.database.imSdkContext.enumerated.await(2, TimeUnit.SECONDS));
+                assertFalse(connection.disconnected);
+                assertEquals(0, fixture.database.imSdkContext.sends);
+            } finally { connection.disconnect(); }
+        }
+    }
+
+    @Test public void lateGenerationCannotHandoffWhenMainWatchdogHasNotRun() throws Throwable {
+        java.util.concurrent.CountDownLatch preparing = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        SpeechPreparation.Audio audio = NativeAudioMessageSenderTest.audio();
+        try (LimitedReplies fixture = new LimitedReplies("reply_voice", "true")) {
+            try {
+                fixture.hook.speechPreparer = (context, text, options, maximum, valid) -> {
+                    preparing.countDown();
+                    assertTrue(release.await(2, TimeUnit.SECONDS));
+                    return audio;
+                };
+                Runnable reply = fixture.enqueue(200, "thread", false);
+                assertNotNull(reply);
+                fixture.scheduled.execute(reply);
+                assertTrue(preparing.await(2, TimeUnit.SECONDS));
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(Duration.ofSeconds(121));
+                release.countDown();
+                fixture.awaitWorker();
+                assertFalse("Late audio must be rejected before the delayed main watchdog runs", audio.file.exists());
+                fixture.flush();
+                assertEquals(0, fixture.database.imSdkContext.sends);
+                assertEquals(1, fixture.history().size());
+                assertEquals("failed", fixture.history().get(0).status);
+            } finally { release.countDown(); audio.delete(); }
+        }
+    }
+
+    private static void awaitDisconnected(BlockingMediaConnection connection) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (!connection.disconnected && System.nanoTime() < deadline) Thread.sleep(5);
+        assertTrue("Blocked reply media must be actively disconnected", connection.disconnected);
+    }
+
     private void flow(boolean cancel) throws Throwable {
         flow(cancel, false);
     }
@@ -301,11 +451,13 @@ public final class NativeAutoReplyIntegrationTest {
 
     public static final class Sdk {
         int sends; Message last;
+        volatile long account = 100;
+        final java.util.concurrent.CountDownLatch enumerated = new java.util.concurrent.CountDownLatch(1);
         boolean failNext; boolean suppressCallbacks;
         Runnable beforeSender = () -> { };
-        public long uid() { return 100; }
+        public long uid() { return account; }
         public Bean bean() { return new Bean(); }
-        public Conversations conversations() { return new Conversations(); }
+        public Conversations conversations() { return new Conversations(enumerated::countDown); }
     }
     public static final class Database {
         public Sdk imSdkContext = new Sdk();
@@ -328,10 +480,12 @@ public final class NativeAutoReplyIntegrationTest {
         long sender; int conversationType; long orderIndex;
     }
     public static final class Conversations {
+        private final Runnable enumerate;
+        Conversations(Runnable enumerate) { this.enumerate = enumerate; }
         public Conversation find(String id) {
             return Arrays.asList("thread", "other", "third", "group").contains(id) ? new Conversation(id) : null;
         }
-        public List<Conversation> all() { return Collections.emptyList(); }
+        public List<Conversation> all() { enumerate.run(); return Collections.emptyList(); }
     }
     public static final class Conversation {
         final String id;
@@ -391,22 +545,46 @@ public final class NativeAutoReplyIntegrationTest {
         }
 
         void receive(long sender, String conversation) throws Throwable {
+            Runnable reply = enqueue(sender, conversation, false);
+            if (reply != null) reply.run();
+            ShadowLooper.idleMainLooper();
+        }
+
+        Runnable enqueue(long sender, String conversation, boolean image) throws Throwable {
             ContentValues incoming = new ContentValues();
             incoming.put("conversation_id", conversation);
             incoming.put("conversation_type", "group".equals(conversation) ? 2 : 1);
             incoming.put("sender", sender);
             incoming.put("msg_server_id", Integer.toString(++serverId));
             incoming.put("created_time", System.currentTimeMillis());
-            incoming.put("type", 7);
-            incoming.put("content", "{\"text\":\"incoming\"}");
+            incoming.put("type", image ? 27 : 7);
+            incoming.put("content", image
+                    ? "{\"resource_url\":{\"url_list\":[\"https://p.byteimg.com/image.png\"]}}"
+                    : "{\"text\":\"incoming\"}");
             framework.invoke(Database.class.getMethod("insert", String.class, String.class, ContentValues.class),
                     database, "msg", null, incoming);
             Runnable reply = scheduled.getQueue().peek();
             if (reply != null) {
                 scheduled.getQueue().remove(reply);
-                reply.run();
             }
-            ShadowLooper.idleMainLooper();
+            return reply;
+        }
+
+        void startBlockedImage(BlockingMediaConnection connection) throws Throwable {
+            hook.mediaReads = () -> new MediaReadCancellation(60_000, System::nanoTime, uri -> connection);
+            Runnable reply = enqueue(200, "thread", true);
+            assertNotNull(reply);
+            scheduled.execute(reply);
+            assertTrue("Image request did not reach the blocked transport", connection.blocked.await(2, TimeUnit.SECONDS));
+        }
+
+        void applyOptions() {
+            LocalOptions changed = new LocalOptions(values);
+            hook.setOptions(changed); dispatcher.setOptions(changed);
+        }
+
+        void awaitWorker() throws Exception {
+            scheduled.submit(() -> { }).get(2, TimeUnit.SECONDS);
         }
 
         void flush() {

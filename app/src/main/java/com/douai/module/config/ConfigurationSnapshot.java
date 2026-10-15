@@ -26,7 +26,14 @@ public final class ConfigurationSnapshot {
     }
 
     public static ConfigurationSnapshot readFrom(SharedPreferences preferences) {
-        return new ConfigurationSnapshot(preferences.getAll());
+        return new ConfigurationSnapshot(ConfigImportTransaction.capture(preferences));
+    }
+
+    /** Returns null while an import is unsettled and requests one final reload for this owner. */
+    public static ConfigurationSnapshot readForPublication(SharedPreferences preferences, Object owner,
+                                                           Runnable settledReload) {
+        Map<String, ?> captured = ConfigImportTransaction.captureForPublication(preferences, owner, settledReload);
+        return captured == null ? null : new ConfigurationSnapshot(captured);
     }
 
     private static final class FrozenPreferences implements SharedPreferences {

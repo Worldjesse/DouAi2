@@ -73,9 +73,16 @@ public final class FrameworkConfigSync {
             String error = null;
             try {
                 SettingsRepository repository = settingsRepository;
-                FeatureSettings latestSettings = repository == null ? settings : repository.load();
-                Map<String, ?> localValues = repository == null
-                        ? java.util.Collections.emptyMap() : repository.snapshot();
+                FeatureSettings latestSettings;
+                Map<String, ?> localValues;
+                if (repository == null) {
+                    latestSettings = settings;
+                    localValues = java.util.Collections.emptyMap();
+                } else synchronized (repository) {
+                    // Bulk import/rollback holds this same lock; never mix two different snapshots.
+                    latestSettings = repository.load();
+                    localValues = repository.snapshot();
+                }
                 SharedPreferences remote = boundService.getRemotePreferences(PREFERENCES_GROUP);
                 SharedPreferences.Editor editor = remote.edit();
                 writeSettings(editor, latestSettings, localValues);
@@ -123,6 +130,7 @@ public final class FrameworkConfigSync {
 
     private void writeSettings(SharedPreferences.Editor editor, FeatureSettings settings,
                                Map<String, ?> localValues) {
+        editor.clear(); // This group is a full snapshot: removed import keys must disappear remotely too.
         settings.writeTo(editor);
         for (Map.Entry<String, ?> entry : localValues.entrySet()) {
             Object value = entry.getValue();

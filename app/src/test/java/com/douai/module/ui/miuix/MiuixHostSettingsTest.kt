@@ -351,7 +351,7 @@ class MiuixHostSettingsTest {
         val layout = if (compose.activity.resources.configuration.orientation ==
             android.content.res.Configuration.ORIENTATION_LANDSCAPE) "landscape" else "narrow"
         compose.onNodeWithTag("settings.search").performTextReplacement("关于")
-        compose.onNodeWithTag("settings.category.13").assertIsDisplayed().performClick()
+        compose.onNodeWithTag("settings.category.14").assertIsDisplayed().performClick()
         compose.onNodeWithTag("settings.option.帮助").assertIsDisplayed()
         saveDialogPreview("about-$layout")
         compose.runOnUiThread {

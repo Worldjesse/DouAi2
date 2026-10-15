@@ -16,6 +16,8 @@ public final class SpeechSettingsTest {
         assertEquals("en-US", options.text("tts_language", ""));
         assertEquals(1.5f, options.decimal("tts_rate", 0), 0);
         assertEquals(0.8f, options.decimal("tts_pitch", 0), 0);
+        assertEquals(1.5f, settings.rate, 0);
+        assertEquals(0.8f, settings.pitch, 0);
         assertEquals(SpeechSettings.DEFAULT_VOICE_GET_TEMPLATE, settings.voiceGetTemplate);
     }
 
@@ -31,5 +33,37 @@ public final class SpeechSettingsTest {
         assertEquals("{}", settings.headers);
         assertEquals("{}", settings.voiceHeaders);
         assertEquals(SpeechSettings.DEFAULT_AUDIO_FIELD, settings.audioField);
+    }
+
+    @Test public void existingLocalValuesKeepTheirEffectiveFallbackAndClamping() {
+        SpeechSettings defaults = new SpeechSettings(new LocalOptions(Map.of()));
+        assertEquals(1f, defaults.rate, 0);
+        assertEquals(1f, defaults.pitch, 0);
+        assertEquals("1", defaults.rateText());
+        assertEquals("1", defaults.pitchText());
+        Object[][] values = {{"0.1", 0.5f}, {"3", 2f}, {"0.5", 0.5f}, {"2", 2f},
+                {"invalid", 1f}, {"NaN", 1f}, {"Infinity", 1f}, {"-Infinity", 1f}, {"", 1f},
+                {"1e100", 1f}, {Float.NaN, 1f}, {Float.POSITIVE_INFINITY, 1f}};
+        for (Object[] value : values) {
+            SpeechSettings settings = new SpeechSettings(new LocalOptions(Map.of(
+                    SpeechSettings.RATE, value[0], SpeechSettings.PITCH, value[0])));
+            assertEquals(String.valueOf(value[0]), (float) value[1], settings.rate, 0);
+            assertEquals(String.valueOf(value[0]), (float) value[1], settings.pitch, 0);
+            assertEquals(settings.rate, Float.parseFloat(settings.rateText()), 0);
+            assertEquals(settings.pitch, Float.parseFloat(settings.pitchText()), 0);
+        }
+    }
+
+    @Test public void newLocalEditsRejectInvalidValuesAndNormalizeAcceptedValues() {
+        for (String invalid : new String[]{"0.49", "2.01", "0.499999999", "2.00000001", "-1", "0",
+                "invalid", "NaN", "Infinity", "-Infinity", "", "1e100"}) {
+            IllegalArgumentException failure = assertThrows(invalid, IllegalArgumentException.class,
+                    () -> SpeechSettings.validateLocalRateOrPitch(invalid));
+            assertEquals("请输入 0.5 至 2 的数字", failure.getMessage());
+        }
+        assertEquals("0.5", SpeechSettings.validateLocalRateOrPitch("0.5"));
+        assertEquals("2", SpeechSettings.validateLocalRateOrPitch("2"));
+        assertEquals("1", SpeechSettings.validateLocalRateOrPitch(" 1.00 "));
+        assertEquals("1.4", SpeechSettings.validateLocalRateOrPitch("1.400"));
     }
 }

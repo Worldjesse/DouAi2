@@ -307,6 +307,275 @@ public final class FeedUiHideHookTest {
     }
 
     @Test
+    public void largeStableTreeKeepsStructureWorkBoundedAcross300Frames() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        FrameLayout right = new FrameLayout(activity);
+        right.setId(2131402155);
+        root.addView(right);
+        for (int index = 0; index < 1024; index++) root.addView(new View(activity));
+        activity.setContentView(root);
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, settings(false, 35));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            int searches = hook.getViewSearches();
+            long before = hook.getStructureNodeChecks();
+            for (int frame = 0; frame < 300; frame++) {
+                right.setAlpha(1f);
+                root.getViewTreeObserver().dispatchOnPreDraw();
+                assertEquals("Cached styles must still be maintained every frame", 0.35f, right.getAlpha(), 0.001f);
+            }
+            long checks = hook.getStructureNodeChecks() - before;
+            System.out.println("Feed stable 300 frames: structureNodeChecks=" + checks
+                    + ", discoveries=" + (hook.getViewSearches() - searches));
+            assertEquals(searches, hook.getViewSearches());
+            assertTrue("Structure verification must do at most 256 node checks per frame; actual=" + checks,
+                    checks > 0 && checks <= 300L * 256);
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void unchangedGlobalLayoutsDoNotRediscoverTargets() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        View target = new View(activity);
+        target.setId(2131374336);
+        root.addView(target);
+        activity.setContentView(root);
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, enabledSettings());
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            int searches = hook.getViewSearches();
+            for (int frame = 0; frame < 30; frame++) {
+                root.getViewTreeObserver().dispatchOnGlobalLayout();
+                root.getViewTreeObserver().dispatchOnPreDraw();
+                assertEquals(View.INVISIBLE, target.getVisibility());
+            }
+            System.out.println("Feed unchanged 30 layouts: discoveries=" + (hook.getViewSearches() - searches));
+            assertEquals("Layout notifications alone must not rediscover an unchanged tree", searches, hook.getViewSearches());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void largeWindowCustomTargetKeepsChecksAndLayoutRediscoveryBounded() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout page = new FrameLayout(activity);
+        FrameLayout card = new FrameLayout(activity);
+        page.addView(card);
+        for (int index = 0; index < 1024; index++) page.addView(new View(activity));
+        TextView custom = new TextView(activity);
+        custom.setId(android.R.id.text1);
+        page.addView(custom);
+        activity.setContentView(page);
+        CustomViewLocator locator = CustomViewLocator.capture(page.getRootView(), card, custom);
+        assertNotNull(locator);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(ComponentHideSettings.CUSTOM_VIEWS,
+                CustomViewLocator.serialize(Collections.singletonList(locator))).commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(card));
+            idleMainLooper();
+            int searches = hook.getViewSearches();
+            long before = hook.getStructureNodeChecks();
+            for (int frame = 0; frame < 300; frame++) {
+                custom.setVisibility(View.VISIBLE);
+                page.getViewTreeObserver().dispatchOnPreDraw();
+                assertEquals(View.GONE, custom.getVisibility());
+            }
+            long checks = hook.getStructureNodeChecks() - before;
+            int stableDiscoveries = hook.getViewSearches() - searches;
+            for (int frame = 0; frame < 30; frame++) {
+                page.getViewTreeObserver().dispatchOnGlobalLayout();
+                page.getViewTreeObserver().dispatchOnPreDraw();
+            }
+            int layoutDiscoveries = hook.getViewSearches() - searches - stableDiscoveries;
+            System.out.println("Feed window 300 frames: structureNodeChecks=" + checks
+                    + ", discoveries=" + stableDiscoveries + "; unchanged 30 layouts: discoveries=" + layoutDiscoveries);
+            assertEquals(0, stableDiscoveries);
+            assertEquals("Unchanged window layouts must not restart custom locator discovery", 0, layoutDiscoveries);
+            assertTrue("Card and window observers each have a 256-node frame budget; actual=" + checks,
+                    checks > 0 && checks <= 300L * 512);
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void largeTreeFindsLateInsertionAndReusedTextWithin16FramesWithoutLayout() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        for (int index = 0; index < 1024; index++) root.addView(new View(activity));
+        FrameLayout tail = new FrameLayout(activity);
+        TextView label = new TextView(activity);
+        tail.addView(label);
+        root.addView(tail);
+        int[] hostHierarchyEvents = {0};
+        tail.setOnHierarchyChangeListener(new android.view.ViewGroup.OnHierarchyChangeListener() {
+            @Override public void onChildViewAdded(View parent, View child) { hostHierarchyEvents[0]++; }
+            @Override public void onChildViewRemoved(View parent, View child) { hostHierarchyEvents[0]++; }
+        });
+        activity.setContentView(root);
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, enabledSettings());
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            for (int frame = 0; frame < 20; frame++) root.getViewTreeObserver().dispatchOnPreDraw();
+            View inserted = new View(activity);
+            inserted.setId(2131374336);
+            tail.addView(inserted);
+            for (int frame = 0; frame < 16; frame++) root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals("Insertion at the end of a large tree must be detected without a layout event", View.INVISIBLE, inserted.getVisibility());
+            assertEquals("The host's hierarchy observer must remain installed", 1, hostHierarchyEvents[0]);
+            label.setText("分享");
+            for (int frame = 0; frame < 16; frame++) root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(View.INVISIBLE, label.getVisibility());
+            label.setText("正常文案");
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals("Previously matched target identity changes must restore on the next frame", View.VISIBLE, label.getVisibility());
+            hook.close();
+            idleMainLooper();
+            assertEquals(View.VISIBLE, inserted.getVisibility());
+            long checks = hook.getStructureNodeChecks();
+            root.getViewTreeObserver().dispatchOnGlobalLayout();
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(checks, hook.getStructureNodeChecks());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void quietLargeTreeFinishesCheckingLateInsertionAfterOneLayoutAndDraw() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        for (int index = 0; index < 1024; index++) root.addView(new View(activity));
+        FrameLayout tail = new FrameLayout(activity);
+        root.addView(tail);
+        activity.setContentView(root);
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, enabledSettings());
+        java.util.Set<View> requestedFrames = new java.util.LinkedHashSet<>();
+        hook.requestStructureFrame = view -> requestedFrames.add(view.getRootView());
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            requestedFrames.clear();
+            View inserted = new View(activity);
+            inserted.setId(2131374336);
+            tail.addView(inserted);
+            root.getViewTreeObserver().dispatchOnGlobalLayout();
+            long checks = hook.getStructureNodeChecks();
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertTrue(hook.getStructureNodeChecks() - checks <= 256);
+
+            // The host is now idle. Only redraws explicitly requested by the hook may run.
+            int extraFrames = 0;
+            while (!requestedFrames.isEmpty()) {
+                assertTrue("A layout sweep must stop after a bounded number of frames", extraFrames++ < 16);
+                java.util.List<View> frames = new java.util.ArrayList<>(requestedFrames);
+                requestedFrames.clear();
+                for (View frame : frames) {
+                    checks = hook.getStructureNodeChecks();
+                    frame.getViewTreeObserver().dispatchOnPreDraw();
+                    assertTrue("Each requested frame retains the structure budget",
+                            hook.getStructureNodeChecks() - checks <= 256);
+                }
+            }
+            assertEquals("An idle host must not leave a late feed control visible", View.INVISIBLE, inserted.getVisibility());
+            assertTrue("The tail was outside the first frame's budget", extraFrames > 0);
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void quietLargeWindowFindsLateCustomTargetAfterItsInitialRetriesAreExhausted() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout page = new FrameLayout(activity);
+        FrameLayout card = new FrameLayout(activity);
+        page.addView(card);
+        for (int index = 0; index < 1024; index++) page.addView(new View(activity));
+        FrameLayout tail = new FrameLayout(activity);
+        TextView custom = new TextView(activity);
+        custom.setId(android.R.id.text1);
+        tail.addView(custom);
+        page.addView(tail);
+        activity.setContentView(page);
+        CustomViewLocator locator = CustomViewLocator.capture(page.getRootView(), card, custom);
+        assertNotNull(locator);
+        tail.removeView(custom);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(ComponentHideSettings.CUSTOM_VIEWS,
+                CustomViewLocator.serialize(Collections.singletonList(locator))).commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        java.util.Set<View> requestedFrames = new java.util.LinkedHashSet<>();
+        hook.requestStructureFrame = view -> requestedFrames.add(view.getRootView());
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(card));
+            idleMainLooper();
+            for (int frame = 0; frame < 8; frame++) page.getViewTreeObserver().dispatchOnPreDraw();
+            requestedFrames.clear();
+            tail.addView(custom);
+            page.getViewTreeObserver().dispatchOnGlobalLayout();
+            page.getViewTreeObserver().dispatchOnPreDraw();
+            drainRequestedStructureFrames(hook, requestedFrames, 512);
+            assertEquals("An idle window must rediscover a custom view inserted after retries ran out",
+                    View.GONE, custom.getVisibility());
+
+            int searches = hook.getViewSearches();
+            page.getViewTreeObserver().dispatchOnGlobalLayout();
+            page.getViewTreeObserver().dispatchOnPreDraw();
+            drainRequestedStructureFrames(hook, requestedFrames, 512);
+            assertEquals("Finishing a stable layout sweep must not rediscover targets", searches, hook.getViewSearches());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void closingDuringALayoutSweepDoesNotContinueCheckingOrRequestMoreFrames() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        for (int index = 0; index < 1024; index++) root.addView(new View(activity));
+        activity.setContentView(root);
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, enabledSettings());
+        java.util.Set<View> requestedFrames = new java.util.LinkedHashSet<>();
+        hook.requestStructureFrame = view -> requestedFrames.add(view.getRootView());
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            requestedFrames.clear();
+            root.getViewTreeObserver().dispatchOnGlobalLayout();
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertFalse("A large stable layout needs a bounded follow-up sweep", requestedFrames.isEmpty());
+            hook.close();
+            long checks = hook.getStructureNodeChecks();
+            drainRequestedStructureFrames(hook, requestedFrames, 0);
+            root.getViewTreeObserver().dispatchOnGlobalLayout();
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals(checks, hook.getStructureNodeChecks());
+            assertTrue(requestedFrames.isEmpty());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    private static void drainRequestedStructureFrames(FeedUiHideHook hook, java.util.Set<View> requestedFrames,
+                                                       int perFrameBudget) {
+        int extraFrames = 0;
+        while (!requestedFrames.isEmpty()) {
+            assertTrue("A layout sweep must stop after a bounded number of frames", extraFrames++ < 16);
+            java.util.List<View> frames = new java.util.ArrayList<>(requestedFrames);
+            requestedFrames.clear();
+            for (View frame : frames) {
+                long checks = hook.getStructureNodeChecks();
+                frame.getViewTreeObserver().dispatchOnPreDraw();
+                assertTrue("Requested frames must retain the per-monitor structure budget",
+                        hook.getStructureNodeChecks() - checks <= perFrameBudget);
+            }
+        }
+    }
+
+    @Test
     public void layoutInvalidatesCachedTargetsForLateInsertedControls() throws Throwable {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
@@ -837,6 +1106,37 @@ public final class FeedUiHideHookTest {
             assertEquals(View.VISIBLE, declaration.getVisibility());
             assertEquals(View.VISIBLE, declarationBackground.getVisibility());
             assertEquals(View.GONE, anchors.getVisibility());
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
+    public void declarationBackgroundChangesInvalidateTargetsWithoutChangingTheTree() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        android.widget.LinearLayout wrapper = new android.widget.LinearLayout(activity);
+        View declaration = new View(activity);
+        declaration.setId(2131378315);
+        wrapper.addView(declaration);
+        root.addView(wrapper);
+        activity.setContentView(root);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(Component.FEEDBACK.key, "-2").commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            assertEquals(View.GONE, declaration.getVisibility());
+            assertEquals(View.VISIBLE, wrapper.getVisibility());
+            wrapper.setBackgroundColor(android.graphics.Color.BLACK);
+            root.getViewTreeObserver().dispatchOnGlobalLayout();
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals("A newly bound declaration background must also be hidden", View.GONE, wrapper.getVisibility());
+            wrapper.setBackground(null);
+            root.getViewTreeObserver().dispatchOnGlobalLayout();
+            root.getViewTreeObserver().dispatchOnPreDraw();
+            assertEquals("An anonymous wrapper without a background is no longer a hide target", View.VISIBLE, wrapper.getVisibility());
+            assertEquals(View.GONE, declaration.getVisibility());
         } finally { hook.close(); idleMainLooper(); activity.finish(); }
     }
 

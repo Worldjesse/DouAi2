@@ -2,13 +2,31 @@
 
 抖音增强模块，面向抖音 `com.ss.android.ugc.aweme` 40.6.0，使用 libxposed API 102。
 
-作者：**yudigaga**。当前正式版：**0.1.60** / versionCode **61**。
+作者：**yudigaga**。当前版本：**0.1.63** / versionCode **64**。
 
 - [源码仓库](https://github.com/yudigaga/DouAi)
 - [正式版下载](https://github.com/yudigaga/DouAi/releases)
 - [LSPosed 模块仓库](https://github.com/Xposed-Modules-Repo/io.github.yudigaga.douai)
 
 正式包名：`io.github.yudigaga.douai`。
+
+## 0.1.63 更新
+
+新增配置导入/导出：JSON 文件备份、默认不含接口密钥、合并或覆盖预览、确认后整批应用。发布前修复静止大树的异步控件检测，并包含 0.1.61、0.1.62 的自动回复、语音、下载任务及设置优化。按用户要求跳过真机验证，本地检查范围和限制明确记录。
+
+[完整更新与验证](docs/release-0.1.63.md) · [发布前复核](docs/review-0.1.63.md)。
+
+## 0.1.62 本地更新
+
+完成后续优化：Feed 按预算检测视图变化，减少稳定页面重复工作；新增下载任务页、进度、取消及整体超时；回复和评论设置独立管理配置迁移、表单与关闭生命周期。沿用 0.1.61 的回复和语音修复。本版仅本地构建，按用户要求跳过真机验证，未上传 GitHub 或 LSPosed。
+
+[本地构建与验证记录](docs/release-0.1.62.md)。
+
+## 0.1.61 本地更新
+
+补齐自动回复图片读取的整体超时与任务取消，统一系统语音的语速、音调校验和有效值展示，并将评论、私聊文本转语音纳入适配诊断。本版仅本地构建，未上传 GitHub 或 LSPosed。
+
+[本地构建与验证记录](docs/release-0.1.61.md)。
 
 ## 0.1.60 更新
 

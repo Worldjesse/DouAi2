@@ -33,6 +33,7 @@ import com.douai.module.scan.HostInstallation;
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.ConfigurationChanges;
 import com.douai.module.config.ConfigurationSnapshot;
+import com.douai.module.config.ConfigImportTransaction;
 import com.douai.module.config.CustomViewLocator;
 import com.douai.module.config.FrameworkConfigSync;
 import com.douai.module.config.ExtendedSettings;
@@ -85,6 +86,7 @@ public final class DouAiModule extends XposedModule {
     private volatile Context targetContext;
     private volatile ApplicationInfo targetApplicationInfo;
     private volatile SharedPreferences.OnSharedPreferenceChangeListener settingsListener;
+    private ConfigImportTransaction.Registration configurationPublicationRegistration;
     private volatile FeatureSettings currentSettings = FeatureSettings.defaults();
     private volatile ExtendedSettings extendedSettings;
     private volatile LocalOptions localOptions = new LocalOptions(java.util.Collections.emptyMap());
@@ -135,6 +137,8 @@ public final class DouAiModule extends XposedModule {
     private volatile String autoCommentDraftHookFailure;
     private volatile String autoMessageDraftHookFailure;
     private volatile String commentToolsHookFailure;
+    private volatile String nativeCommentSpeechHookFailure;
+    private volatile String directMessageSpeechHookFailure;
     private volatile String immersiveModeFailure;
 
     @Override
@@ -459,7 +463,14 @@ public final class DouAiModule extends XposedModule {
 
     private synchronized void registerSettingsListener(SharedPreferences preferences) {
         if (hostPreferences == preferences && settingsListener != null) return;
+        if (configurationPublicationRegistration != null) configurationPublicationRegistration.close();
+        if (hostPreferences != null && settingsListener != null) {
+            try { hostPreferences.unregisterOnSharedPreferenceChangeListener(settingsListener); }
+            catch (RuntimeException ignored) { }
+        }
         hostPreferences = preferences;
+        configurationPublicationRegistration = ConfigImportTransaction.observe(
+                preferences, this, this::scheduleConfigurationUpdate);
         SharedPreferences.OnSharedPreferenceChangeListener listener = (sharedPreferences, key) ->
                 scheduleConfigurationUpdate();
         try {
@@ -472,6 +483,8 @@ public final class DouAiModule extends XposedModule {
     }
 
     private synchronized void scheduleConfigurationUpdate() {
+        if (hostPreferences != null && ConfigImportTransaction.deferUntilSettled(
+                hostPreferences, this, this::scheduleConfigurationUpdate)) return;
         if (configurationUpdatePending) return;
         configurationUpdatePending = true;
         new Handler(Looper.getMainLooper()).post(() -> {
@@ -484,7 +497,9 @@ public final class DouAiModule extends XposedModule {
 
     private synchronized void updateConfiguration(SharedPreferences preferences) {
         try {
-            ConfigurationSnapshot snapshot = ConfigurationSnapshot.readFrom(preferences);
+            ConfigurationSnapshot snapshot = ConfigurationSnapshot.readForPublication(
+                    preferences, this, this::scheduleConfigurationUpdate);
+            if (snapshot == null) return;
             Map<String, ?> values = snapshot.values;
             FeatureSettings settings = snapshot.features;
             ExtendedSettings extended = snapshot.extended;
@@ -893,12 +908,19 @@ public final class DouAiModule extends XposedModule {
             } catch (Throwable failure) { log(6, TAG, "Comment voice replacement failed", failure); }
         }
         if (nativeCommentSpeechHook == null) {
+            NativeCommentSpeechHook candidate = null;
             try {
-                nativeCommentSpeechHook = NativeCommentSpeechHook.install(this, hostScanReport, hostClassLoader,
+                candidate = NativeCommentSpeechHook.install(this, hostScanReport, hostClassLoader,
                         localOptions, message -> log(3, TAG, message));
-                if (autoCommentDraftHook != null) nativeCommentSpeechHook.setAutomaticPublishGuard(autoCommentDraftHook::ownsPublish);
-                nativeCommentSpeechHook.setContext(targetContext);
-            } catch (Throwable failure) { log(6, TAG, "Comment speech workflow failed", failure); }
+                if (autoCommentDraftHook != null) candidate.setAutomaticPublishGuard(autoCommentDraftHook::ownsPublish);
+                candidate.setContext(targetContext);
+                nativeCommentSpeechHook = candidate;
+                nativeCommentSpeechHookFailure = null;
+            } catch (Throwable failure) {
+                if (candidate != null) candidate.close();
+                nativeCommentSpeechHookFailure = HostAdaptationDiagnostics.installationFailure(failure);
+                log(6, TAG, "Comment speech workflow failed: " + nativeCommentSpeechHookFailure);
+            }
         }
         if (feedGestureToolsHook == null) {
             try {
@@ -916,11 +938,18 @@ public final class DouAiModule extends XposedModule {
                     feedUiHideHook::areComponentsTemporarilyShown);
         }
         if (directMessageSpeechHook == null) {
+            DirectMessageSpeechHook candidate = null;
             try {
-                directMessageSpeechHook = DirectMessageSpeechHook.install(this, hostScanReport, hostClassLoader,
+                candidate = DirectMessageSpeechHook.install(this, hostScanReport, hostClassLoader,
                         localOptions, message -> log(3, TAG, message));
-                directMessageSpeechHook.setContext(targetContext);
-            } catch (Throwable failure) { log(6, TAG, "Direct-message voice workflow failed", failure); }
+                candidate.setContext(targetContext);
+                directMessageSpeechHook = candidate;
+                directMessageSpeechHookFailure = null;
+            } catch (Throwable failure) {
+                if (candidate != null) candidate.close();
+                directMessageSpeechHookFailure = HostAdaptationDiagnostics.installationFailure(failure);
+                log(6, TAG, "Direct-message voice workflow failed: " + directMessageSpeechHookFailure);
+            }
         }
         additionalInitialized = true;
     }
@@ -952,8 +981,10 @@ public final class DouAiModule extends XposedModule {
         snapshot.putBoolean("feature.comment_enhancements.installed", commentEnhancementsHook != null);
         snapshot.putBoolean("feature.comment_voice.installed", commentVoiceHook != null);
         snapshot.putBoolean("feature.comment_tts.installed", nativeCommentSpeechHook != null);
+        snapshot.putString("feature.comment_tts.failure", nativeCommentSpeechHookFailure);
         snapshot.putBoolean("feature.recall_background.installed", recallHighlightHook != null && recallHighlightHook.isActive());
         snapshot.putBoolean("feature.dm_speech.installed", directMessageSpeechHook != null);
+        snapshot.putString("feature.dm_speech.failure", directMessageSpeechHookFailure);
         for (String key : new String[]{"toolbar_enabled", "long_press_action", "double_tap_action"}) {
             snapshot.putBoolean("feature." + key + ".installed",
                     feedGestureToolsHook != null && feedGestureToolsHook.supports(key));

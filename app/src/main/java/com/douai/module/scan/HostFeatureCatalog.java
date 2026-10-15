@@ -53,7 +53,17 @@ public final class HostFeatureCatalog {
                     "media_account_service", "media_current_user"),
             feature("comment_enhancements", "评论后缀及颜色", "feature.comment_enhancements.installed", "comment_request_factory"),
             feature("comment_voice", "评论语音替换", "feature.comment_voice.installed",
-                    "comment_audio_upload", "comment_uploader_path", "comment_uploader_listener", "comment_audio_notify")
+                    "comment_audio_upload", "comment_uploader_path", "comment_uploader_listener", "comment_audio_notify"),
+            feature("comment_tts", "评论文本转语音", "feature.comment_tts.installed",
+                    "comment_publish_model", "comment_attachment_model", "comment_audio_model",
+                    "comment_publish_model_copy", "comment_attachment_copy",
+                    "comment_publish_submit", "comment_publish_submit_checked"),
+            feature("dm_speech", "私聊文本转语音", "feature.dm_speech.installed",
+                    "dm_speech_send", "dm_speech_input_api", "dm_speech_content", "dm_speech_edit_text",
+                    "dm_speech_send_click", "dm_speech_send_confirm", "dm_speech_conversation",
+                    "dm_speech_audio_create", "dm_speech_audio_destroy", "dm_speech_record_event",
+                    "dm_speech_record_model", "dm_speech_record_state", "dm_speech_upload_enqueue",
+                    "dm_speech_message_local_ext", "dm_speech_message_conversation")
     ));
 
     private HostFeatureCatalog() { }

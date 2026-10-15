@@ -63,7 +63,52 @@ public final class SettingsRepository implements SettingsStore {
     }
 
     public synchronized Map<String, ?> snapshot() {
-        return preferences.getAll();
+        return java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(preferences.getAll()));
+    }
+
+    @Override public synchronized void replaceSnapshot(Map<String, ?> expected, Map<String, ?> replacement) {
+        Map<String, ?> previous = snapshot();
+        if (!previous.equals(expected)) throw new IllegalStateException("设置已发生变化，请重新预览导入文件");
+        SharedPreferences.Editor update = completeEditor(replacement);
+        try (ConfigImportTransaction transaction = ConfigImportTransaction.begin(preferences, previous)) {
+            boolean committed;
+            try { committed = update.commit(); }
+            catch (RuntimeException failure) { committed = false; }
+            if (!committed) {
+                boolean restored;
+                try { restored = completeEditor(previous).commit(); }
+                catch (RuntimeException failure) { restored = false; }
+                throw new IllegalStateException(restored ? "导入写入失败，原配置已恢复" : "导入和恢复写入失败，请保留原备份并检查存储空间");
+            }
+            publishCurrentSettings();
+        }
+    }
+
+    private SharedPreferences.Editor completeEditor(Map<String, ?> values) {
+        // Validate everything before constructing an editor; a bad type cannot partially change memory.
+        for (Object value : values.values()) {
+            if (!(value instanceof Boolean || value instanceof String || value instanceof Integer
+                    || value instanceof Long || value instanceof Float || value instanceof java.util.Set<?>)) {
+                throw new IllegalArgumentException("配置包含不支持的存储类型");
+            }
+            if (value instanceof java.util.Set<?>) for (Object item : (java.util.Set<?>) value) {
+                if (!(item instanceof String)) throw new IllegalArgumentException("配置集合必须为文本");
+            }
+        }
+        SharedPreferences.Editor editor = preferences.edit().clear();
+        values.forEach((key, value) -> {
+            if (value instanceof Boolean) editor.putBoolean(key, (Boolean) value);
+            else if (value instanceof String) editor.putString(key, (String) value);
+            else if (value instanceof Integer) editor.putInt(key, (Integer) value);
+            else if (value instanceof Long) editor.putLong(key, (Long) value);
+            else if (value instanceof Float) editor.putFloat(key, (Float) value);
+            else {
+                java.util.Set<String> strings = new java.util.HashSet<>();
+                for (Object item : (java.util.Set<?>) value) strings.add((String) item);
+                editor.putStringSet(key, strings);
+            }
+        });
+        return editor;
     }
 
     public void setFrameworkConfigSync(FrameworkConfigSync sync) {

@@ -21,4 +21,8 @@ public final class HostSettingsStore implements SettingsStore {
     @Override public void putBoolean(String key, boolean value) { repository.putBoolean(key, value); }
     @Override public void putString(String key, String value) { repository.putString(key, value); }
     @Override public boolean isInHost() { return true; }
+    @Override public java.util.Map<String, ?> snapshot() { return repository.snapshot(); }
+    @Override public void replaceSnapshot(java.util.Map<String, ?> expected, java.util.Map<String, ?> replacement) {
+        repository.replaceSnapshot(expected, replacement);
+    }
 }

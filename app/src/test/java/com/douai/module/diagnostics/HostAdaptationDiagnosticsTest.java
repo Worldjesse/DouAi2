@@ -69,6 +69,115 @@ public final class HostAdaptationDiagnosticsTest {
         assertTrue(HostAdaptationDiagnostics.describe(snapshot).contains("读取失败，未验证"));
     }
 
+    @Test public void speechRuleGapIdentifiesAffectedCapabilityWithoutHidingOtherCapabilities() {
+        Bundle snapshot = new Bundle();
+        snapshot.putBoolean("feature.comment_tts.installed", true);
+        snapshot.putBoolean("auto_like_hook_installed", true);
+        HostAdaptationDiagnostics.append(snapshot, version("40.6.0", 400601L),
+                HostAdaptation.VERIFIED_RULES_FINGERPRINT, report("dm_speech_record_state"));
+
+        assertFalse(snapshot.getBoolean("capability.dm_speech.rules_unique"));
+        assertEquals("dm_speech_record_state=AMBIGUOUS",
+                snapshot.getString("capability.dm_speech.rule_gaps"));
+        assertTrue(snapshot.getBoolean("capability.comment_tts.rules_unique"));
+        assertTrue(snapshot.getBoolean("capability.comment_tts.installed"));
+        assertTrue(snapshot.getBoolean("capability.auto_like.installed"));
+        String detail = HostAdaptationDiagnostics.describe(snapshot);
+        assertTrue(detail.contains("私聊文本转语音规则缺口：dm_speech_record_state=AMBIGUOUS"));
+        assertTrue(detail.contains("实际行为仍需真机确认"));
+    }
+
+    @Test public void speechRuntimeContractFailureIsVisibleDespiteUniqueDexRules() {
+        Bundle snapshot = new Bundle();
+        String fieldFailure = "NoSuchFieldException: fixture.RecordModel.LIZJ";
+        String constructorFailure = "NoSuchMethodException: fixture.Audio(java.io.File,java.util.List,java.lang.Long)";
+        snapshot.putString("feature.dm_speech.failure", fieldFailure);
+        snapshot.putString("feature.comment_tts.failure", constructorFailure);
+        HostAdaptationDiagnostics.append(snapshot, version("40.6.0", 400601L),
+                HostAdaptation.VERIFIED_RULES_FINGERPRINT, report(""));
+
+        assertTrue(snapshot.getBoolean("capability.dm_speech.rules_unique"));
+        assertFalse(snapshot.getBoolean("capability.dm_speech.installed"));
+        assertEquals(fieldFailure, snapshot.getString("capability.dm_speech.installation_failure"));
+        assertEquals(constructorFailure, snapshot.getString("capability.comment_tts.installation_failure"));
+        String detail = HostAdaptationDiagnostics.describe(snapshot);
+        assertTrue(detail.contains("私聊文本转语音：Hook 安装失败：" + fieldFailure));
+        assertTrue(detail.contains("评论文本转语音：Hook 安装失败：" + constructorFailure));
+    }
+
+    @Test public void installedSpeechClearsStaleFailureWithoutClaimingDelivery() {
+        Bundle snapshot = new Bundle();
+        snapshot.putBoolean("feature.dm_speech.installed", true);
+        snapshot.putBoolean("feature.comment_tts.installed", true);
+        snapshot.putString("feature.dm_speech.failure", "obsolete field failure");
+        HostAdaptationDiagnostics.append(snapshot, version("40.6.0", 400601L),
+                HostAdaptation.VERIFIED_RULES_FINGERPRINT, report(""));
+
+        assertTrue(snapshot.getBoolean("capability.dm_speech.installed"));
+        assertTrue(snapshot.getBoolean("capability.comment_tts.installed"));
+        assertEquals("", snapshot.getString("capability.dm_speech.installation_failure"));
+        String detail = HostAdaptationDiagnostics.describe(snapshot);
+        assertFalse(detail.contains("obsolete field failure"));
+        assertFalse(detail.contains("发送成功"));
+        assertTrue(detail.contains("实际行为仍需真机确认"));
+    }
+
+    @Test public void installationFailureRetainsOnlyReflectionContractsAndKnownRuleIds() {
+        assertEquals("NoSuchFieldException: fixture.RecordModel.LIZJ",
+                HostAdaptationDiagnostics.installationFailure(new NoSuchFieldException("fixture.RecordModel.LIZJ")));
+        assertEquals("NoSuchMethodException: fixture.Audio.<init>(java.io.File,java.util.List,java.lang.Long)",
+                HostAdaptationDiagnostics.installationFailure(new NoSuchMethodException(
+                        "fixture.Audio.<init>(java.io.File,java.util.List,java.lang.Long)")));
+        assertEquals("ClassNotFoundException: fixture.RecordState",
+                HostAdaptationDiagnostics.installationFailure(new RuntimeException("untrusted wrapper",
+                        new ClassNotFoundException("fixture.RecordState"))));
+        assertEquals("IllegalStateException: Host rule is not unique: dm_speech_record_model",
+                HostAdaptationDiagnostics.installationFailure(new IllegalStateException(
+                        "Host rule is not unique: dm_speech_record_model")));
+        for (Throwable failure : new Throwable[]{
+                new IllegalStateException("https://example.test/audio?key=private-token user draft"),
+                new NoSuchFieldException("正文 https://example.test/?key=private-token"),
+                new NoSuchMethodException("fixture.Audio(https://example.test/?key=private-token)"),
+                new ClassNotFoundException("Bearer private-token"),
+                new IllegalStateException("Host rule is not unique: secret_api_key")}) {
+            assertEquals(failure.getClass().getSimpleName(), HostAdaptationDiagnostics.installationFailure(failure));
+        }
+    }
+
+    @Test public void installationFailurePreservesAndroidConstructorAndMethodContracts() {
+        assertEquals("NoSuchMethodException: fixture.Audio.<init>(java.io.File,java.util.List,java.lang.Long)",
+                HostAdaptationDiagnostics.installationFailure(new NoSuchMethodException(
+                        "fixture.Audio.<init> [class java.io.File, interface java.util.List, class java.lang.Long]")));
+        assertEquals("NoSuchMethodException: fixture.RecordModel.<init>()",
+                HostAdaptationDiagnostics.installationFailure(new NoSuchMethodException("fixture.RecordModel.<init> []")));
+        assertEquals("NoSuchMethodException: fixture.Audio.send(java.lang.String,int,java.lang.String[],int[][])",
+                HostAdaptationDiagnostics.installationFailure(new NoSuchMethodException(
+                        "fixture.Audio.send [class java.lang.String, int, class [Ljava.lang.String;, class [[I]")));
+    }
+
+    @Test public void installationFailureKeepsAndroidMissingClassButDropsDexPathsAndSensitivePayloads() {
+        String path = "DexPathList[[zip file \"/data/user/0/host/private-token/base.apk\"],"
+                + "nativeLibraryDirectories=[/data/user/0/host/user-draft/" + "private-data/".repeat(30) + "]]";
+        String message = "Didn't find class \"fixture.RecordState\" on path: " + path;
+        String summary = HostAdaptationDiagnostics.installationFailure(new ClassNotFoundException(message));
+        assertEquals("ClassNotFoundException: fixture.RecordState", summary);
+        assertFalse(summary.contains("private-token"));
+        assertFalse(summary.contains("user-draft"));
+        assertFalse(summary.contains("DexPathList"));
+        assertEquals("ClassNotFoundException: fixture.RecordState",
+                HostAdaptationDiagnostics.installationFailure(new RuntimeException("Bearer private-token",
+                        new ClassNotFoundException(message))));
+
+        for (Throwable failure : new Throwable[]{
+                new ClassNotFoundException("Didn't find class \"https://example.test/?key=private-token\" on path: " + path),
+                new ClassNotFoundException("Didn't find class \"fixture.RecordState\" Bearer private-token"),
+                new NoSuchMethodException("fixture.Audio.send [class java.lang.String, Bearer private-token]"),
+                new NoSuchMethodException("fixture.Audio.send [class java.lang.String] private-token"),
+                new NoSuchMethodException("fixture.Audio.send [class https://example.test/?key=private-token]")}) {
+            assertEquals(failure.getClass().getSimpleName(), HostAdaptationDiagnostics.installationFailure(failure));
+        }
+    }
+
     private static Bundle version(String name, long code) {
         PackageInfo info = new PackageInfo();
         info.packageName = HostAdaptation.TARGET_PACKAGE;

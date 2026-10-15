@@ -98,8 +98,8 @@ final class SpeechSettingsDialog implements AutoCloseable {
         if (!third) {
             editable("语音引擎", "tts_engine", "", false);
             editable("语音语言", "tts_language", "zh-CN", false);
-            editable("语速", "tts_rate", "1", false);
-            editable("音调", "tts_pitch", "1", false);
+            editable("语速", SpeechSettings.RATE, "", false);
+            editable("音调", SpeechSettings.PITCH, "", false);
         } else {
             editable("合成 GET", SpeechSettings.GET_TEMPLATE, SpeechSettings.DEFAULT_GET_TEMPLATE, false);
             option("合成参数", parameterNames(settings().getTemplate), this::parameters);
@@ -238,16 +238,19 @@ final class SpeechSettingsDialog implements AutoCloseable {
     }
 
     private void editable(LinearLayout target, String title, String key, String fallback, boolean secret) {
-        String value = store.getString(key, fallback);
+        String value = editableValue(key, fallback);
         option(target, title, secret && !value.isEmpty() ? "已设置" : value, () -> {
             LinearLayout form = form();
-            EditText input = input(form, title, store.getString(key, fallback), secret);
+            EditText input = input(form, title, editableValue(key, fallback), secret);
             AlertDialog editor = builder(title).setView(scroll(form)).setNegativeButton("取消", null)
                     .setPositiveButton("保存", null).create();
             show(editor, null);
             editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
                 String candidate = input.getText().toString().trim();
                 try {
+                    if (SpeechSettings.RATE.equals(key) || SpeechSettings.PITCH.equals(key)) {
+                        candidate = SpeechSettings.validateLocalRateOrPitch(candidate);
+                    }
                     if (SpeechSettings.GET_TEMPLATE.equals(key)) ThirdPartyRequestTemplate.parse(candidate, "{text}", "{voice}");
                     if (SpeechSettings.VOICE_GET_TEMPLATE.equals(key) && !candidate.isEmpty()) ThirdPartyRequestTemplate.parse(candidate, new String[0]);
                     if (SpeechSettings.HEADERS.equals(key) || SpeechSettings.VOICE_HEADERS.equals(key)) {
@@ -262,6 +265,12 @@ final class SpeechSettingsDialog implements AutoCloseable {
                 } catch (Exception failure) { input.setError(error(failure)); }
             });
         });
+    }
+
+    private String editableValue(String key, String fallback) {
+        if (SpeechSettings.RATE.equals(key)) return settings().rateText();
+        if (SpeechSettings.PITCH.equals(key)) return settings().pitchText();
+        return store.getString(key, fallback);
     }
 
     private void parameters() {
@@ -521,7 +530,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
         for (String key : new String[]{SpeechSettings.PROVIDER, SpeechSettings.GET_TEMPLATE, SpeechSettings.HEADERS,
                 SpeechSettings.AUDIO_FIELD, SpeechSettings.VOICE_GET_TEMPLATE, SpeechSettings.VOICE_HEADERS,
                 SpeechSettings.VOICE_LIST_PATH, SpeechSettings.VOICE_ID_PATH, SpeechSettings.VOICE_NAME_PATH,
-                SpeechSettings.SELECTED_VOICE, SpeechSettings.SELECTED_VOICE_NAME, "tts_engine", "tts_language", "tts_rate", "tts_pitch"}) {
+                SpeechSettings.SELECTED_VOICE, SpeechSettings.SELECTED_VOICE_NAME, "tts_engine", "tts_language", SpeechSettings.RATE, SpeechSettings.PITCH}) {
             String value = store.getString(key, null);
             if (value != null) values.put(key, value);
         }

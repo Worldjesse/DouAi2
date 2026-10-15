@@ -122,6 +122,64 @@ public final class SpeechSettingsDialogTest {
         assertEquals(View.GONE, form.findViewWithTag("speech.parameter.fixed.2").getVisibility());
     }
 
+    @Test public void localRateAndPitchRejectInvalidEditsWithoutChangingSavedValues() {
+        store.putString("tts_rate", "1.4");
+        store.putString("tts_pitch", "0.8");
+        open(false);
+        String[][] settings = {{"语速", "tts_rate", "1.4"}, {"音调", "tts_pitch", "0.8"}};
+        for (String[] setting : settings) {
+            AlertDialog editor = option(setting[0]);
+            EditText input = input(editor, setting[0]);
+            for (String invalid : new String[]{"0.49", "2.01", "0", "-1", "invalid", "NaN", "Infinity", "", "1e100"}) {
+                input.setText(invalid);
+                save(editor);
+                assertTrue(setting[0] + " must reject " + invalid, editor.isShowing());
+                assertNotNull(setting[0] + " must explain the valid range", input.getError());
+                assertEquals(setting[2], store.getString(setting[1], ""));
+            }
+            editor.dismiss();
+        }
+    }
+
+    @Test public void localRateAndPitchAcceptBothRangeEndpoints() {
+        open(false);
+        String[][] settings = {{"语速", "tts_rate"}, {"音调", "tts_pitch"}};
+        for (String[] setting : settings) {
+            for (String valid : new String[]{"0.5", "2"}) {
+                AlertDialog editor = option(setting[0]);
+                input(editor, setting[0]).setText(valid);
+                save(editor);
+                assertFalse(editor.isShowing());
+                assertEquals(valid, store.getString(setting[1], ""));
+                assertEquals(valid, value(setting[0]));
+            }
+        }
+    }
+
+    @Test public void legacyLocalValuesDisplayEffectiveValuesWithoutRewritingStoredPreferences() {
+        store.putString("tts_rate", "3");
+        store.putString("tts_pitch", "0.1");
+        open(false);
+        assertEquals("2", value("语速"));
+        assertEquals("0.5", value("音调"));
+        AlertDialog rate = option("语速");
+        assertEquals("2", input(rate, "语速").getText().toString());
+        rate.dismiss();
+        assertEquals("3", store.getString("tts_rate", ""));
+        assertEquals("0.1", store.getString("tts_pitch", ""));
+
+        for (String invalid : new String[]{"invalid", "NaN", "Infinity", ""}) {
+            chooseProvider(1);
+            store.putString("tts_rate", invalid);
+            store.putString("tts_pitch", invalid);
+            chooseProvider(0);
+            assertEquals("1", value("语速"));
+            assertEquals("1", value("音调"));
+            assertEquals(invalid, store.getString("tts_rate", ""));
+            assertEquals(invalid, store.getString("tts_pitch", ""));
+        }
+    }
+
     @Test public void parametersHaveStableTagsAndSupportArbitraryNamesAndTextVoiceBindings() {
         store.putString(SpeechSettings.GET_TEMPLATE, "https://example.com/speak?ID=old&body={text}&speaker={voice}");
         open(true);

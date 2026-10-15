@@ -32,7 +32,7 @@ public final class AutomationImages {
     }
 
     static List<ChatImage> load(List<String> urls, MediaReadCancellation cancellation) throws Exception {
-        cancellation.check();
+        cancellation.start();
         if (urls.size() > ChatCompletionClient.MAX_IMAGES_PER_MESSAGE) throw new IllegalArgumentException("图片最多 4 张");
         List<ChatImage> images = new ArrayList<>();
         for (String source : urls) images.add(fetch(source, cancellation));
@@ -40,7 +40,9 @@ public final class AutomationImages {
     }
 
     static ChatImage fetch(String source) throws Exception {
-        return fetch(source, new MediaReadCancellation());
+        MediaReadCancellation cancellation = new MediaReadCancellation();
+        cancellation.start();
+        return fetch(source, cancellation);
     }
 
     private static ChatImage fetch(String source, MediaReadCancellation cancellation) throws Exception {

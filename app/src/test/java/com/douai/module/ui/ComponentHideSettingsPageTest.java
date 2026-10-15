@@ -63,7 +63,7 @@ public final class ComponentHideSettingsPageTest {
                 "settings.category.DOWNLOAD", "settings.category.AUTOPLAY", "settings.category.AUTO_REPLY",
                 "settings.category.AUTO_COMMENT", "settings.category.COMMENT", "settings.category.STREAK",
                 "settings.category.COMPONENT_HIDE", "settings.category.MESSAGE", "settings.category.SPOOF",
-                "settings.category.EXTENSION", "settings.category.ABOUT"), categoryTags(home));
+                "settings.category.EXTENSION", "settings.category.BACKUP", "settings.category.ABOUT"), categoryTags(home));
         home.scrollTo(0, 200);
 
         findDescription(home, "界面相关").performClick();
@@ -141,7 +141,7 @@ public final class ComponentHideSettingsPageTest {
                 {"BASIC", "基本功能", "3项"},
                 {"INTERFACE", "界面相关", "13项"},
                 {"FILTER", "视频筛选", "14项"},
-                {"DOWNLOAD", "下载相关", "11项"},
+                {"DOWNLOAD", "下载相关", "12项"},
                 {"AUTOPLAY", "自动播放", "6项"},
                 {"AUTO_REPLY", "自动回复", "10项"},
                 {"AUTO_COMMENT", "自动评论", "8项"},
@@ -151,6 +151,7 @@ public final class ComponentHideSettingsPageTest {
                 {"MESSAGE", "消息管理", "6项"},
                 {"SPOOF", "本地伪装", "6项"},
                 {"EXTENSION", "扩展功能", "2项"},
+                {"BACKUP", "配置备份", "2项"},
                 {"ABOUT", "关于", ""}
         };
         for (String[] item : expected) {

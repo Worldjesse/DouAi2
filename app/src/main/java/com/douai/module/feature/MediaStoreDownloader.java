@@ -4,6 +4,7 @@ import android.app.DownloadManager;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
+import android.database.Cursor;
 import android.net.Uri;
 import android.media.MediaScannerConnection;
 import android.os.Build;
@@ -19,23 +20,19 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
-import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /** User-initiated media saving through MediaStore, with DownloadManager fallback before API 29. */
 public final class MediaStoreDownloader {
-    private static final ThreadPoolExecutor EXECUTOR = new ThreadPoolExecutor(2, 2, 0L,
-            TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(16));
-    private static final BoundedMediaQueue QUEUE = new BoundedMediaQueue(EXECUTOR);
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final long MAX_DOWNLOAD_BYTES = 512L * 1024L * 1024L;
+    static DownloadTransfer.Connections connections = uri -> (HttpURLConnection) uri.toURL().openConnection();
+    interface OutputStreams { OutputStream open(ContentResolver resolver, Uri target) throws Exception; }
+    static OutputStreams outputs = (resolver, target) -> resolver.openOutputStream(target, "w");
 
     private MediaStoreDownloader() { }
 
@@ -94,42 +91,34 @@ public final class MediaStoreDownloader {
         if (context == null) context = sourceContext;
         Context targetContext = context;
         String key = url + '\n' + fileName + '\n' + collection + '\n' + tree;
-        if (!QUEUE.submit(key, () -> {
-            if (tree == null || tree.isEmpty()) save(targetContext, url, fileName, mimeType, directory, collection, log);
-            else saveDocument(targetContext, url, fileName, mimeType, tree, log);
-        })) {
+        if (DownloadTasks.submit(targetContext, key, fileName, transfer -> {
+            transfer.file(fileName, 1);
+            return tree == null || tree.isEmpty()
+                    ? save(targetContext, url, fileName, mimeType, directory, collection, transfer)
+                    : saveDocument(targetContext, url, fileName, mimeType, tree, transfer);
+        }, log) == null) {
             safeLog(log, "Media save request was deduplicated or the queue is full");
             toast(sourceContext, "媒体正在保存或下载队列已满");
             return false;
         }
-        toast(sourceContext, "正在保存媒体");
+        toast(sourceContext, "已加入下载任务，可在设置中查看进度或取消");
         return true;
     }
 
-    private static void save(Context context, String mediaUrl, String fileName,
+    private static String save(Context context, String mediaUrl, String fileName,
                              String mimeType, String directory, Uri collection,
-                             Consumer<String> log) {
+                             DownloadTransfer transfer) throws Exception {
+        if (Build.VERSION.SDK_INT < 29) {
+            HttpURLConnection check = openBundleMedia(mediaUrl, transfer);
+            close(check, transfer);
+            return saveWithDownloadManager(context, mediaUrl, fileName, mimeType, directory, transfer);
+        }
         Uri target = null;
         HttpURLConnection connection = null;
         try {
-            connection = (HttpURLConnection) new URL(mediaUrl).openConnection();
-            connection.setConnectTimeout(15_000);
-            connection.setReadTimeout(30_000);
-            connection.setInstanceFollowRedirects(true);
-            connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android) DouAi");
-            int status = connection.getResponseCode();
-            if (status < 200 || status >= 300) throw new IllegalStateException("HTTP " + status);
-            String responseType = connection.getContentType();
-            if (responseType != null && (responseType.contains("text/html")
-                    || responseType.contains("application/json"))) {
-                throw new IllegalStateException("下载地址返回了非媒体内容");
-            }
-            if (connection.getContentLengthLong() > MAX_DOWNLOAD_BYTES) {
-                throw new IllegalStateException("媒体文件过大");
-            }
+            connection = openBundleMedia(mediaUrl, transfer);
 
             ContentResolver resolver = context.getContentResolver();
-            if (Build.VERSION.SDK_INT >= 29) {
                 ContentValues values = new ContentValues();
                 values.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
                 values.put(MediaStore.MediaColumns.MIME_TYPE, mimeType);
@@ -137,25 +126,17 @@ public final class MediaStoreDownloader {
                 values.put(MediaStore.MediaColumns.IS_PENDING, 1);
                 target = resolver.insert(collection, values);
                 if (target == null) throw new IllegalStateException("MediaStore 无法创建记录");
-                copyResponse(connection, resolver, target);
+                copyResponse(connection, resolver, target, transfer);
+                transfer.phase("正在保存");
+                transfer.check();
                 ContentValues completed = new ContentValues();
                 completed.put(MediaStore.MediaColumns.IS_PENDING, 0);
-                resolver.update(target, completed, null, null);
+                if (resolver.update(target, completed, null, null) < 1) throw new IllegalStateException("无法完成文件保存");
+                transfer.fileDone();
+                transfer.complete();
                 target = null;
-                toast(context, "媒体已保存到 " + directory + "/DouAi");
-            } else {
-                DownloadManager manager = (DownloadManager) context.getSystemService(Context.DOWNLOAD_SERVICE);
-                if (manager == null) throw new IllegalStateException("系统下载服务不可用");
-                manager.enqueue(new DownloadManager.Request(Uri.parse(mediaUrl))
-                        .setTitle(fileName)
-                        .setMimeType(mimeType)
-                        .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                        .setDestinationInExternalPublicDir(
-                                directory,
-                                "DouAi/" + fileName));
-                toast(context, "已加入系统下载队列");
-            }
-        } catch (Throwable failure) {
+                return "媒体已保存到 " + directory + "/DouAi";
+        } catch (Exception failure) {
             if (target != null) {
                 try {
                     context.getContentResolver().delete(target, null, null);
@@ -163,19 +144,19 @@ public final class MediaStoreDownloader {
                     // Best-effort cleanup of an incomplete MediaStore row.
                 }
             }
-            safeLog(log, "Could not save media: " + failure.getMessage());
-            toast(context, "媒体保存失败：" + safeMessage(failure));
+            transfer.check();
+            throw failure;
         } finally {
-            if (connection != null) connection.disconnect();
+            close(connection, transfer);
         }
     }
 
     private static void copyResponse(HttpURLConnection connection, ContentResolver resolver,
-                                     Uri target) throws Exception {
-        try (InputStream input = connection.getInputStream();
-             OutputStream output = resolver.openOutputStream(target, "w")) {
-            if (output == null) throw new IllegalStateException("MediaStore 输出流不可用");
-            copyMedia(input, output, connection.getContentLengthLong());
+                                     Uri target, DownloadTransfer transfer) throws Exception {
+        try (DownloadTransfer.Streams streams = transfer.streams()) {
+            InputStream input = streams.add(connection.getInputStream());
+            OutputStream output = streams.add(outputs.open(resolver, target));
+            copyMedia(input, output, connection.getContentLengthLong(), transfer);
         }
     }
 
@@ -185,14 +166,20 @@ public final class MediaStoreDownloader {
     }
 
     static void saveThirdPartyBundle(Context context, ThirdPartyDownloadPlan plan, String tree) throws Exception {
+        saveThirdPartyBundle(context, plan, tree, new DownloadTransfer());
+    }
+
+    static void saveThirdPartyBundle(Context context, ThirdPartyDownloadPlan plan,
+                                     String tree, DownloadTransfer transfer) throws Exception {
+        transfer.start();
         String folder = plan.baseName + "_" + System.currentTimeMillis() + "_"
                 + Long.toHexString(System.nanoTime());
         if (tree != null && !tree.isEmpty()) {
-            saveDocumentBundle(context, plan, tree, folder);
+            saveDocumentBundle(context, plan, tree, folder, transfer);
             return;
         }
         if (Build.VERSION.SDK_INT < 29) {
-            saveLegacyBundle(context, plan, folder);
+            saveLegacyBundle(context, plan, folder, transfer);
             return;
         }
         ContentResolver resolver = context.getContentResolver();
@@ -200,58 +187,66 @@ public final class MediaStoreDownloader {
         String relativePath = Environment.DIRECTORY_DOWNLOADS + "/DouAi/" + folder;
         try {
             for (ThirdPartyDownloadPlan.Asset asset : plan.assets) {
-                HttpURLConnection connection = openBundleMedia(asset.url);
+                transfer.file(asset.name, plan.assets.size() + 1);
+                HttpURLConnection connection = openBundleMedia(asset.url, transfer);
                 try {
                     Uri target = createBundleRow(resolver, relativePath, asset.name, asset.mimeType);
                     created.add(target);
-                    copyResponse(connection, resolver, target);
-                } finally { connection.disconnect(); }
+                    copyResponse(connection, resolver, target, transfer);
+                    transfer.fileDone();
+                } finally { close(connection, transfer); }
             }
+            transfer.file(plan.baseName + ".txt", plan.assets.size() + 1);
             Uri metadata = createBundleRow(resolver, relativePath, plan.baseName + ".txt", "text/plain");
             created.add(metadata);
-            try (OutputStream output = resolver.openOutputStream(metadata, "w")) {
-                if (output == null) throw new IllegalStateException("作品信息输出流不可用");
-                output.write(plan.metadata.getBytes(StandardCharsets.UTF_8));
+            try (DownloadTransfer.Streams streams = transfer.streams()) {
+                OutputStream output = streams.add(outputs.open(resolver, metadata));
+                writeMetadata(output, plan.metadata, transfer);
             }
+            transfer.fileDone();
+            transfer.phase("正在保存");
             ContentValues completed = new ContentValues();
             completed.put(MediaStore.MediaColumns.IS_PENDING, 0);
             for (Uri target : created) {
+                transfer.check();
                 if (resolver.update(target, completed, null, null) < 1) {
                     throw new IllegalStateException("无法完成文件保存");
                 }
             }
+            transfer.complete();
         } catch (Exception failure) {
             for (Uri target : created) {
                 try { resolver.delete(target, null, null); }
                 catch (RuntimeException ignored) { }
             }
-            throw failure;
+            transfer.check(); throw failure;
         }
     }
 
-    private static void saveDocument(Context context, String url, String name, String mime,
-                                      String tree, Consumer<String> log) {
+    private static String saveDocument(Context context, String url, String name, String mime,
+                                      String tree, DownloadTransfer transfer) throws Exception {
         Uri target = null;
         HttpURLConnection connection = null;
         try {
             ContentResolver resolver = context.getContentResolver();
             Uri root = DownloadDocumentTree.root(tree);
-            connection = openBundleMedia(url);
+            connection = openBundleMedia(url, transfer);
             target = DownloadDocumentTree.create(resolver, root, mime, name);
-            copyResponse(connection, resolver, target);
+            copyResponse(connection, resolver, target, transfer);
+            transfer.fileDone();
+            transfer.complete();
             target = null;
-            toast(context, "媒体已保存到所选目录");
+            return "媒体已保存到所选目录";
         } catch (Exception failure) {
             DownloadDocumentTree.delete(context.getContentResolver(), target);
-            safeLog(log, "Custom media save failed: " + failure.getClass().getSimpleName());
-            toast(context, "所选目录保存失败，请检查目录权限或重新选择");
+            transfer.check(); throw failure;
         } finally {
-            if (connection != null) connection.disconnect();
+            close(connection, transfer);
         }
     }
 
     private static void saveDocumentBundle(Context context, ThirdPartyDownloadPlan plan,
-                                           String tree, String folder) throws Exception {
+                                           String tree, String folder, DownloadTransfer transfer) throws Exception {
         ContentResolver resolver = context.getContentResolver();
         Uri root = DownloadDocumentTree.root(tree);
         Uri directory = DownloadDocumentTree.create(resolver, root,
@@ -259,23 +254,28 @@ public final class MediaStoreDownloader {
         List<Uri> created = new ArrayList<>();
         try {
             for (ThirdPartyDownloadPlan.Asset asset : plan.assets) {
-                HttpURLConnection connection = openBundleMedia(asset.url);
+                transfer.file(asset.name, plan.assets.size() + 1);
+                HttpURLConnection connection = openBundleMedia(asset.url, transfer);
                 try {
                     Uri target = DownloadDocumentTree.create(resolver, directory, asset.mimeType, asset.name);
                     created.add(target);
-                    copyResponse(connection, resolver, target);
-                } finally { connection.disconnect(); }
+                    copyResponse(connection, resolver, target, transfer);
+                    transfer.fileDone();
+                } finally { close(connection, transfer); }
             }
+            transfer.file(plan.baseName + ".txt", plan.assets.size() + 1);
             Uri metadata = DownloadDocumentTree.create(resolver, directory, "text/plain", plan.baseName + ".txt");
             created.add(metadata);
-            try (OutputStream output = resolver.openOutputStream(metadata, "w")) {
-                if (output == null) throw new IllegalStateException("无法写入作品信息");
-                output.write(plan.metadata.getBytes(StandardCharsets.UTF_8));
+            try (DownloadTransfer.Streams streams = transfer.streams()) {
+                OutputStream output = streams.add(outputs.open(resolver, metadata));
+                writeMetadata(output, plan.metadata, transfer);
             }
+            transfer.fileDone();
+            transfer.complete();
         } catch (Exception failure) {
             for (Uri target : created) DownloadDocumentTree.delete(resolver, target);
             DownloadDocumentTree.delete(resolver, directory);
-            throw failure;
+            transfer.check(); throw failure;
         }
     }
 
@@ -291,7 +291,8 @@ public final class MediaStoreDownloader {
         return result;
     }
 
-    private static void saveLegacyBundle(Context context, ThirdPartyDownloadPlan plan, String folder) throws Exception {
+    private static void saveLegacyBundle(Context context, ThirdPartyDownloadPlan plan, String folder,
+                                         DownloadTransfer transfer) throws Exception {
         File parent = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "DouAi");
         if (!parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) {
             throw new IllegalStateException("无法创建下载目录");
@@ -301,37 +302,49 @@ public final class MediaStoreDownloader {
         List<File> created = new ArrayList<>();
         try {
             for (ThirdPartyDownloadPlan.Asset asset : plan.assets) {
-                HttpURLConnection connection = openBundleMedia(asset.url);
+                transfer.file(asset.name, plan.assets.size() + 1);
+                HttpURLConnection connection = openBundleMedia(asset.url, transfer);
                 try {
                     File target = new File(directory, asset.name);
+                    Files.createFile(target.toPath());
                     created.add(target);
-                    try (InputStream input = connection.getInputStream();
-                         OutputStream output = new FileOutputStream(target)) {
-                        copyMedia(input, output, connection.getContentLengthLong());
+                    try (DownloadTransfer.Streams streams = transfer.streams()) {
+                        InputStream input = streams.add(connection.getInputStream());
+                        OutputStream output = streams.add(new FileOutputStream(target));
+                        copyMedia(input, output, connection.getContentLengthLong(), transfer);
                     }
-                } finally { connection.disconnect(); }
+                    transfer.fileDone();
+                } finally { close(connection, transfer); }
             }
+            transfer.file(plan.baseName + ".txt", plan.assets.size() + 1);
             File metadata = new File(directory, plan.baseName + ".txt");
+            Files.createFile(metadata.toPath());
             created.add(metadata);
-            try (OutputStream output = new FileOutputStream(metadata)) {
-                output.write(plan.metadata.getBytes(StandardCharsets.UTF_8));
+            try (DownloadTransfer.Streams streams = transfer.streams()) {
+                OutputStream output = streams.add(new FileOutputStream(metadata));
+                writeMetadata(output, plan.metadata, transfer);
             }
+            transfer.fileDone();
+            transfer.complete();
         } catch (Exception failure) {
             for (File file : created) file.delete();
             directory.delete();
-            throw failure;
+            transfer.check(); throw failure;
         }
         String[] paths = new String[created.size()];
         for (int i = 0; i < paths.length; i++) paths[i] = created.get(i).getAbsolutePath();
-        MediaScannerConnection.scanFile(context, paths, null, null);
+        try { MediaScannerConnection.scanFile(context, paths, null, null); }
+        catch (RuntimeException ignored) { /* Completed files remain saved if gallery indexing is unavailable. */ }
     }
 
-    private static HttpURLConnection openBundleMedia(String url) throws Exception {
+    private static HttpURLConnection openBundleMedia(String url, DownloadTransfer transfer) throws Exception {
+        transfer.check();
         if (!isHttpUrl(url)) throw new IllegalArgumentException("下载地址无效");
-        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        HttpURLConnection connection = connections.open(URI.create(url));
         try {
-            connection.setConnectTimeout(15_000);
-            connection.setReadTimeout(30_000);
+            transfer.attach(connection);
+            connection.setConnectTimeout(transfer.timeout(15_000));
+            connection.setReadTimeout(transfer.timeout(30_000));
             connection.setInstanceFollowRedirects(true);
             connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android) DouAi");
             int status = connection.getResponseCode();
@@ -345,24 +358,79 @@ public final class MediaStoreDownloader {
                 }
             }
             if (connection.getContentLengthLong() > MAX_DOWNLOAD_BYTES) throw new IllegalStateException("媒体文件过大");
+            transfer.size(connection.getContentLengthLong());
+            transfer.check();
             return connection;
         } catch (Exception failure) {
-            connection.disconnect();
-            throw failure;
+            close(connection, transfer);
+            transfer.check(); throw failure;
         }
     }
 
-    private static void copyMedia(InputStream input, OutputStream output, long expected) throws Exception {
+    private static void copyMedia(InputStream input, OutputStream output, long expected,
+                                   DownloadTransfer transfer) throws Exception {
         long copied = 0;
         byte[] buffer = new byte[32 * 1024];
         int count;
         while ((count = input.read(buffer)) != -1) {
+            transfer.check();
             copied += count;
             if (copied > MAX_DOWNLOAD_BYTES) throw new IllegalStateException("媒体文件过大");
             output.write(buffer, 0, count);
+            transfer.advance(count);
         }
+        transfer.check();
         if (copied == 0) throw new IllegalStateException("下载内容为空");
         if (expected >= 0 && copied != expected) throw new IllegalStateException("媒体文件未下载完整");
+    }
+
+    private static void writeMetadata(OutputStream output, String text, DownloadTransfer transfer) throws Exception {
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        transfer.size(bytes.length);
+        transfer.check(); output.write(bytes); transfer.advance(bytes.length);
+    }
+
+    private static void close(HttpURLConnection connection, DownloadTransfer transfer) {
+        if (connection == null) return;
+        transfer.detach(connection);
+        try { connection.disconnect(); } catch (RuntimeException ignored) { }
+    }
+
+    private static String saveWithDownloadManager(Context context, String url, String name, String mime,
+                                                   String directory, DownloadTransfer transfer) throws Exception {
+        DownloadManager manager = (DownloadManager) context.getSystemService(Context.DOWNLOAD_SERVICE);
+        if (manager == null) throw new IllegalStateException("系统下载服务不可用");
+        transfer.check();
+        long id = manager.enqueue(new DownloadManager.Request(Uri.parse(url)).setTitle(name).setMimeType(mime)
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalPublicDir(directory, "DouAi/" + name));
+        boolean completed = false;
+        toast(context, "已加入系统下载队列");
+        transfer.onStop(() -> manager.remove(id));
+        try {
+            while (true) {
+                transfer.check();
+                try (Cursor cursor = manager.query(new DownloadManager.Query().setFilterById(id))) {
+                    if (cursor == null || !cursor.moveToFirst()) throw new IllegalStateException("系统下载任务已移除");
+                    long bytes = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR));
+                    long total = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES));
+                    if (bytes > MAX_DOWNLOAD_BYTES || total > MAX_DOWNLOAD_BYTES) throw new IllegalStateException("媒体文件过大");
+                    transfer.size(total);
+                    transfer.advance(Math.max(0, bytes - transfer.bytes));
+                    int status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
+                    if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                        if (bytes <= 0 || total >= 0 && bytes != total) throw new IllegalStateException("系统下载文件不完整");
+                        transfer.fileDone(); transfer.complete(); completed = true;
+                        return "媒体已保存到 " + directory + "/DouAi";
+                    }
+                    if (status == DownloadManager.STATUS_FAILED) throw new IllegalStateException("系统下载失败");
+                }
+                Thread.sleep(250);
+            }
+        } finally {
+            transfer.onStop(null);
+            if (!completed) manager.remove(id);
+        }
     }
 
     private static void toast(Context context, String message) {

@@ -60,12 +60,123 @@ public final class HostAdaptationDiagnostics {
             String prefix = "capability." + feature.id;
             snapshot.putString(prefix + ".rule_gaps", missing.toString());
             snapshot.putBoolean(prefix + ".rules_unique", missing.length() == 0);
-            snapshot.putBoolean(prefix + ".installed", snapshot.getBoolean(feature.installedKey));
+            boolean installed = snapshot.getBoolean(feature.installedKey);
+            snapshot.putBoolean(prefix + ".installed", installed);
+            snapshot.putString(prefix + ".installation_failure", installed ? ""
+                    : snapshot.getString("feature." + feature.id + ".failure", ""));
             if (missing.length() > 0) gaps++;
-            if (!snapshot.getBoolean(feature.installedKey)) uninstalled++;
+            if (!installed) uninstalled++;
         }
         snapshot.putInt("host_adaptation_feature_rule_gaps", gaps);
         snapshot.putInt("host_adaptation_features_uninstalled", uninstalled);
+    }
+
+    /** Installation diagnostics retain contract names, never arbitrary exception payloads. */
+    public static String installationFailure(Throwable failure) {
+        if (failure == null) return "";
+        Throwable cause = failure;
+        for (int depth = 0; depth < 8 && cause.getCause() != null && cause.getCause() != cause; depth++) {
+            cause = cause.getCause();
+        }
+        String type = cause.getClass().getSimpleName();
+        String message = cause.getMessage();
+        String contract = null;
+        if (cause instanceof ClassNotFoundException && message != null) {
+            contract = missingClassContract(message);
+        } else if (message != null && message.length() <= 256) {
+            if (cause instanceof NoSuchFieldException && isJavaName(message)) {
+                contract = message;
+            } else if (cause instanceof NoSuchMethodException) {
+                contract = isMethodContract(message) ? message : androidMethodContract(message);
+            } else if (cause instanceof IllegalStateException) {
+                String prefix = "Host rule is not unique: ";
+                if (message.startsWith(prefix)) {
+                    String rule = message.substring(prefix.length());
+                    for (HostFeatureCatalog.Feature feature : HostFeatureCatalog.getFeatures()) {
+                        if (feature.rules.contains(rule)) { contract = prefix + rule; break; }
+                    }
+                }
+            }
+        }
+        return contract == null ? type : type + ": " + contract;
+    }
+
+    private static String missingClassContract(String message) {
+        if (message.length() <= 256 && isJavaName(message)) return message;
+        String prefix = "Didn't find class \"";
+        if (!message.startsWith(prefix)) return null;
+        int end = message.indexOf("\" on path: ", prefix.length());
+        if (end < 0 || end - prefix.length() > 256) return null;
+        String name = message.substring(prefix.length(), end);
+        // Android's DexPathList contains local paths; retain only the validated missing class.
+        return isJavaName(name) ? name : null;
+    }
+
+    private static String androidMethodContract(String message) {
+        int arguments = message.indexOf(" [");
+        if (arguments < 0 || !message.endsWith("]")) return null;
+        String member = message.substring(0, arguments);
+        if (!isJavaName(member.replace(".<init>", ".constructor"))) return null;
+        String parameters = message.substring(arguments + 2, message.length() - 1);
+        StringBuilder contract = new StringBuilder(member).append('(');
+        if (!parameters.isEmpty()) {
+            for (String parameter : parameters.split(",", -1)) {
+                String type = androidParameterType(parameter.trim());
+                if (type == null) return null;
+                if (contract.charAt(contract.length() - 1) != '(') contract.append(',');
+                contract.append(type);
+            }
+        }
+        return contract.append(')').toString();
+    }
+
+    private static String androidParameterType(String value) {
+        if (value.startsWith("class ")) value = value.substring(6);
+        else if (value.startsWith("interface ")) value = value.substring(10);
+        else return value.matches("boolean|byte|char|short|int|long|float|double") ? value : null;
+        int dimensions = 0;
+        while (dimensions < value.length() && value.charAt(dimensions) == '[') dimensions++;
+        if (dimensions == 0) return isJavaName(value) ? value : null;
+        String element = value.substring(dimensions);
+        if (element.startsWith("L") && element.endsWith(";")) {
+            element = element.substring(1, element.length() - 1);
+            if (!isJavaName(element)) return null;
+        } else {
+            switch (element) {
+                case "Z": element = "boolean"; break;
+                case "B": element = "byte"; break;
+                case "C": element = "char"; break;
+                case "S": element = "short"; break;
+                case "I": element = "int"; break;
+                case "J": element = "long"; break;
+                case "F": element = "float"; break;
+                case "D": element = "double"; break;
+                default: return null;
+            }
+        }
+        StringBuilder type = new StringBuilder(element);
+        for (int index = 0; index < dimensions; index++) type.append("[]");
+        return type.toString();
+    }
+
+    private static boolean isJavaName(String value) {
+        return value.matches("[A-Za-z_$][A-Za-z0-9_$]*(\\.[A-Za-z_$][A-Za-z0-9_$]*)*");
+    }
+
+    private static boolean isMethodContract(String value) {
+        int arguments = value.indexOf('(');
+        if (arguments < 0) return isJavaName(value);
+        if (!value.endsWith(")") || !isJavaName(value.substring(0, arguments).replace(".<init>", ".constructor"))) {
+            return false;
+        }
+        String parameters = value.substring(arguments + 1, value.length() - 1);
+        if (parameters.isEmpty()) return true;
+        for (String parameter : parameters.split(",", -1)) {
+            String type = parameter.trim();
+            while (type.endsWith("[]")) type = type.substring(0, type.length() - 2);
+            if (!isJavaName(type)) return false;
+        }
+        return true;
     }
 
     public static String describe(Bundle snapshot) {
@@ -91,7 +202,11 @@ public final class HostAdaptationDiagnostics {
             String gaps = snapshot.getString(prefix + ".rule_gaps", "");
             if (!gaps.isEmpty()) {
                 detail.append('\n').append(feature.label).append("规则缺口：").append(gaps);
-            } else if (snapshot.containsKey(prefix + ".installed")
+            }
+            String failure = snapshot.getString(prefix + ".installation_failure", "");
+            if (!failure.isEmpty()) {
+                detail.append('\n').append(feature.label).append("：Hook 安装失败：").append(failure);
+            } else if (gaps.isEmpty() && snapshot.containsKey(prefix + ".installed")
                     && !snapshot.getBoolean(prefix + ".installed")) {
                 detail.append('\n').append(feature.label).append("：规则唯一命中，Hook 未安装。");
             }

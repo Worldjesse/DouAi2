@@ -17,6 +17,7 @@ final class MediaReadCancellation {
     private final AtomicReference<HttpURLConnection> activeConnection = new AtomicReference<>();
     private volatile long deadlineNanos;
     private volatile boolean cancelled;
+    private volatile boolean timedOut;
 
     MediaReadCancellation() { this(DEFAULT_TIMEOUT_MILLIS); }
 
@@ -44,6 +45,7 @@ final class MediaReadCancellation {
     }
 
     void check() throws Exception {
+        if (timedOut) throw new TimeoutException("媒体读取超过 60 秒");
         if (Thread.currentThread().isInterrupted()) {
             cancel();
             throw new CancellationException("媒体读取已取消");
@@ -51,6 +53,7 @@ final class MediaReadCancellation {
         if (cancelled) throw new CancellationException("媒体读取已取消");
         long deadline = deadlineNanos;
         if (deadline != 0 && clock.getAsLong() - deadline >= 0) {
+            timedOut = true;
             cancel();
             throw new TimeoutException("媒体读取超过 60 秒");
         }
