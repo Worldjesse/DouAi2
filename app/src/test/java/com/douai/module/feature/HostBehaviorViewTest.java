@@ -5,7 +5,9 @@ import android.content.Context;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Bundle;
 import android.view.View;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -19,6 +21,7 @@ import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
+import org.robolectric.android.controller.ActivityController;
 import org.robolectric.annotation.Config;
 
 import java.lang.reflect.Method;
@@ -39,9 +42,17 @@ import static org.junit.Assert.assertTrue;
 @Config(sdk = 34)
 public final class HostBehaviorViewTest {
     public static final class Panel {
+        static final int TOP_SPACE_ID = 2131410054;
+        static final int BOTTOM_SPACE_ID = 2131364845;
         public View i = new View(RuntimeEnvironment.getApplication());
         public View j = new View(RuntimeEnvironment.getApplication());
-        public void spaces() { }
+        public int createdRoots, spaceUpdates;
+        public void spaces() { spaceUpdates++; }
+        public void onViewCreated(View root, Bundle state) {
+            createdRoots++;
+            i = root.findViewById(TOP_SPACE_ID);
+            j = root.findViewById(BOTTOM_SPACE_ID);
+        }
     }
 
     public static final class Profile {
@@ -120,6 +131,165 @@ public final class HostBehaviorViewTest {
         hooks.close();
         assertEquals(View.INVISIBLE, panel.i.getVisibility());
         assertEquals(View.VISIBLE, panel.j.getVisibility());
+    }
+
+    @Test public void blackSpacesRecoverWhenTheSameFeedRootAndBottomViewReattachWithoutActivityResume() throws Throwable {
+        try (ActivityController<Activity> activity = Robolectric.buildActivity(Activity.class).setup()) {
+            FrameLayout content = new FrameLayout(activity.get());
+            FrameLayout feedRoot = new FrameLayout(activity.get());
+            content.addView(feedRoot);
+            activity.get().setContentView(content);
+            Panel panel = new Panel();
+            panel.i = new View(activity.get());
+            panel.j = new View(activity.get());
+            panel.j.setBackgroundColor(Color.BLACK);
+            feedRoot.addView(panel.i, new FrameLayout.LayoutParams(-1, 24));
+            feedRoot.addView(panel.j, new FrameLayout.LayoutParams(-1, 56));
+            Harness harness = new Harness();
+            Method spaces = Panel.class.getMethod("spaces");
+            HostBehaviorHooks hooks = HostBehaviorHooks.install(harness.framework, report(Map.of(
+                    "adv_ui_black_spaces", spaces)), getClass().getClassLoader(), null,
+                    new LocalOptions(Map.of("hide_video_black_edges", true)), ignored -> { });
+            try {
+                assertTrue(feedRoot.isAttachedToWindow());
+                harness.invoke(spaces, panel);
+                assertEquals(View.GONE, panel.j.getVisibility());
+
+                content.removeView(feedRoot);
+                assertFalse(feedRoot.isAttachedToWindow());
+                panel.j.setVisibility(View.VISIBLE);
+                content.addView(feedRoot);
+                assertTrue(feedRoot.isAttachedToWindow());
+
+                // No settings refresh, panel hook invocation, Activity resume, or private apply.
+                // Recovery must come from the attached tree's actual rendering callback.
+                feedRoot.getViewTreeObserver().dispatchOnPreDraw();
+                assertEquals("the reused feed's bottom black space must be hidden after reattachment",
+                        View.GONE, panel.j.getVisibility());
+                assertEquals("switch recovery must not depend on rerunning handleTopAndBottomSpace", 1, harness.proceeded);
+            } finally {
+                hooks.close();
+            }
+        }
+    }
+
+    @Test public void blackSpacesBindRecreatedPanelRootBeforeItsFirstSpaceUpdate() throws Throwable {
+        try (ActivityController<Activity> activity = Robolectric.buildActivity(Activity.class).setup()) {
+            FrameLayout content = new FrameLayout(activity.get());
+            activity.get().setContentView(content);
+            Harness harness = new Harness();
+            Method spaces = Panel.class.getMethod("spaces");
+            Method created = Panel.class.getMethod("onViewCreated", View.class, Bundle.class);
+            HostBehaviorHooks hooks = HostBehaviorHooks.install(harness.framework, report(Map.of(
+                    "adv_ui_black_spaces", spaces)), getClass().getClassLoader(), null,
+                    new LocalOptions(Map.of("hide_video_black_edges", true)), ignored -> { });
+            Panel panel = new Panel();
+            try {
+                LinearLayout originalRoot = panelRoot(activity.get());
+                content.addView(originalRoot);
+                harness.invokeHost(created, panel, originalRoot, null);
+                harness.invokeHost(spaces, panel);
+                View originalBottom = panel.j;
+                assertEquals(View.GONE, originalBottom.getVisibility());
+
+                // Host 40.6.0 onViewCreated resolves the replacement root's i/j fields.
+                // Dispatch that real lifecycle method without a second LLLFF or Activity resume.
+                content.removeView(originalRoot);
+                LinearLayout replacement = panelRoot(activity.get());
+                content.addView(replacement);
+                harness.invokeHost(created, panel, replacement, null);
+                assertSame(replacement.findViewById(Panel.BOTTOM_SPACE_ID), panel.j);
+                assertFalse(originalBottom == panel.j);
+                assertEquals(2, panel.createdRoots);
+                assertEquals(1, panel.spaceUpdates);
+                replacement.getViewTreeObserver().dispatchOnPreDraw();
+                assertEquals("onViewCreated must bind the replacement root before LLLFF happens again",
+                        View.GONE, panel.j.getVisibility());
+            } finally { hooks.close(); }
+        }
+    }
+
+    @Test public void disablingOrClosingBlackSpaceHooksLeavesNewPanelRootsHostOwned() throws Throwable {
+        for (boolean close : new boolean[]{false, true}) {
+            try (ActivityController<Activity> activity = Robolectric.buildActivity(Activity.class).setup()) {
+                FrameLayout content = new FrameLayout(activity.get());
+                activity.get().setContentView(content);
+                Harness harness = new Harness();
+                Method spaces = Panel.class.getMethod("spaces");
+                Method created = Panel.class.getMethod("onViewCreated", View.class, Bundle.class);
+                HostBehaviorHooks hooks = HostBehaviorHooks.install(harness.framework, report(Map.of(
+                        "adv_ui_black_spaces", spaces)), getClass().getClassLoader(), null,
+                        new LocalOptions(Map.of("hide_video_black_edges", true)), ignored -> { });
+                try {
+                    Panel panel = new Panel();
+                    LinearLayout first = panelRoot(activity.get());
+                    content.addView(first);
+                    harness.invokeHost(created, panel, first, null);
+                    harness.invokeHost(spaces, panel);
+                    assertEquals(View.GONE, panel.j.getVisibility());
+                    if (close) hooks.close(); else hooks.setOptions(new LocalOptions(Collections.emptyMap()));
+                    content.removeView(first);
+                    LinearLayout replacement = panelRoot(activity.get());
+                    content.addView(replacement);
+                    harness.invokeHost(created, panel, replacement, null);
+                    replacement.getViewTreeObserver().dispatchOnPreDraw();
+                    assertEquals(View.VISIBLE, panel.i.getVisibility());
+                    assertEquals(View.VISIBLE, panel.j.getVisibility());
+                } finally { hooks.close(); }
+            }
+        }
+    }
+
+    @Test public void blackSpacePreDrawRecoveryConvergesThroughTheNextNormalLinearLayout() throws Throwable {
+        try (ActivityController<Activity> activity = Robolectric.buildActivity(Activity.class).setup()) {
+            LinearLayout column = panelRoot(activity.get());
+            activity.get().setContentView(column);
+            Harness harness = new Harness();
+            Method spaces = Panel.class.getMethod("spaces");
+            Method created = Panel.class.getMethod("onViewCreated", View.class, Bundle.class);
+            HostBehaviorHooks hooks = HostBehaviorHooks.install(harness.framework, report(Map.of(
+                    "adv_ui_black_spaces", spaces)), getClass().getClassLoader(), null,
+                    new LocalOptions(Map.of("hide_video_black_edges", true)), ignored -> { });
+            try {
+                Panel panel = new Panel();
+                harness.invokeHost(created, panel, column, null);
+                harness.invokeHost(spaces, panel);
+                measureColumn(column);
+                assertEquals(200, column.getMeasuredHeight());
+
+                panel.j.setVisibility(View.VISIBLE);
+                measureColumn(column);
+                assertEquals(256, column.getMeasuredHeight());
+                assertEquals(56, panel.j.getHeight());
+                column.getViewTreeObserver().dispatchOnPreDraw();
+                assertEquals(View.GONE, panel.j.getVisibility());
+                // Visibility and measured geometry have different lifetimes. Let the next normal
+                // measure/layout finish; do not prescribe a preDraw return value or reject frames.
+                measureColumn(column);
+                assertEquals("the next normal layout must remove the recovered bottom space", 200, column.getMeasuredHeight());
+                assertEquals(200, column.getHeight());
+            } finally { hooks.close(); }
+        }
+    }
+
+    private static LinearLayout panelRoot(Context context) {
+        LinearLayout root = new LinearLayout(context);
+        root.setOrientation(LinearLayout.VERTICAL);
+        View top = new View(context);
+        top.setId(Panel.TOP_SPACE_ID);
+        root.addView(top, new LinearLayout.LayoutParams(-1, 24));
+        root.addView(new View(context), new LinearLayout.LayoutParams(-1, 200));
+        View bottom = new View(context);
+        bottom.setId(Panel.BOTTOM_SPACE_ID);
+        bottom.setBackgroundColor(Color.BLACK);
+        root.addView(bottom, new LinearLayout.LayoutParams(-1, 56));
+        return root;
+    }
+
+    private static void measureColumn(LinearLayout column) {
+        column.measure(View.MeasureSpec.makeMeasureSpec(100, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(1000, View.MeasureSpec.AT_MOST));
+        column.layout(0, 0, column.getMeasuredWidth(), column.getMeasuredHeight());
     }
 
     @Test public void profileSpoofOnlyChangesOwnProfileAndRestoresText() throws Throwable {
@@ -244,16 +414,33 @@ public final class HostBehaviorViewTest {
                 });
 
         void invoke(Method target, Object owner, Object... arguments) throws Throwable {
+            invoke(target, owner, arguments, false);
+        }
+
+        void invokeHost(Method target, Object owner, Object... arguments) throws Throwable {
+            invoke(target, owner, arguments, true);
+        }
+
+        private void invoke(Method target, Object owner, Object[] arguments, boolean executeOriginal) throws Throwable {
             XposedInterface.Chain chain = (XposedInterface.Chain) Proxy.newProxyInstance(getClass().getClassLoader(),
                     new Class<?>[] { XposedInterface.Chain.class }, (proxy, method, args) -> {
                         if (method.getName().equals("getThisObject")) return owner;
                         if (method.getName().equals("getExecutable")) return target;
                         if (method.getName().equals("getArgs")) return Arrays.asList(arguments);
                         if (method.getName().equals("getArg")) return arguments[(Integer) args[0]];
-                        if (method.getName().startsWith("proceed")) { proceeded++; return null; }
+                        if (method.getName().startsWith("proceed")) {
+                            proceeded++;
+                            return executeOriginal ? target.invoke(owner, arguments) : null;
+                        }
                         return null;
                     });
-            interceptors.get(target).intercept(chain);
+            XposedInterface.Hooker interceptor = interceptors.get(target);
+            if (interceptor == null && executeOriginal) {
+                proceeded++;
+                target.invoke(owner, arguments);
+            } else {
+                interceptor.intercept(chain);
+            }
         }
     }
 }

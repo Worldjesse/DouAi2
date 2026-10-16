@@ -1,15 +1,24 @@
 package com.douai.module.feature;
 
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.Application;
 import android.content.Context;
+import android.content.ContextWrapper;
 import android.content.pm.PackageManager;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.widget.Toast;
 
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.ThirdPartyDownloadSettings;
+import com.douai.module.ui.miuix.MiuixDialogBuilder;
 
+import java.lang.ref.WeakReference;
+import java.util.Collections;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 /** Runs only after a user invokes a third-party download. */
@@ -19,6 +28,35 @@ public final class ThirdPartyDownload {
     private ThirdPartyDownload() { }
 
     public static void start(Context source, Object aweme, LocalOptions options, Consumer<String> log) {
+        startOwned(source, aweme, options, log, () -> true);
+    }
+
+    public static AutoCloseable startOwned(Context source, Object aweme, LocalOptions options,
+                                           Consumer<String> log, BooleanSupplier valid) {
+        if (source == null) return null;
+        BooleanSupplier active = valid == null ? () -> true : valid;
+        try { if (!active.getAsBoolean()) return null; }
+        catch (RuntimeException ignored) { return null; }
+        LocalOptions current = options == null ? new LocalOptions(Collections.emptyMap()) : options;
+        ThirdPartyDownloadSettings config = new ThirdPartyDownloadSettings(current);
+        if (config.direct) { startDirect(source, aweme, current, log); return () -> { }; }
+        Activity activity = activity(source);
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
+            toast(source, "当前页面无法显示第三方下载选择"); return null;
+        }
+        String link;
+        try { link = shareUrl(aweme); }
+        catch (IllegalArgumentException failure) {
+            if (config.getTemplate.contains("{url}")) { toast(source, failure.getMessage()); return null; }
+            link = "";
+        }
+        Session session = new Session(activity, config, link, current.downloadSaveTree(),
+                log == null ? ignored -> { } : log, active);
+        onMain(session::begin);
+        return session;
+    }
+
+    private static void startDirect(Context source, Object aweme, LocalOptions options, Consumer<String> log) {
         if (source == null) return;
         if (options.downloadSaveTree().isEmpty() && Build.VERSION.SDK_INT < 29
                 && source.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
@@ -49,6 +87,172 @@ public final class ThirdPartyDownload {
                         + (tree.isEmpty() ? "Download/DouAi" : "所选目录");
         }, log) != null;
         toast(context, accepted ? "已加入下载任务，可在设置中查看进度或取消" : "该作品正在下载或队列已满");
+    }
+
+    private static final class Session implements AutoCloseable, Application.ActivityLifecycleCallbacks {
+        private final WeakReference<Activity> owner;
+        private final Application application;
+        private final ThirdPartyDownloadSettings config;
+        private final String link, tree;
+        private Consumer<String> log;
+        private BooleanSupplier valid;
+        private volatile boolean closed;
+        private boolean registered;
+        private DownloadTasks.Task parsing;
+        private AlertDialog loading;
+        private ThirdPartyDownloadDialog selection;
+        private AutoCloseable taskSubscription;
+
+        Session(Activity activity, ThirdPartyDownloadSettings config, String link, String tree,
+                Consumer<String> log, BooleanSupplier valid) {
+            owner = new WeakReference<>(activity);
+            application = activity.getApplication();
+            this.config = config; this.link = link; this.tree = tree; this.log = log; this.valid = valid;
+        }
+
+        private String key() { return config.getTemplate + '\n' + link + '\n' + tree; }
+
+        void begin() {
+            if (!usable()) return;
+            application.registerActivityLifecycleCallbacks(this);
+            registered = true;
+            taskSubscription = DownloadTasks.listen(() -> onMain(() -> {
+                DownloadTasks.Task current = parsing;
+                if (!closed && current != null && current.terminal && !"completed".equals(current.status)) close();
+            }));
+            try {
+                AlertDialog next = new MiuixDialogBuilder(owner.get(), true).setTitle("第三方下载")
+                        .setMessage("正在解析所选下载字段…")
+                        .setNegativeButton("取消", (ignored, which) -> close()).create();
+                loading = next;
+                next.setOnCancelListener(ignored -> close());
+                next.setOnDismissListener(ignored -> { if (loading == next) close(); });
+                next.show();
+            } catch (RuntimeException | LinkageError failure) {
+                close(); toast(application, "无法显示第三方下载选择"); return;
+            }
+            WeakReference<Session> reference = new WeakReference<>(this);
+            ThirdPartyDownloadSettings capturedConfig = config;
+            String capturedLink = link;
+            parsing = DownloadTasks.submit(application, "third-party\nparse\n" + key(), "第三方解析", transfer -> {
+                try {
+                    transfer.file("第三方解析", 0);
+                    transfer.phase("正在解析作品");
+                    String body = new ThirdPartyGetClient.Request(transfer, MediaStoreDownloader.connections)
+                            .fetch(capturedConfig, capturedLink);
+                    transfer.check();
+                    ThirdPartyDownloadPlan plan = ThirdPartyDownloadPlan.create(
+                            ThirdPartyResponse.parse(body), capturedConfig, System.currentTimeMillis());
+                    transfer.complete();
+                    MAIN.post(() -> {
+                        Session session = reference.get();
+                        if (session != null) session.parsed(plan);
+                    });
+                    return "解析完成，请选择保存内容";
+                } catch (Exception failure) {
+                    MAIN.post(() -> {
+                        Session session = reference.get();
+                        if (session != null) session.failed();
+                    });
+                    throw failure;
+                }
+            }, log);
+            if (parsing == null) { close(); toast(application, "该作品正在解析或下载队列已满"); }
+            else if (closed) DownloadTasks.cancel(parsing.id);
+        }
+
+        private void parsed(ThirdPartyDownloadPlan plan) {
+            if (!usable()) return;
+            parsing = null;
+            dismissLoading();
+            try {
+                selection = new ThirdPartyDownloadDialog(owner.get(), plan, this::selected, this::close, this::usable);
+                selection.show();
+            } catch (RuntimeException | LinkageError failure) {
+                close(); toast(application, "无法显示第三方下载选择");
+            }
+        }
+
+        private void selected(ThirdPartyDownloadPlan plan) {
+            if (!usable()) return;
+            if (tree.isEmpty() && Build.VERSION.SDK_INT < 29
+                    && application.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    != PackageManager.PERMISSION_GRANTED) {
+                close(); toast(application, "请先授予抖音存储权限"); return;
+            }
+            Consumer<String> logger = log;
+            String capturedTree = tree;
+            StringBuilder selectedKey = new StringBuilder("third-party\nselected\n").append(key());
+            for (ThirdPartyDownloadPlan.Asset asset : plan.assets) selectedKey.append('\n').append(asset.url).append('\n').append(asset.name);
+            Application target = application;
+            close();
+            boolean accepted = DownloadTasks.submit(target, selectedKey.toString(), plan.baseName, transfer -> {
+                MediaStoreDownloader.saveThirdPartyBundle(target, plan, capturedTree, transfer);
+                return "已保存 " + plan.assets.size() + " 个文件和作品信息到 "
+                        + (capturedTree.isEmpty() ? "Download/DouAi" : "所选目录");
+            }, logger) != null;
+            toast(target, accepted ? "已加入下载任务，可在设置中查看进度或取消" : "该选择正在下载或队列已满");
+        }
+
+        private void failed() {
+            if (closed) return;
+            close(); toast(application, "第三方解析失败，请检查 GET 和下载字段");
+        }
+
+        private boolean usable() {
+            if (closed) return false;
+            Activity activity = owner.get();
+            boolean active = activity != null && !activity.isFinishing() && !activity.isDestroyed();
+            try { active = active && valid != null && valid.getAsBoolean(); }
+            catch (RuntimeException failure) { active = false; }
+            if (!active) close();
+            return active;
+        }
+
+        private void dismissLoading() {
+            AlertDialog current = loading;
+            loading = null;
+            if (current != null) current.dismiss();
+        }
+
+        @Override public void close() {
+            closed = true;
+            onMain(() -> {
+                DownloadTasks.Task current = parsing;
+                parsing = null;
+                if (current != null) DownloadTasks.cancel(current.id);
+                dismissLoading();
+                ThirdPartyDownloadDialog picker = selection;
+                selection = null;
+                if (picker != null) picker.close();
+                AutoCloseable subscription = taskSubscription;
+                taskSubscription = null;
+                if (subscription != null) try { subscription.close(); } catch (Exception ignored) { }
+                if (registered) { application.unregisterActivityLifecycleCallbacks(this); registered = false; }
+                owner.clear(); valid = null; log = null;
+            });
+        }
+
+        @Override public void onActivityPaused(Activity activity) { if (owner.get() == activity) close(); }
+        @Override public void onActivityDestroyed(Activity activity) { if (owner.get() == activity) close(); }
+        @Override public void onActivityCreated(Activity activity, Bundle state) { }
+        @Override public void onActivityStarted(Activity activity) { }
+        @Override public void onActivityResumed(Activity activity) { }
+        @Override public void onActivityStopped(Activity activity) { }
+        @Override public void onActivitySaveInstanceState(Activity activity, Bundle state) { }
+    }
+
+    private static Activity activity(Context source) {
+        while (source instanceof ContextWrapper && !(source instanceof Activity)) {
+            Context base = ((ContextWrapper) source).getBaseContext();
+            if (base == source) return null;
+            source = base;
+        }
+        return source instanceof Activity ? (Activity) source : null;
+    }
+
+    private static void onMain(Runnable action) {
+        if (Looper.myLooper() == Looper.getMainLooper()) action.run(); else MAIN.post(action);
     }
 
     static String shareUrl(Object aweme) {

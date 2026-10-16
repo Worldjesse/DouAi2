@@ -26,6 +26,10 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class DownloadCancellationTest {
+    @org.junit.Before public void requireDrainedDownloadTasks() { DownloadTaskTestIdle.beforeTest(); }
+
+    @org.junit.After public void finishDownloadWorkers() { DownloadTaskTestIdle.afterTest(); }
+
     @Test public void uiCancellationReturnsWhileProviderCloseBlocksAndKeepsRetryDeduplicated() throws Exception {
         DownloadDocumentTreeTest.RecordingDocuments provider = DownloadDocumentTreeTest.register();
         DownloadTransfer.Connections previous = MediaStoreDownloader.connections;
@@ -164,6 +168,7 @@ public final class DownloadCancellationTest {
         MediaStoreDownloader.connections = uri -> blocked;
         java.util.Map<String, Object> values = new java.util.HashMap<>();
         values.put(ThirdPartyDownloadSettings.GET_TEMPLATE, "https://parser.test/?token=private-secret&url={url}");
+        values.put(ThirdPartyDownloadSettings.DIRECT, true);
         values.put(ThirdPartyDownloadSettings.SIGNATURE_MODE, ThirdPartyDownloadSettings.SIGNATURE_NONE);
         values.put(LocalOptions.DOWNLOAD_SAVE_TREE, DownloadDocumentTreeTest.TREE);
         try {

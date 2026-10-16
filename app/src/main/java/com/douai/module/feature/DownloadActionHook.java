@@ -40,6 +40,7 @@ public final class DownloadActionHook implements AutoCloseable {
     private volatile boolean enabled;
     private volatile FeatureSettings settings;
     private volatile LocalOptions options = new LocalOptions(Collections.emptyMap());
+    private AutoCloseable thirdPartyDownloadDialog;
 
     private DownloadActionHook(Method nativeClickMethod, FeatureSettings settings, Consumer<String> log) {
         this.nativeClickMethod = nativeClickMethod;
@@ -102,6 +103,7 @@ public final class DownloadActionHook implements AutoCloseable {
 
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
+        if (!enabled) closeThirdPartyDialog();
         updateRows(enabled);
     }
 
@@ -111,6 +113,7 @@ public final class DownloadActionHook implements AutoCloseable {
     }
 
     public void setOptions(LocalOptions options) {
+        closeThirdPartyDialog();
         this.options = options == null ? new LocalOptions(Collections.emptyMap()) : options;
     }
 
@@ -119,9 +122,8 @@ public final class DownloadActionHook implements AutoCloseable {
             Object view = chain.getArg(0);
             if (view instanceof View) {
                 try {
-                    ThirdPartyDownload.start(((View) view).getContext(),
-                            currentAweme(chain.getThisObject()), options, this::safeLog);
-                } catch (ReflectiveOperationException | RuntimeException failure) {
+                    startThirdParty(((View) view).getContext(), currentAweme(chain.getThisObject()), chain.getThisObject());
+                } catch (ReflectiveOperationException | RuntimeException | LinkageError failure) {
                     showToast(((View) view).getContext(), "无法读取当前作品链接");
                 }
             }
@@ -255,7 +257,7 @@ public final class DownloadActionHook implements AutoCloseable {
     private void selectAction(Object module, View row, MenuAction action, Context context,
                               Object aweme) {
         if (action.kind == MenuAction.THIRD_PARTY) {
-            ThirdPartyDownload.start(context, aweme, options, this::safeLog);
+            startThirdParty(context, aweme, module);
             return;
         }
         if (action.kind == MenuAction.NATIVE) {
@@ -453,9 +455,21 @@ public final class DownloadActionHook implements AutoCloseable {
     }
 
     private static String playbackUrl(Object video) throws ReflectiveOperationException {
-        for (String key : new String[]{"play_addr", "play_addr_h264", "play_addr_265"}) {
+        for (String key : new String[]{"play_addr", "play_addr_h264", "play_addr_265",
+                "play_addr_bytevc1", "play_addr_lowbr"}) {
             String url = firstUrl(fieldByJsonName(video, key));
             if (url != null) return url;
+        }
+        // Douyin may supply playback sources only on its bitrate entries.
+        Object bitRates = fieldByJsonName(video, "bit_rate");
+        if (bitRates instanceof Iterable<?>) {
+            for (Object bitRate : (Iterable<?>) bitRates) {
+                if (bitRate == null) continue;
+                for (String key : new String[]{"play_addr", "play_addr_265", "play_addr_bytevc1"}) {
+                    String url = firstUrl(fieldByJsonName(bitRate, key));
+                    if (url != null) return url;
+                }
+            }
         }
         return null;
     }
@@ -602,9 +616,36 @@ public final class DownloadActionHook implements AutoCloseable {
         }
     }
 
+    private void startThirdParty(Context context, Object aweme, Object module) {
+        closeThirdPartyDialog();
+        String expectedId = awemeId(aweme);
+        thirdPartyDownloadDialog = ThirdPartyDownload.startOwned(context, aweme, options, this::safeLog,
+                () -> {
+                    if (!enabled || !new ThirdPartyDownloadSettings(options).thirdParty) return false;
+                    try {
+                        Object current = currentAweme(module);
+                        return expectedId == null ? current == aweme : expectedId.equals(awemeId(current));
+                    } catch (ReflectiveOperationException | RuntimeException failure) { return false; }
+                });
+    }
+
+    private static String awemeId(Object aweme) {
+        Object id = jsonValue(aweme, "aweme_id");
+        if (id == null) id = HostTargets.invoke(aweme, "getAid");
+        return id == null || id.toString().isEmpty() ? null : id.toString();
+    }
+
+    private void closeThirdPartyDialog() {
+        AutoCloseable active = thirdPartyDownloadDialog;
+        thirdPartyDownloadDialog = null;
+        if (active != null) try { active.close(); }
+        catch (Exception ignored) { safeLog("Could not close third-party download selection"); }
+    }
+
     @Override
     public void close() {
         enabled = false;
+        closeThirdPartyDialog();
         updateRows(false);
         synchronized (rows) {
             rows.clear();

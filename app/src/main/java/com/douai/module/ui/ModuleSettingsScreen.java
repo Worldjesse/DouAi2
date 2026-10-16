@@ -469,7 +469,7 @@ public final class ModuleSettingsScreen {
             try {
                 if (ThirdPartyDownloadSettings.THIRD_PARTY.equals(repository.getString(
                         ThirdPartyDownloadSettings.METHOD, "official"))) {
-                    buildThirdPartyDownloadControls();
+                    buildThirdPartyDownloadControls(master);
                 } else {
                     buildOfficialDownloadControls(master);
                 }
@@ -520,6 +520,11 @@ public final class ModuleSettingsScreen {
     }
 
     private void buildOfficialDownloadControls(ToggleControl master) {
+        addSwitch("默认行为", "开启后手势直接保存视频或全部图片，不显示下载选择。",
+                repository.getBoolean(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, false), true, value -> {
+                    if (value) master.setChecked(true);
+                    repository.putBoolean(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, value);
+                });
         addSwitch("是否启用抖音下载自定义命名", "按模板保存视频、图集和音频。",
                 repository.getBoolean("download_custom_name", false), true, value -> {
                     if (value) master.setChecked(true);
@@ -538,7 +543,12 @@ public final class ModuleSettingsScreen {
                 settings.removeWatermark, true, value -> update(s -> copy(s, null, value)));
     }
 
-    private void buildThirdPartyDownloadControls() {
+    private void buildThirdPartyDownloadControls(ToggleControl master) {
+        addSwitch("默认行为", "开启后解析成功即保存所选下载字段，不显示下载选择。",
+                repository.getBoolean(ThirdPartyDownloadSettings.DIRECT, false), true, value -> {
+                    if (value) master.setChecked(true);
+                    repository.putBoolean(ThirdPartyDownloadSettings.DIRECT, value);
+                });
         ThirdPartyDownloadEditor editor = new ThirdPartyDownloadEditor(
                 rowContext() == null ? context : rowContext(), repository,
                 miuixHome != null, this::showOptionDialog);
@@ -1759,7 +1769,7 @@ public final class ModuleSettingsScreen {
         BASIC("基本功能", 3),
         INTERFACE("界面相关", 13),
         FILTER("视频筛选", 14),
-        DOWNLOAD("下载相关", 12),
+        DOWNLOAD("下载相关", 14),
         AUTOPLAY("自动播放", 6),
         AUTO_REPLY("自动回复", 10),
         AUTO_COMMENT("自动评论", 8),

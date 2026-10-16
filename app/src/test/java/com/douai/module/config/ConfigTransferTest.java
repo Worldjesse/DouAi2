@@ -44,6 +44,58 @@ public final class ConfigTransferTest {
         assertEquals(1, new JSONObject(encoded).getJSONObject("values").length());
     }
 
+    @Test public void officialDirectDownloadBooleanRoundTripsWhileThirdPartyMethodRemainsSelected() throws Exception {
+        for (boolean enabled : new boolean[]{false, true}) {
+            MemoryStore source = new MemoryStore(), target = new MemoryStore();
+            source.values.put(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, enabled);
+            source.values.put(ThirdPartyDownloadSettings.METHOD, ThirdPartyDownloadSettings.THIRD_PARTY);
+            target.values.put(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, !enabled);
+            String encoded = ConfigTransfer.export(source, false);
+            JSONObject typed = new JSONObject(encoded).getJSONObject("values")
+                    .getJSONObject(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT);
+            assertEquals("boolean", typed.getString("type"));
+            assertTrue(typed.get("value") instanceof Boolean);
+            assertEquals(enabled, typed.getBoolean("value"));
+
+            ConfigTransfer.Preview preview = ConfigTransfer.inspect(target, encoded);
+            assertEquals(2, preview.entryCount);
+            assertTrue(preview.changedKeys.contains(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT));
+            assertEquals(0, target.commits);
+            ConfigTransfer.apply(target, preview);
+            assertEquals(source.values, target.values);
+            assertEquals(enabled, new LocalOptions(target.snapshot()).officialDownloadDirect());
+            assertTrue(new ThirdPartyDownloadSettings(new LocalOptions(target.snapshot())).thirdParty);
+            assertEquals(1, target.commits);
+        }
+    }
+
+    @Test public void thirdPartyDirectDownloadBooleanTransfersIndependentlyOfOfficialDefaultBehavior() throws Exception {
+        for (boolean enabled : new boolean[]{false, true}) {
+            MemoryStore source = new MemoryStore(), target = new MemoryStore();
+            source.values.put(ThirdPartyDownloadSettings.DIRECT, enabled);
+            source.values.put(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, !enabled);
+            source.values.put(ThirdPartyDownloadSettings.METHOD, ThirdPartyDownloadSettings.THIRD_PARTY);
+            target.values.put(ThirdPartyDownloadSettings.DIRECT, !enabled);
+            target.values.put(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, enabled);
+            String encoded = ConfigTransfer.export(source, false);
+            JSONObject typed = new JSONObject(encoded).getJSONObject("values")
+                    .getJSONObject(ThirdPartyDownloadSettings.DIRECT);
+            assertEquals("boolean", typed.getString("type"));
+            assertTrue(typed.get("value") instanceof Boolean);
+            assertEquals(enabled, typed.getBoolean("value"));
+            ConfigTransfer.Preview preview = ConfigTransfer.inspect(target, encoded);
+            assertEquals(3, preview.entryCount);
+            assertTrue(preview.changedKeys.contains(ThirdPartyDownloadSettings.DIRECT));
+            assertTrue(preview.changedKeys.contains(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT));
+            ConfigTransfer.apply(target, preview);
+            assertEquals(source.values, target.values);
+            LocalOptions restored = new LocalOptions(target.snapshot());
+            assertEquals(enabled, new ThirdPartyDownloadSettings(restored).direct);
+            assertEquals(!enabled, restored.officialDownloadDirect());
+            assertTrue(new ThirdPartyDownloadSettings(restored).thirdParty);
+        }
+    }
+
     @Test public void redactionCoversModelsArbitraryHeadersParametersAndUrlCredentials() throws Exception {
         MemoryStore source = new MemoryStore();
         source.values.put("ai_model_settings_v2", model("https://api.test/v1", "fixture-model-secret",

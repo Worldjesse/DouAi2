@@ -23,6 +23,8 @@ final class ConfigKeys {
                 + "toolbar_enabled intercept_native_long_press disable_double_tap_like block_long_press_speed "
                 + "hide_camera_plus hide_video_black_edges prevent_insert_video prevent_skip_hidden remove_splash_ads "
                 + "remove_teen_dialog remove_update_dialog");
+        add(keys, "boolean", LocalOptions.OFFICIAL_DOWNLOAD_DIRECT);
+        add(keys, "boolean", ThirdPartyDownloadSettings.DIRECT);
         add(keys, "int", "minimum_duration_seconds minimum_like_count");
         add(keys, "string", "keyword video_right_alpha hidden_top_tabs fake_version_name fake_version_code auto_comment_text "
                 + "auto_message_text playback_speed comment_suffix colored_comment_type comment_voice_path dm_voice_path "

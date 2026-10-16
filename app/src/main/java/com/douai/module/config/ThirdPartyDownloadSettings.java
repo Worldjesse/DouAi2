@@ -12,6 +12,7 @@ import java.util.List;
 public final class ThirdPartyDownloadSettings {
     public static final String METHOD = "download_method";
     public static final String THIRD_PARTY = "third_party";
+    public static final String DIRECT = "third_party_download_direct";
     public static final String GET_TEMPLATE = "third_party_get_template";
     public static final String HEADERS = "third_party_headers";
     public static final String APP_ID = "third_party_app_id";
@@ -42,6 +43,7 @@ public final class ThirdPartyDownloadSettings {
             + " \"is_horizontal\": 0, \"play_count\": 0}\n  },\n  \"message\": \"ok\"\n}";
 
     public final boolean thirdParty;
+    public final boolean direct;
     public final String getTemplate;
     public final String headers;
     public final String appId;
@@ -53,6 +55,7 @@ public final class ThirdPartyDownloadSettings {
 
     public ThirdPartyDownloadSettings(LocalOptions options) {
         thirdParty = THIRD_PARTY.equals(options.text(METHOD, "official"));
+        direct = options.enabled(DIRECT);
         headers = options.text(HEADERS, "{}");
         appId = options.text(APP_ID, "").trim();
         appSecret = options.text(APP_SECRET, "");

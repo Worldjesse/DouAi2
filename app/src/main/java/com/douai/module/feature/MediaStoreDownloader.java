@@ -17,6 +17,7 @@ import android.widget.Toast;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
@@ -157,6 +158,115 @@ public final class MediaStoreDownloader {
             InputStream input = streams.add(connection.getInputStream());
             OutputStream output = streams.add(outputs.open(resolver, target));
             copyMedia(input, output, connection.getContentLengthLong(), transfer);
+        }
+    }
+
+    /** Downloads an owned intermediate without publishing or completing the surrounding task. */
+    static void downloadTemporary(String url, File target, DownloadTransfer transfer) throws Exception {
+        if (target == null) throw new IllegalArgumentException("临时文件无效");
+        transfer.check();
+        // Atomic creation also ensures cleanup can never remove a pre-existing file.
+        Files.createFile(target.toPath());
+        HttpURLConnection connection = null;
+        boolean saved = false;
+        try {
+            connection = openBundleMedia(url, transfer);
+            try (DownloadTransfer.Streams streams = transfer.streams()) {
+                InputStream input = streams.add(connection.getInputStream());
+                OutputStream output = streams.add(new FileOutputStream(target));
+                copyMedia(input, output, connection.getContentLengthLong(), transfer);
+            }
+            transfer.check();
+            saved = true;
+        } catch (Exception failure) {
+            transfer.check(); throw failure;
+        } finally {
+            close(connection, transfer);
+            if (!saved) target.delete();
+        }
+    }
+
+    /** Final task step: copies encoded motion-photo bytes and commits cancellation before publication. */
+    static String saveLocalImage(Context context, File source, String fileName, String mimeType,
+                                 String tree, DownloadTransfer transfer) throws Exception {
+        if (context == null || source == null || !source.isFile()
+                || source.length() <= 0 || source.length() > MAX_DOWNLOAD_BYTES) {
+            throw new IllegalArgumentException("待保存图片为空、无效或过大");
+        }
+        if (mimeType == null || !mimeType.matches("image/[A-Za-z0-9.+-]+")) {
+            throw new IllegalArgumentException("图片格式无效");
+        }
+        String name = MediaNaming.sanitize(fileName == null ? "" : fileName, "");
+        if (name.isEmpty()) throw new IllegalArgumentException("文件名无效");
+        long length = source.length();
+        transfer.check();
+        transfer.phase("正在保存");
+        transfer.size(length);
+        ContentResolver resolver = context.getContentResolver();
+        Uri target = null;
+        File legacyTarget = null;
+        boolean document = tree != null && !tree.isEmpty();
+        try {
+            transfer.check();
+            if (document) {
+                target = DownloadDocumentTree.create(resolver, DownloadDocumentTree.root(tree), mimeType, name);
+            } else if (Build.VERSION.SDK_INT >= 29) {
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                values.put(MediaStore.MediaColumns.MIME_TYPE, mimeType);
+                values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/DouAi");
+                values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+                target = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+                if (target == null) throw new IllegalStateException("MediaStore 无法创建记录");
+            } else {
+                File parent = new File(Environment.getExternalStoragePublicDirectory(
+                        Environment.DIRECTORY_PICTURES), "DouAi");
+                if (!parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) {
+                    throw new IllegalStateException("无法创建图片目录");
+                }
+                int dot = name.lastIndexOf('.');
+                String stem = dot > 0 ? name.substring(0, dot) : name;
+                String suffix = dot > 0 ? name.substring(dot) : "";
+                for (int index = 0; legacyTarget == null; index++) {
+                    transfer.check();
+                    File candidate = new File(parent, index == 0 ? name : stem + "_" + index + suffix);
+                    if (candidate.createNewFile()) legacyTarget = candidate;
+                }
+            }
+            try (DownloadTransfer.Streams streams = transfer.streams()) {
+                InputStream input = streams.add(new FileInputStream(source));
+                OutputStream output = streams.add(legacyTarget == null
+                        ? outputs.open(resolver, target) : new FileOutputStream(legacyTarget));
+                copyMedia(input, output, length, transfer);
+            }
+            // The final output is now closed. Commit against cancellation before publishing it.
+            transfer.complete();
+            if (!document && target != null) {
+                ContentValues completed = new ContentValues();
+                completed.put(MediaStore.MediaColumns.IS_PENDING, 0);
+                if (resolver.update(target, completed, null, null) < 1) {
+                    throw new IllegalStateException("无法完成文件保存");
+                }
+            }
+            transfer.fileDone();
+            transfer.check();
+            if (legacyTarget != null) {
+                try {
+                    MediaScannerConnection.scanFile(context, new String[]{legacyTarget.getAbsolutePath()},
+                            new String[]{mimeType}, null);
+                } catch (RuntimeException ignored) { /* The saved image remains usable without indexing. */ }
+            }
+            target = null;
+            legacyTarget = null;
+            return document ? "媒体已保存到所选目录" : "媒体已保存到 Pictures/DouAi";
+        } catch (Exception failure) {
+            if (document) DownloadDocumentTree.delete(resolver, target);
+            else if (target != null) {
+                try { resolver.delete(target, null, null); }
+                catch (RuntimeException ignored) { }
+            }
+            if (legacyTarget != null) legacyTarget.delete();
+            transfer.check(); throw failure;
         }
     }
 

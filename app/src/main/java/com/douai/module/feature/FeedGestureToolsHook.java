@@ -108,6 +108,8 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     private Runnable speedReadback;
     private PopupWindow toolbar;
     private AlertDialog actionDialog;
+    private OfficialDownloadDialog downloadDialog;
+    private AutoCloseable thirdPartyDownloadDialog;
     private ViewFinderOverlay viewFinder;
     private boolean finderOpening;
     private long finderLaunchEpoch;
@@ -855,6 +857,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
                 pausedHolder.clear();
                 recoverForeground(root, activity);
                 if (selectedHolder.get() == holder && selectedRoot.get() == root) return;
+                dismissDialog();
                 if (selectedHolder.get() != holder) restoreOwnedSpeed();
                 selectedHolder = new WeakReference<>(holder);
                 selectedRoot = new WeakReference<>(root);
@@ -925,7 +928,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
                 switch (action) {
                     case "menu": showMenu(root, holder); break;
                     case "copy_text": copyText(root.getContext(), aweme); break;
-                    case "save_media": saveMedia(root.getContext(), aweme); break;
+                    case "save_media": saveMedia(root, holder, aweme); break;
                     case "open_comments": openComments(root); break;
                     case "toggle_components": componentVisibility.accept(!componentsShown.getAsBoolean()); break;
                     case "speed": applyConfiguredSpeed(root, holder); break;
@@ -934,6 +937,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
                 }
             } catch (ReflectiveOperationException | RuntimeException failure) {
                 if ("view_finder".equals(action)) dismissViewFinder();
+                if ("save_media".equals(action)) dismissDialog();
                 safeLog("Feed tool action failed: " + failure.getMessage());
                 toast(root.getContext(), "工具操作失败");
             }
@@ -1088,26 +1092,50 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         toast(context, "文案已复制");
     }
 
-    private void saveMedia(Context context, Object aweme) {
+    private void saveMedia(View root, Object holder, Object aweme) {
+        Context context = root.getContext();
         LocalOptions current = options == null ? new LocalOptions(Collections.emptyMap()) : options;
+        if (new com.douai.module.config.ThirdPartyDownloadSettings(current).thirdParty) {
+            String expectedAid = readAid(aweme);
+            dismissDialog();
+            thirdPartyDownloadDialog = ThirdPartyDownload.startOwned(context, aweme, current, this::safeLog,
+                    () -> !closed && holder == selectedHolder.get() && root == activeRoot()
+                            && java.util.Objects.equals(expectedAid, currentAid()));
+            return;
+        }
+        dismissDialog();
+        if (current.officialDownloadDirect()) {
+            saveDefaultOfficialMedia(context, aweme, current);
+            return;
+        }
+        String expectedAid = readAid(aweme);
+        downloadDialog = new OfficialDownloadDialog(context, aweme, current, this::safeLog,
+                () -> !closed && holder == selectedHolder.get() && root == activeRoot()
+                        && java.util.Objects.equals(expectedAid, currentAid()));
+        downloadDialog.show();
+    }
+
+    private void saveDefaultOfficialMedia(Context context, Object aweme, LocalOptions current) {
         if (current.downloadSaveTree().isEmpty() && Build.VERSION.SDK_INT < 29
                 && context.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 != PackageManager.PERMISSION_GRANTED) {
-            toast(context, "请先授予抖音存储权限"); return;
-        }
-        if (new com.douai.module.config.ThirdPartyDownloadSettings(current).thirdParty) {
-            ThirdPartyDownload.start(context, aweme, current, this::safeLog);
+            toast(context, "请先授予抖音存储权限");
             return;
         }
         List<DownloadActionHook.MediaAsset> assets = DownloadActionHook.mediaAssets(aweme,
                 current.enabled("remove_watermark", true), current);
-        if (assets.isEmpty()) { toast(context, "当前视频没有可保存的媒体地址"); return; }
+        if (assets.isEmpty()) { toast(context, "当前作品没有可保存的媒体地址"); return; }
+        int accepted = 0;
         for (DownloadActionHook.MediaAsset asset : assets) {
             boolean queued = asset.image
-                    ? MediaStoreDownloader.downloadImage(context, asset.url, asset.name, current.downloadSaveTree(), this::safeLog)
-                    : MediaStoreDownloader.download(context, asset.url, asset.name, false, current.downloadSaveTree(), this::safeLog);
-            if (!queued) toast(context, "下载地址无效");
+                    ? MediaStoreDownloader.downloadImage(context, asset.url, asset.name,
+                            current.downloadSaveTree(), this::safeLog)
+                    : MediaStoreDownloader.download(context, asset.url, asset.name, false,
+                            current.downloadSaveTree(), this::safeLog);
+            if (queued) accepted++;
         }
+        safeLog("Official direct download queued: " + accepted + "/" + assets.size());
+        if (accepted < assets.size()) toast(context, "部分媒体未加入下载，请检查下载任务");
     }
 
     @SuppressLint("ResourceType")
@@ -1347,6 +1375,12 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
 
     private void dismissDialog() {
         if (actionDialog != null) { actionDialog.dismiss(); actionDialog = null; }
+        if (downloadDialog != null) { downloadDialog.close(); downloadDialog = null; }
+        if (thirdPartyDownloadDialog != null) {
+            try { thirdPartyDownloadDialog.close(); }
+            catch (Exception failure) { safeLog("Could not close third-party download selection"); }
+            thirdPartyDownloadDialog = null;
+        }
     }
 
     private BehaviorHookGroup newGroup(String key) {

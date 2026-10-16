@@ -12,18 +12,46 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
+import java.util.regex.Pattern;
 
 /** Resolves configured response paths into a bounded media bundle. */
 final class ThirdPartyDownloadPlan {
+    enum Category { IMAGE, VIDEO, MOTION, AUDIO, FILE }
+
     static final class Asset {
+        private static final Pattern MOTION_FIELD = Pattern.compile(
+                "(?:^|[^a-z0-9])(?:motion|dynamic|live_video)(?:$|[^a-z0-9])");
         final String url;
         final String name;
         final String mimeType;
+        final String fieldPath;
+        final int sourceIndex;
+        final int sequence;
 
         Asset(String url, String name, String mimeType) {
+            this(url, name, mimeType, "", 0, 1);
+        }
+
+        Asset(String url, String name, String mimeType, String fieldPath, int sourceIndex, int sequence) {
             this.url = url;
             this.name = name;
             this.mimeType = mimeType;
+            this.fieldPath = fieldPath == null ? "" : fieldPath;
+            this.sourceIndex = sourceIndex;
+            this.sequence = sequence;
+        }
+
+        Category category() {
+            String mime = mimeType == null ? "" : mimeType.toLowerCase(Locale.ROOT);
+            if (mime.startsWith("image/")) return Category.IMAGE;
+            if (mime.startsWith("audio/")) return Category.AUDIO;
+            if (mime.startsWith("video/")) {
+                // Classify only the configured field's explicit meaning; URL text is not a type marker.
+                String field = fieldPath.replaceAll("([a-z0-9])([A-Z])", "$1_$2").toLowerCase(Locale.ROOT);
+                return MOTION_FIELD.matcher(field).find() ? Category.MOTION : Category.VIDEO;
+            }
+            return Category.FILE;
         }
     }
 
@@ -33,8 +61,30 @@ final class ThirdPartyDownloadPlan {
 
     private ThirdPartyDownloadPlan(String baseName, List<Asset> assets, String metadata) {
         this.baseName = baseName;
-        this.assets = Collections.unmodifiableList(assets);
+        this.assets = Collections.unmodifiableList(new ArrayList<>(assets));
         this.metadata = metadata;
+    }
+
+    /** Indexes refer to this plan's assets; original names and source numbering remain untouched. */
+    ThirdPartyDownloadPlan selectAssets(List<Integer> indexes) {
+        if (indexes == null || indexes.isEmpty()) throw new IllegalArgumentException("请先选择要保存的媒体");
+        Set<Integer> ordered = new TreeSet<>();
+        for (Integer index : indexes) {
+            if (index == null || index < 0 || index >= assets.size()) {
+                throw new IllegalArgumentException("所选媒体序号无效");
+            }
+            ordered.add(index);
+        }
+        List<Asset> selected = new ArrayList<>(ordered.size());
+        for (int index : ordered) selected.add(assets.get(index));
+        return new ThirdPartyDownloadPlan(baseName, selected, metadata);
+    }
+
+    ThirdPartyDownloadPlan selectAssets(int[] indexes) {
+        if (indexes == null) throw new IllegalArgumentException("请先选择要保存的媒体");
+        List<Integer> selected = new ArrayList<>(indexes.length);
+        for (int index : indexes) selected.add(index);
+        return selectAssets(selected);
     }
 
     static ThirdPartyDownloadPlan create(ThirdPartyResponse response,
@@ -60,13 +110,14 @@ final class ThirdPartyDownloadPlan {
             List<String> urls = fields.get(path);
             if (urls == null || urls.isEmpty()) continue;
             includedFields.add(path);
-            for (String url : urls) {
+            for (int sourceIndex = 0; sourceIndex < urls.size(); sourceIndex++) {
+                String url = urls.get(sourceIndex);
                 if (!seenUrls.add(url)) continue;
                 if (assets.size() >= 64) throw new IllegalArgumentException("单次最多下载 64 个文件");
                 String extension = extension(path, url);
                 String name = MediaNaming.sanitize(base + "_" + (++sequence) + "_"
                         + path.replaceAll("[^A-Za-z0-9_-]", "_"), extension);
-                assets.add(new Asset(url, name, mimeType(extension)));
+                assets.add(new Asset(url, name, mimeType(extension), path, sourceIndex, sequence));
             }
         }
         if (assets.isEmpty()) throw new IllegalArgumentException("所选下载字段没有链接，请在第三方设置中测试接口并选择字段");

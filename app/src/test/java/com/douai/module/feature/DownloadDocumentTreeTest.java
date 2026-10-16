@@ -38,6 +38,10 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 28)
 public final class DownloadDocumentTreeTest {
+    @org.junit.Before public void requireDrainedDownloadTasks() { DownloadTaskTestIdle.beforeTest(); }
+
+    @org.junit.After public void finishDownloadWorkers() { DownloadTaskTestIdle.afterTest(); }
+
     public static final String TREE = "content://douai.documents/tree/root";
 
     @Test public void thirdPartyMediaAndTextUseOneChildOfTheSelectedTree() throws Exception {

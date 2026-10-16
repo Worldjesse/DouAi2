@@ -17,6 +17,7 @@ import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.SettingsStore;
+import com.douai.module.config.ThirdPartyDownloadSettings;
 import com.douai.module.feature.FollowListPager;
 import com.douai.module.feature.FollowListSnapshot;
 import com.douai.module.feature.NativeFollowLists;
@@ -86,7 +87,7 @@ public final class ModuleSettingsReferenceTest {
                 {"FILTER", "过滤总开关", "中断开关", "去广告开关", "去直播开关", "去推荐卡片开关",
                         "去推荐商家开关", "去小游戏开关", "去长视频开关", "长视频时间界定",
                         "去低赞视频开关", "去图集开关", "过滤字符串", "过滤短视频", "最短时长（秒）"},
-                {"DOWNLOAD", "启用下载菜单", "下载方式", "保存位置", "下载任务", "是否启用抖音下载自定义命名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
+                {"DOWNLOAD", "启用下载菜单", "下载方式", "保存位置", "下载任务", "默认行为", "是否启用抖音下载自定义命名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
                 {"AUTOPLAY", "自动滑动到下一个视频", "自动倍速播放", "倍速数值", "打开评论时,不滑动视频",
                         "滑动智能判断上下", "互动自动化"},
                 {"AUTO_REPLY", "开启自动回复", "回复模式", "回复内容", "语音回复", "接收私聊", "私聊范围", "接收群聊", "群聊范围",
@@ -110,6 +111,24 @@ public final class ModuleSettingsReferenceTest {
                     collect(page, EditText.class).size());
             screen.dismissChildPages();
         }
+    }
+
+    @Test public void thirdPartyDownloadsKeepDefaultBehaviorAboveTheirParserConfiguration() {
+        store.putString(ThirdPartyDownloadSettings.METHOD, ThirdPartyDownloadSettings.THIRD_PARTY);
+        store.putString(ThirdPartyDownloadSettings.SIGNATURE_MODE, ThirdPartyDownloadSettings.SIGNATURE_NONE);
+        View page = openCategory("DOWNLOAD");
+        assertEquals(Arrays.asList("启用下载菜单", "下载方式", "保存位置", "下载任务", "默认行为",
+                "GET 请求", "请求参数", "签名方式", "请求头", "响应样本", "下载字段", "文件命名字段", "测试 GET"),
+                settingTitles(page));
+        Switch direct = toggle(page, "默认行为");
+        assertFalse(direct.isChecked());
+        assertTrue(containsText((View) direct.getParent(), "开启后解析成功即保存所选下载字段，不显示下载选择。"));
+        direct.setChecked(true);
+        assertTrue(toggle(page, "启用下载菜单").isChecked());
+        assertTrue(store.load().downloadEnabled);
+        assertTrue(store.getBoolean(ThirdPartyDownloadSettings.DIRECT, false));
+        assertFalse(store.getBoolean(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, false));
+        assertNull(page.findViewWithTag("settings.option.文件名模板"));
     }
 
     @Test
@@ -1312,6 +1331,14 @@ public final class ModuleSettingsReferenceTest {
         View page = openCategory("DOWNLOAD");
         Switch menu = toggle(page, "启用下载菜单");
         assertFalse(menu.isChecked());
+        Switch direct = toggle(page, "默认行为");
+        assertFalse(direct.isChecked());
+        assertTrue(containsText((View) direct.getParent(), "开启后手势直接保存视频或全部图片，不显示下载选择。"));
+        direct.setChecked(true);
+        assertTrue(menu.isChecked());
+        assertTrue(store.load().downloadEnabled);
+        assertTrue(store.getBoolean(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, false));
+        menu.setChecked(false);
         toggle(page, "是否启用抖音下载自定义命名").setChecked(true);
         assertTrue(menu.isChecked());
         assertTrue(store.load().downloadEnabled);
@@ -1323,6 +1350,7 @@ public final class ModuleSettingsReferenceTest {
         assertFalse(store.load().downloadEnabled);
         assertTrue(store.getBoolean("download_custom_name", false));
         assertTrue(store.getBoolean("remove_download_limits", false));
+        assertTrue(store.getBoolean(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, false));
     }
 
     @Test

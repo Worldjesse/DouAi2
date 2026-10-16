@@ -42,24 +42,23 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34)
 @LooperMode(LooperMode.Mode.PAUSED)
 public final class FeedGestureToolsHookTest {
+    @org.junit.Before public void requireDrainedDownloadTasks() { DownloadTaskTestIdle.beforeTest(); }
+
     @org.junit.After public void cancelDownloadsStartedByTheTest() {
-        for (DownloadTasks.Snapshot task : DownloadTasks.snapshots()) if (task.cancellable) DownloadTasks.cancel(task.id);
-        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3);
-        while (DownloadTasks.snapshots().stream().anyMatch(task -> "running".equals(task.status)
-                || "queued".equals(task.status) || "cancelling".equals(task.status)) && System.nanoTime() < deadline) {
-            java.util.concurrent.locks.LockSupport.parkNanos(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(5));
-        }
+        DownloadTaskTestIdle.afterTest();
     }
     public static final class Aweme {
         final String aid;
         public String share_url;
         public DownloadActionHookTest.VideoFixture video;
+        public List<DownloadActionHookTest.ImageFixture> images;
         Aweme(String aid) { this.aid = aid; }
         public String getAid() { return aid; }
     }
@@ -225,6 +224,8 @@ public final class FeedGestureToolsHookTest {
             Map<String, Object> values = new HashMap<>();
             values.put("long_press_top_left", "menu");
             values.put(ThirdPartyDownloadSettings.METHOD, ThirdPartyDownloadSettings.THIRD_PARTY);
+            values.put(ThirdPartyDownloadSettings.DIRECT, true);
+            values.put(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, true);
             values.put(ThirdPartyDownloadSettings.GET_TEMPLATE, server.url("/parse") + "?ID=75107541&link={url}");
             values.put(ThirdPartyDownloadSettings.APP_SECRET, "old-secret");
             values.put(ThirdPartyDownloadSettings.SIGNATURE_MODE, ThirdPartyDownloadSettings.SIGNATURE_NONE);
@@ -282,6 +283,8 @@ public final class FeedGestureToolsHookTest {
                 f.holder.downloadAweme = work;
                 f.select();
                 clickSaveFromGestureMenu(f);
+                assertEquals(0, server.getRequestCount());
+                confirmOfficialVideo();
                 assertEquals("/official.mp4", server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS).getPath());
                 awaitDownloadToast("已加入系统下载队列");
                 assertEquals(1, server.getRequestCount());
@@ -302,6 +305,21 @@ public final class FeedGestureToolsHookTest {
         ShadowLooper.idleMainLooper();
     }
 
+    private static android.app.AlertDialog officialChoices() {
+        android.app.AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
+        assertNotNull(dialog);
+        assertTrue(dialog.isShowing());
+        return dialog;
+    }
+
+    private static void confirmOfficialVideo() {
+        OfficialDownloadTestUi.openGroup("视频");
+        android.app.AlertDialog dialog = officialChoices();
+        assertEquals("保存视频", dialog.getListView().getAdapter().getItem(0));
+        dialog.getListView().performItemClick(null, 0, 0);
+        ShadowLooper.idleMainLooper();
+    }
+
     @Test @Config(sdk = 28)
     public void officialGestureSaveUsesTheSameCustomDirectoryAsThirdParty() throws Throwable {
         DownloadDocumentTreeTest.RecordingDocuments documents = DownloadDocumentTreeTest.register();
@@ -316,12 +334,130 @@ public final class FeedGestureToolsHookTest {
                 f.holder.downloadAweme = work;
                 f.select();
                 clickSaveFromGestureMenu(f);
+                assertEquals(0, server.getRequestCount());
+                confirmOfficialVideo();
                 assertEquals("/official.mp4", server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS).getPath());
                 awaitDownloadToast("媒体已保存到所选目录");
                 assertEquals(1, documents.names.size());
                 String id = documents.files.keySet().iterator().next();
                 assertEquals("root", documents.parents.get(id));
                 assertEquals("official-video", java.nio.file.Files.readString(documents.files.get(id).toPath()));
+            }
+        }
+    }
+
+    @Test public void directOfficialGestureWaitsForChoiceAndCancelDoesNotDownload() throws Throwable {
+        try (okhttp3.mockwebserver.MockWebServer server = new okhttp3.mockwebserver.MockWebServer()) {
+            server.start();
+            try (Fixture f = new Fixture(Map.of("long_press_top_left", "save_media"))) {
+                Aweme work = new Aweme("work");
+                work.video = new DownloadActionHookTest.VideoFixture();
+                work.video.play_addr = new DownloadActionHookTest.UrlFixture(server.url("/video.mp4").toString());
+                f.holder.downloadAweme = work;
+                f.select();
+                f.longPress(0, 0);
+                android.app.AlertDialog dialog = officialChoices();
+                assertEquals("视频", dialog.getListView().getAdapter().getItem(0));
+                assertEquals(0, server.getRequestCount());
+                dialog.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).performClick();
+                ShadowLooper.idleMainLooper();
+                assertFalse(dialog.isShowing());
+                assertEquals(0, server.getRequestCount());
+            }
+        }
+    }
+
+    @Test @Config(sdk = 28)
+    public void officialDefaultBehaviorSavesVideoWithoutOpeningChoices() throws Throwable {
+        DownloadDocumentTreeTest.RecordingDocuments documents = DownloadDocumentTreeTest.register();
+        try (okhttp3.mockwebserver.MockWebServer server = new okhttp3.mockwebserver.MockWebServer()) {
+            server.start();
+            server.enqueue(new okhttp3.mockwebserver.MockResponse().addHeader("Content-Type", "video/mp4").setBody("direct-video"));
+            try (Fixture f = new Fixture(Map.of("long_press_top_left", "save_media",
+                    LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, true,
+                    LocalOptions.DOWNLOAD_SAVE_TREE, DownloadDocumentTreeTest.TREE))) {
+                Aweme work = new Aweme("work");
+                work.video = new DownloadActionHookTest.VideoFixture();
+                work.video.play_addr = new DownloadActionHookTest.UrlFixture(server.url("/video.mp4").toString());
+                f.holder.downloadAweme = work;
+                f.select();
+                android.app.AlertDialog previous = ShadowAlertDialog.getLatestAlertDialog();
+                f.longPress(0, 0);
+                assertSame(previous, ShadowAlertDialog.getLatestAlertDialog());
+                assertEquals("/video.mp4", server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS).getPath());
+                awaitDownloadToast("媒体已保存到所选目录");
+                assertEquals(1, documents.files.size());
+                assertEquals("direct-video", java.nio.file.Files.readString(documents.files.values().iterator().next().toPath()));
+            }
+        }
+    }
+
+    @Test @Config(sdk = 28)
+    public void officialDefaultBehaviorSavesAllPicturesUsingTheExistingNamingAndDirectory() throws Throwable {
+        DownloadDocumentTreeTest.RecordingDocuments documents = DownloadDocumentTreeTest.register();
+        try (okhttp3.mockwebserver.MockWebServer server = new okhttp3.mockwebserver.MockWebServer()) {
+            server.start();
+            server.enqueue(new okhttp3.mockwebserver.MockResponse().addHeader("Content-Type", "image/png").setBody("picture"));
+            server.enqueue(new okhttp3.mockwebserver.MockResponse().addHeader("Content-Type", "image/png").setBody("picture"));
+            try (Fixture f = new Fixture(Map.of("long_press_top_left", "save_media",
+                    LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, true,
+                    LocalOptions.DOWNLOAD_SAVE_TREE, DownloadDocumentTreeTest.TREE,
+                    "download_custom_name", true, "download_name_template", "#index#"))) {
+                Aweme work = new Aweme("work");
+                DownloadActionHookTest.ImageFixture first = new DownloadActionHookTest.ImageFixture();
+                first.url_list = List.of(server.url("/first.png").toString());
+                DownloadActionHookTest.ImageFixture second = new DownloadActionHookTest.ImageFixture();
+                second.url_list = List.of(server.url("/second.png").toString());
+                work.images = List.of(first, second);
+                work.video = new DownloadActionHookTest.VideoFixture();
+                work.video.play_addr = new DownloadActionHookTest.UrlFixture(server.url("/wrong-video.mp4").toString());
+                f.holder.downloadAweme = work;
+                f.select();
+                android.app.AlertDialog previous = ShadowAlertDialog.getLatestAlertDialog();
+                f.longPress(0, 0);
+                assertSame(previous, ShadowAlertDialog.getLatestAlertDialog());
+                assertEquals(java.util.Set.of("/first.png", "/second.png"), java.util.Set.of(
+                        server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS).getPath(),
+                        server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS).getPath()));
+                awaitDownloadToast("媒体已保存到所选目录");
+                long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3);
+                while (documents.files.size() < 2 && System.nanoTime() < deadline) {
+                    java.util.concurrent.locks.LockSupport.parkNanos(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(5));
+                }
+                assertEquals(java.util.Set.of("1.png", "2.png"), new java.util.HashSet<>(documents.names.values()));
+                assertEquals(2, server.getRequestCount());
+            }
+        }
+    }
+
+    @Test public void officialChoiceRejectsReboundWorkAndClosesOnPauseOrSettingChange() throws Throwable {
+        try (okhttp3.mockwebserver.MockWebServer server = new okhttp3.mockwebserver.MockWebServer()) {
+            server.start();
+            try (Fixture f = new Fixture(Map.of("long_press_top_left", "save_media"))) {
+                Aweme work = new Aweme("work");
+                work.video = new DownloadActionHookTest.VideoFixture();
+                work.video.play_addr = new DownloadActionHookTest.UrlFixture(server.url("/video.mp4").toString());
+                f.holder.downloadAweme = work;
+                f.select();
+                f.longPress(0, 0);
+                android.app.AlertDialog rebound = officialChoices();
+                f.holder.downloadAweme = new Aweme("replacement");
+                rebound.getListView().performItemClick(null, 0, 0);
+                assertEquals(0, server.getRequestCount());
+                f.holder.downloadAweme = work;
+                f.longPress(0, 0);
+                android.app.AlertDialog paused = officialChoices();
+                f.hook.onActivityPaused(f.activity);
+                ShadowLooper.idleMainLooper();
+                assertFalse(paused.isShowing());
+                f.hook.onActivityResumed(f.activity);
+                ShadowLooper.idleMainLooper();
+                f.longPress(0, 0);
+                android.app.AlertDialog changed = officialChoices();
+                f.hook.setOptions(new LocalOptions(Collections.emptyMap()));
+                ShadowLooper.idleMainLooper();
+                assertFalse(changed.isShowing());
+                assertEquals(0, server.getRequestCount());
             }
         }
     }
@@ -336,6 +472,7 @@ public final class FeedGestureToolsHookTest {
                             + server.url("/media.mp4") + "\"]}}"));
             server.enqueue(new okhttp3.mockwebserver.MockResponse().addHeader("Content-Type", "video/mp4").setBody("video"));
             try (Fixture f = new Fixture(Map.of("long_press_top_left", "menu", "download_method", "third_party",
+                    ThirdPartyDownloadSettings.DIRECT, true,
                     ThirdPartyDownloadSettings.GET_TEMPLATE, server.url("/latest").toString(),
                     LocalOptions.DOWNLOAD_SAVE_TREE, DownloadDocumentTreeTest.TREE))) {
                 f.select();

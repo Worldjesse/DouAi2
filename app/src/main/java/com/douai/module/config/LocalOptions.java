@@ -11,10 +11,12 @@ public final class LocalOptions {
     /** Prevents the host from handling long-press gestures when no module action is assigned. */
     public static final String INTERCEPT_NATIVE_LONG_PRESS = "intercept_native_long_press";
     public static final String DOWNLOAD_SAVE_TREE = "download_directory_uri";
+    public static final String OFFICIAL_DOWNLOAD_DIRECT = "download_official_direct";
     public static final String REPLY_VOICE = "reply_voice";
     public static final String COMMENT_VOICE = "comment_voice";
 
     public String downloadSaveTree() { return text(DOWNLOAD_SAVE_TREE, "").trim(); }
+    public boolean officialDownloadDirect() { return enabled(OFFICIAL_DOWNLOAD_DIRECT); }
 
     public boolean samePrefix(LocalOptions other, String prefix) {
         Map<String, Object> left = new HashMap<>();

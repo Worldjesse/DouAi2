@@ -2,6 +2,7 @@ package com.douai.module.feature;
 
 import android.app.Dialog;
 import android.content.Context;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
@@ -136,26 +137,45 @@ public final class HostBehaviorHooks implements AutoCloseable {
         BehaviorHookGroup group = newGroup(key);
         try {
             Method method = HostTargets.method(report, "adv_ui_black_spaces", loader);
+            Method created = method.getDeclaringClass().getDeclaredMethod("onViewCreated", View.class, Bundle.class);
             Field top = HostTargets.field(method.getDeclaringClass(), "i");
             Field bottom = HostTargets.field(method.getDeclaringClass(), "j");
             if (!View.class.isAssignableFrom(top.getType())
                     || !View.class.isAssignableFrom(bottom.getType())) {
                 throw new IllegalStateException("Feed black-space field types changed");
             }
-            group.add(framework, method, chain -> {
-                Object result = chain.proceed();
-                if (closed || !group.isActive()) return result;
-                try {
-                    remember((View) top.get(chain.getThisObject()), key);
-                    remember((View) bottom.get(chain.getThisObject()), key);
-                } catch (ReflectiveOperationException | RuntimeException failure) {
-                    rollbackViews(key);
-                    group.fail(failure);
-                }
-                return result;
-            });
-            reportInstalled(key, 1);
-        } catch (Throwable failure) { group.fail(failure); }
+            // A feed-mode switch can rebuild the panel's views before the next space update.
+            // Bind after creation as well, when the host has assigned the replacement i/j fields.
+            for (Method target : new Method[]{method, created}) {
+                group.add(framework, target, chain -> {
+                    Object result = chain.proceed();
+                    if (closed || !group.isActive()) return result;
+                    try {
+                        View topSpace = (View) top.get(chain.getThisObject());
+                        View bottomSpace = (View) bottom.get(chain.getThisObject());
+                        remember(topSpace, key);
+                        remember(bottomSpace, key);
+                        if (target == created) reportBlackSpacesCreated(key, topSpace, bottomSpace);
+                    } catch (ReflectiveOperationException | RuntimeException failure) {
+                        rollbackViews(key);
+                        group.fail(failure);
+                    }
+                    return result;
+                });
+            }
+            reportInstalled(key, 2);
+        } catch (Throwable failure) {
+            group.fail(failure);
+            rollbackViews(key);
+        }
+    }
+
+    private void reportBlackSpacesCreated(String key, View top, View bottom) {
+        try {
+            log.accept("Black-space panel created: enabled=" + enabled(key)
+                    + " top=" + (top == null ? "null" : top.getVisibility())
+                    + " bottom=" + (bottom == null ? "null" : bottom.getVisibility()));
+        } catch (Throwable ignored) { }
     }
 
     private void installPublishButton(XposedInterface framework, HostScanReport report, ClassLoader loader) {
