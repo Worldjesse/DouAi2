@@ -176,8 +176,9 @@ final class AiModelEditor implements AutoCloseable {
         EditText topP = formInput(form, "Top P", Double.toString(original.topP), false);
         EditText headers = formInput(form, "自定义请求头 JSON", original.customHeaders, false);
         EditText parameters = formInput(form, "自定义参数 JSON", original.customParameters, false);
-        TextView status = text("模型名称可手动填写；获取列表失败不影响保存。", 12, MUTED, false);
+        TextView status = text("", 12, MUTED, false);
         status.setTag("ai.status");
+        status.setVisibility(View.GONE);
         form.addView(status, matchWrap());
         Callable<AiModelConfig> readDraft = () -> buildAiConfig(original.id, name, provider, protocol, endpoint,
                 key, modelName, modelsEndpoint, systemPrompt[0], contextRounds, timeout, allowHttp,
@@ -230,6 +231,7 @@ final class AiModelEditor implements AutoCloseable {
                 AiModelConfig draft = readDraft.call();
                 draft.validate(false);
                 fetchModels.setEnabled(false);
+                status.setVisibility(View.VISIBLE);
                 status.setText("正在获取模型列表…");
                 ChatCompletionClient.ModelCatalogRequest request = new ChatCompletionClient.ModelCatalogRequest();
                 modelRequest = request;

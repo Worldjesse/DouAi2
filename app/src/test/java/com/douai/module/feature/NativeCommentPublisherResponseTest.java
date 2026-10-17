@@ -32,11 +32,48 @@ public final class NativeCommentPublisherResponseTest {
         assertEquals("; response=Exception", NativeCommentPublisher.callbackDiagnostic(new Exception("private-key")));
     }
 
+    @Test public void repliesRequireTheCorrectWorkAndRootWithAnExactNestedTarget() {
+        Response response = new Response();
+        response.comment = new Comment();
+        response.comment.cid = "published";
+        response.comment.awemeId = "origin";
+        response.comment.replyId = "root";
+        response.comment.replyToReplyId = "incoming";
+        assertTrue(NativeCommentPublisher.validReplyResponse(response, "origin", "root", "incoming"));
+        assertEquals("sent", NativeCommentPublisher.responseStatus(response, "origin", "root", "incoming"));
+        response.comment.replyToReplyId = "other-target";
+        assertEquals("submitted", NativeCommentPublisher.responseStatus(response, "origin", "root", "incoming"));
+        response.comment.replyToReplyId = null;
+        assertEquals("submitted", NativeCommentPublisher.responseStatus(response, "origin", "root", "incoming"));
+        response.comment.replyToReplyId = "incoming";
+        response.comment.replyId = "another-root";
+        assertEquals("submitted", NativeCommentPublisher.responseStatus(response, "origin", "root", "incoming"));
+        response.comment.replyId = "root";
+        response.comment.awemeId = "";
+        assertTrue(NativeCommentPublisher.validResponse(response, "origin"));
+        assertEquals("submitted", NativeCommentPublisher.responseStatus(response, "origin", "root", "incoming"));
+        response.comment.awemeId = "origin";
+        response.status_code = 42;
+        assertEquals("failed", NativeCommentPublisher.responseStatus(response, "origin", "root", "incoming"));
+    }
+
+    @Test public void aReplyToTheRootDoesNotRequireANestedReplyIdButStillRequiresItsRoot() {
+        Response response = new Response();
+        response.comment = new Comment();
+        response.comment.cid = "published";
+        response.comment.awemeId = "origin";
+        response.comment.replyId = "root";
+        assertTrue(NativeCommentPublisher.validReplyResponse(response, "origin", "root", "root"));
+        response.comment.replyId = null;
+        assertEquals("submitted", NativeCommentPublisher.responseStatus(response, "origin", "root", "root"));
+        assertEquals("submitted", NativeCommentPublisher.responseStatus(null, "origin", "root", "root"));
+    }
+
     public static final class CodedFailure extends Exception {
         CodedFailure(String message) { super(message); }
         public int getErrorCode() { return 413; }
     }
 
     public static final class Response { public int status_code; public Comment comment; }
-    public static final class Comment { public String cid; public String awemeId; }
+    public static final class Comment { public String cid; public String awemeId; public String replyId; public String replyToReplyId; }
 }

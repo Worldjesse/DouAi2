@@ -1,0 +1,526 @@
+package com.douai.module.feature;
+
+import android.app.Activity;
+import android.app.Application;
+import android.content.Context;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+
+import com.douai.module.config.AiModelSettings;
+import com.douai.module.config.AutomationHistoryStore;
+import com.douai.module.config.LocalOptions;
+import com.douai.module.scan.HostScanReport;
+import io.github.libxposed.api.XposedInterface;
+
+import java.lang.ref.WeakReference;
+import java.lang.reflect.Method;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+import java.util.function.LongSupplier;
+import java.util.function.IntConsumer;
+
+/** The comment inbox for automatic replies; modes and delivery settings belong to the parent. */
+public final class CommentReplyHook implements Application.ActivityLifecycleCallbacks, AutoCloseable {
+    interface Source extends AutoCloseable {
+        long baseline(long account, BooleanSupplier valid) throws Exception;
+        default List<String> baselineIds() { return Collections.emptyList(); }
+        default long scannedThrough() { return 0; }
+        List<CommentReplyEvent> scan(long account, long since, BooleanSupplier valid) throws Exception;
+        @Override default void close() { }
+    }
+    interface Sender extends AutoCloseable {
+        void send(CommentReplyEvent event, String text, BooleanSupplier valid,
+                  BooleanSupplier beforeSend, Runnable accepted, Consumer<String> result);
+        default void send(CommentReplyEvent event, String text, SpeechPreparation.Audio audio, BooleanSupplier valid,
+                          BooleanSupplier beforeSend, Runnable accepted, Consumer<String> result) {
+            if (audio != null) throw new IllegalStateException("Comment voice sender unavailable");
+            send(event, text, valid, beforeSend, accepted, result);
+        }
+        default boolean owns(Object model) { return false; }
+        @Override default void close() { }
+    }
+    interface Generator extends AutoCloseable {
+        Generated generate(long account, CommentReplyEvent event, LocalOptions options) throws Exception;
+        default Generated generate(long account, CommentReplyEvent event, LocalOptions options,
+                                   List<ChatImage> images, String prompt, IntConsumer requestSent) throws Exception {
+            return generate(account, event, options);
+        }
+        default void acknowledged(long account, CommentReplyEvent event, LocalOptions options, String text) throws Exception { }
+        default void acknowledged(long account, CommentReplyEvent event, LocalOptions options, String text,
+                                  List<ChatImage> images, String prompt) throws Exception { acknowledged(account, event, options, text); }
+        default void cancel() { }
+        @Override default void close() { cancel(); }
+    }
+    static final class Generated {
+        final String text, model;
+        Generated(String text, String model) { this.text = text; this.model = model; }
+    }
+    private static final String KIND = "comment_reply";
+    private static final long POLL_MILLIS = 60_000;
+    private static final int MAX_PENDING = 12;
+    private static final int MAX_THREAD_REPLIES = 3;
+    private final Application application;
+    private final AutomationDispatcher dispatcher;
+    private final Source source;
+    private final Sender sender;
+    private final Generator generator;
+    private final LongSupplier ownAccount;
+    private final ExecutorService scanner, worker;
+    private final CommentReplyLedger ledger;
+    private final AutomationRateLimiter rateLimiter;
+    private final Consumer<String> log;
+    private SpeechPreparation.Preparer speechPreparer = SpeechPreparation::prepareComment;
+    interface MediaLoader {
+        List<ChatImage> load(Context context, CommentReplyEvent event, LocalOptions options, MediaReadCancellation cancellation) throws Exception;
+    }
+    private MediaLoader mediaLoader = AutomationReplyMedia::comment;
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final Object stateLock = new Object();
+    private final AtomicLong generation = new AtomicLong();
+    private final AtomicBoolean scanQueued = new AtomicBoolean();
+    private final Map<String, Task> tasks = new ConcurrentHashMap<>();
+    private volatile LocalOptions options;
+    private volatile boolean foreground, closed;
+    private boolean foregroundSession;
+    private volatile long sessionAccount;
+    private volatile WeakReference<Activity> resumed = new WeakReference<>(null);
+    private volatile String diagnostic = "未启用";
+    private final Runnable scanSignal = this::requestScan;
+    private final Runnable poll = new Runnable() {
+        @Override public void run() {
+            if (closed || !foregroundSession) return;
+            requestScan();
+            main.postDelayed(this, account() > 0 ? POLL_MILLIS : 5_000);
+        }
+    };
+    private final Runnable background = () -> {
+        if (closed || foreground) return;
+        foregroundSession = false;
+        main.removeCallbacks(poll);
+        main.removeCallbacks(scanSignal);
+        invalidate();
+    };
+
+    CommentReplyHook(Context context, LocalOptions options, AutomationDispatcher dispatcher,
+                     Source source, Sender sender, Generator generator, LongSupplier ownAccount,
+                     ExecutorService scanner, ExecutorService worker, Consumer<String> log) {
+        Context app = context.getApplicationContext();
+        if (!(app instanceof Application)) throw new IllegalArgumentException("Application context required");
+        this.application = (Application) app;
+        this.options = options;
+        this.dispatcher = dispatcher;
+        this.source = source;
+        this.sender = sender;
+        this.generator = generator;
+        this.ownAccount = ownAccount;
+        this.scanner = scanner;
+        this.worker = worker;
+        this.log = log == null ? ignored -> { } : log;
+        ledger = new CommentReplyLedger(app);
+        rateLimiter = new AutomationRateLimiter(app);
+        application.registerActivityLifecycleCallbacks(this);
+    }
+
+    public static CommentReplyHook install(XposedInterface framework, HostScanReport report,
+                                           ClassLoader loader, Context context, LocalOptions options,
+                                           AutomationDispatcher dispatcher, Consumer<String> log) throws Exception {
+        Method service = HostTargets.method(report, "media_account_service", loader);
+        Method user = HostTargets.method(report, "media_current_user", loader);
+        NativeCommentPublisher publisher = NativeCommentPublisher.install(framework, report, loader, log, "DouAi.CommentReply");
+        NativeCommentReplyInbox inbox = null;
+        CommentReplyHook[] installed = new CommentReplyHook[1];
+        try {
+            inbox = NativeCommentReplyInbox.install(framework, report, loader, log, () -> {
+                CommentReplyHook hook = installed[0];
+                if (hook != null) hook.signal();
+            });
+            NativeCommentReplyInbox captured = inbox;
+            Source source = new Source() {
+                @Override public long baseline(long account, BooleanSupplier valid) throws Exception { return captured.baseline(account, valid); }
+                @Override public List<String> baselineIds() { return captured.baselineCommentIds(); }
+                @Override public long scannedThrough() { return captured.scannedThrough(); }
+                @Override public List<CommentReplyEvent> scan(long account, long since, BooleanSupplier valid) throws Exception { return captured.scan(account, since, valid); }
+                @Override public void close() { captured.close(); }
+            };
+            Sender sender = new Sender() {
+                @Override public void send(CommentReplyEvent event, String text, BooleanSupplier valid,
+                                           BooleanSupplier before, Runnable accepted, Consumer<String> result) {
+                    publisher.sendReply(event, text, valid, before, accepted, result);
+                }
+                @Override public void send(CommentReplyEvent event, String text, SpeechPreparation.Audio audio,
+                                           BooleanSupplier valid, BooleanSupplier before, Runnable accepted, Consumer<String> result) {
+                    publisher.sendReply(event, text, audio, valid, before, accepted, result);
+                }
+                @Override public boolean owns(Object model) { return publisher.ownsPublish(model); }
+                @Override public void close() { publisher.close(); }
+            };
+            LongSupplier account = () -> {
+                try {
+                    Object current = user.invoke(service.invoke(null));
+                    return Long.parseLong(String.valueOf(HostTargets.invoke(current, "getUid")));
+                } catch (ReflectiveOperationException | RuntimeException failure) { return 0; }
+            };
+            installed[0] = new CommentReplyHook(context, options, dispatcher, source, sender, new SharedReplyGenerator(),
+                    account, Executors.newSingleThreadExecutor(), Executors.newSingleThreadExecutor(), log);
+            return installed[0];
+        } catch (Exception failure) {
+            if (inbox != null) inbox.close();
+            publisher.close();
+            throw failure;
+        }
+    }
+
+    public boolean ownsPublish(Object model) { return sender.owns(model); }
+    public String diagnostic() { return diagnostic; }
+
+    public void setOptions(LocalOptions next) {
+        boolean changed;
+        synchronized (stateLock) {
+            LocalOptions before = options;
+            changed = before.enabled(LocalOptions.COMMENT_REPLY_ENABLED) != next.enabled(LocalOptions.COMMENT_REPLY_ENABLED)
+                    || before.enabled("native_auto_reply") != next.enabled("native_auto_reply")
+                    || !before.samePrefix(next, "reply_") || !before.samePrefix(next, "tts_")
+                    || !before.text("auto_message_text", "").equals(next.text("auto_message_text", ""))
+                    || !before.text(AiModelSettings.KEY, "").equals(next.text(AiModelSettings.KEY, ""));
+            options = next;
+            if (changed) invalidate();
+        }
+        if (changed) main.post(() -> { if (enabled()) signal(); else diagnostic = "未启用"; });
+    }
+
+    private boolean enabled() {
+        LocalOptions current = options;
+        return !closed && current.enabled(LocalOptions.COMMENT_REPLY_ENABLED) && current.enabled("native_auto_reply");
+    }
+    private long account() { try { return ownAccount.getAsLong(); } catch (RuntimeException ignored) { return 0; } }
+    private boolean valid(long account, long epoch) {
+        synchronized (stateLock) {
+            return enabled() && foreground && generation.get() == epoch && sessionAccount == account && account() == account;
+        }
+    }
+    private boolean valid(Task task) {
+        synchronized (stateLock) { return !task.finished.get() && valid(task.account, task.epoch); }
+    }
+
+    void signal() {
+        if (closed) return;
+        main.removeCallbacks(scanSignal);
+        main.postDelayed(scanSignal, 1_000);
+    }
+
+    void requestScan() {
+        if (!enabled() || !foreground) return;
+        long account = account();
+        if (account <= 0) { diagnostic = "等待登录"; return; }
+        if (sessionAccount != account) {
+            invalidate();
+            sessionAccount = account;
+        }
+        if (!scanQueued.compareAndSet(false, true)) return;
+        long epoch = generation.get();
+        try {
+            scanner.execute(() -> {
+                try {
+                    if (!valid(account, epoch)) return;
+                    if (!ledger.initialized(account)) {
+                        long baseline = source.baseline(account, () -> valid(account, epoch));
+                        if (!valid(account, epoch)) return;
+                        if (!ledger.initialize(account, baseline, source.baselineIds())) {
+                            throw new IllegalStateException("Could not persist comment inbox baseline");
+                        }
+                        diagnostic = "已建立起点，等待新回复";
+                        return;
+                    }
+                    long since = Math.max(ledger.baseline(account), ledger.watermark(account) - 300);
+                    List<CommentReplyEvent> events = source.scan(account, since, () -> valid(account, epoch));
+                    if (!valid(account, epoch)) return;
+                    long newest = Math.max(ledger.watermark(account), source.scannedThrough());
+                    boolean deferred = false;
+                    for (CommentReplyEvent event : events) {
+                        if (!valid(account, epoch)) return;
+                        if (event.createdAt < ledger.baseline(account)) continue;
+                        newest = Math.max(newest, event.createdAt);
+                        if ((event.text == null || event.text.trim().isEmpty()) && (!"ai".equals(options.text("reply_mode", "fixed"))
+                                || !options.enabled(LocalOptions.REPLY_RECOGNIZE_IMAGES, true)
+                                || !AutomationReplyMedia.hasCommentImages(event.targetComment))) continue;
+                        String identity = account + ":" + event.incomingId;
+                        if (tasks.containsKey(identity)) { deferred = true; continue; }
+                        int threadLimit = MAX_THREAD_REPLIES;
+                        if (ledger.threadExhausted(account, event.rootId, threadLimit)) continue;
+                        if (ledger.contains(account, event.incomingId) && !ledger.retryable(account, event.incomingId)) continue;
+                        if (tasks.size() >= MAX_PENDING || !rateLimiter.canSend(KIND, account, event.senderUid, options)) {
+                            deferred = true;
+                            continue;
+                        }
+                        if (!ledger.claim(account, event.incomingId, event.rootId, threadLimit)) {
+                            deferred = true;
+                            continue;
+                        }
+                        Task task = new Task(account, epoch, identity, event);
+                        tasks.put(identity, task);
+                        deferred = true;
+                        long delay = Math.max(2, Math.min(3600, options.integer("reply_delay_seconds", 2))) * 1000L;
+                        main.postDelayed(() -> {
+                            if (!valid(task)) { complete(task, "cancelled"); return; }
+                            try { worker.execute(() -> generate(task)); }
+                            catch (RejectedExecutionException failure) { complete(task, "failed"); }
+                        }, delay);
+                    }
+                    if (!deferred && tasks.isEmpty()) ledger.advance(account, newest);
+                    diagnostic = deferred ? "等待处理或发送额度" : "已检查新回复";
+                } catch (Exception failure) {
+                    if (valid(account, epoch)) {
+                        diagnostic = "扫描暂未完成，稍后重试";
+                        safeLog("Comment reply scan failed: " + failure.getClass().getSimpleName());
+                    }
+                } finally {
+                    scanQueued.set(false);
+                    if (generation.get() != epoch && enabled() && foreground) signal();
+                }
+            });
+        } catch (RejectedExecutionException failure) { scanQueued.set(false); }
+    }
+
+    private void generate(Task task) {
+        if (!valid(task)) { complete(task, "cancelled"); return; }
+        if (!rateLimiter.canSend(KIND, task.account, task.event.senderUid, options)) { complete(task, "deferred"); return; }
+        Runnable timeout = () -> {
+            synchronized (stateLock) {
+                if (task.finished.get() || task.submitted) return;
+                task.media.cancel();
+                generator.cancel();
+                fail(task, "生成超时");
+            }
+        };
+        main.postDelayed(timeout, 120_000);
+        try {
+            synchronized (stateLock) {
+                if (!valid(task)) { complete(task, "cancelled"); return; }
+                task.settings = options;
+            }
+            if ("ai".equals(task.settings.text("reply_mode", "fixed"))) {
+                task.images = java.util.Collections.unmodifiableList(new java.util.ArrayList<>(
+                        mediaLoader.load(application, task.event, task.settings, task.media)));
+            }
+            if (!valid(task)) { complete(task, "cancelled"); return; }
+            if ((task.event.text == null || task.event.text.trim().isEmpty()) && task.images.isEmpty()) { complete(task, "cancelled"); return; }
+            task.input = input(task.event, task.images.isEmpty() ? "" : AutomationReplyMedia.commentSourceLabel(task.event, task.settings));
+            Generated generated = generator.generate(task.account, task.event, task.settings, task.images, task.input, count -> {
+                task.requestImageCount = count;
+                task.modelRequestSent = true;
+            });
+            if (!valid(task)) { complete(task, "cancelled"); return; }
+            if (generated == null || generated.text == null || generated.text.trim().isEmpty()) {
+                complete(task, "cancelled");
+                return;
+            }
+            if (generated.text.length() > 1000) throw new IllegalArgumentException("Comment reply output is too long");
+            task.text = generated.text.trim();
+            task.model = generated.model == null ? "" : generated.model;
+            if (task.settings.enabled(LocalOptions.REPLY_VOICE)) {
+                SpeechPreparation.Audio audio = speechPreparer.prepare(application, task.text, task.settings, 30_000, () -> valid(task));
+                task.audio = audio;
+                if (!valid(task)) { audio.delete(); complete(task, "cancelled"); return; }
+            }
+            dispatcher.prepare(entry(task, "pending"), () -> valid(task),
+                    done -> send(task, done), status -> complete(task, status));
+        } catch (Exception failure) {
+            if (!task.finished.get()) {
+                if (valid(task)) fail(task, failure.getClass().getSimpleName());
+                else complete(task, "cancelled");
+            }
+        } finally { main.removeCallbacks(timeout); }
+    }
+
+    private void send(Task task, Consumer<String> done) {
+        sender.send(task.event, task.text, task.audio, () -> valid(task), () -> {
+            synchronized (stateLock) {
+                if (!valid(task)) return false;
+                task.reservation = rateLimiter.tryReserve(KIND, task.account, task.event.senderUid, options);
+                if (task.reservation == null) { task.boundaryFailed = true; return false; }
+                // Configuration changes cannot interleave with this durable submission boundary.
+                if (!valid(task) || !ledger.submitted(task.account, task.event.incomingId)) {
+                    rateLimiter.release(task.reservation);
+                    task.reservation = null;
+                    task.boundaryFailed = true;
+                    return false;
+                }
+                task.submitted = true;
+                if (task.audio != null) new Handler(Looper.getMainLooper()).postDelayed(task.audio::delete, 600_000);
+                return true;
+            }
+        }, () -> {
+            safeLog("Comment reply native request accepted");
+        }, status -> {
+            if (task.finished.get() && !task.submitted) return;
+            if ("failed".equals(status) || "cancelled".equals(status)) rateLimiter.release(task.reservation);
+            if (task.audio != null && ("sent".equals(status) || "failed".equals(status) || "cancelled".equals(status))) task.audio.delete();
+            if ("cancelled".equals(status) && (task.boundaryFailed || !valid(task.account, task.epoch))) {
+                ledger.defer(task.account, task.event.incomingId);
+            } else ledger.finish(task.account, task.event.incomingId, status);
+            synchronized (stateLock) {
+                if ("sent".equals(status) && valid(task.account, task.epoch) && task.remembered.compareAndSet(false, true)) {
+                    try { generator.acknowledged(task.account, task.event, task.settings, task.text, task.images, task.input); }
+                    catch (Exception failure) { safeLog("Could not retain acknowledged comment reply context"); }
+                }
+            }
+            if (task.finished.get() && ("sent".equals(status) || "failed".equals(status))) {
+                dispatcher.recordOutcome(entry(task, status));
+            }
+            done.accept(status);
+        });
+    }
+
+    private void fail(Task task, String reason) {
+        safeLog("Comment reply generation failed: " + reason);
+        dispatcher.reportFinalFailure(entry(task, "failed"));
+        complete(task, "failed");
+    }
+
+    private void complete(Task task, String status) {
+        synchronized (stateLock) {
+            if (!task.finished.compareAndSet(false, true)) return;
+            task.media.cancel();
+            // A callback timeout preserves the durable submitted state and never opens a retry.
+            if ("deferred".equals(status) || "cancelled".equals(status)
+                    && (task.boundaryFailed || !valid(task.account, task.epoch)
+                        || !dispatcher.isForeground(resumed.get()))) ledger.defer(task.account, task.event.incomingId);
+            else ledger.finish(task.account, task.event.incomingId, status);
+            tasks.remove(task.identity, task);
+            if (task.audio != null && !task.submitted) task.audio.delete();
+            if ("failed".equals(status) && task.submitted) dispatcher.reportFinalFailure(entry(task, "failed"));
+        }
+        signal();
+    }
+
+    private AutomationHistoryStore.Entry entry(Task task, String status) {
+        long now = System.currentTimeMillis();
+        return new AutomationHistoryStore.Entry(task.id, KIND, task.event.aid, task.event.senderName,
+                task.input, task.text, task.model, status, task.created, now, task.requestImageCount, task.modelRequestSent,
+                task.audio == null ? AutomationHistoryStore.DELIVERY_TEXT : AutomationHistoryStore.DELIVERY_VOICE);
+    }
+
+    static String input(CommentReplyEvent event) {
+        return input(event, "");
+    }
+    static String input(CommentReplyEvent event, String mediaSource) {
+        String description = String.valueOf(HostTargets.invoke(event.work, "getDesc"));
+        if ("null".equals(description)) description = "";
+        String conversation = "\n我的原评论：" + bounded(event.originalText, 1000)
+                + "\n对方的回复：" + bounded(event.text, 2400)
+                + (mediaSource == null || mediaSource.isEmpty() ? "" : "\n实际附带的视觉素材：" + bounded(mediaSource, 200));
+        return "作品：" + bounded(description, Math.max(0, 4000 - "作品：".length() - conversation.length())) + conversation;
+    }
+    private static String bounded(String value, int max) { return value == null ? "" : value.substring(0, Math.min(max, value.length())); }
+    private void safeLog(String value) { try { log.accept(value); } catch (RuntimeException ignored) { } }
+
+    private void invalidate() {
+        synchronized (stateLock) {
+            generation.incrementAndGet();
+            for (Task task : tasks.values()) if (!task.submitted) task.media.cancel();
+            generator.cancel();
+            dispatcher.cancelKind(KIND);
+            for (Task task : tasks.values()) if (!task.submitted) complete(task, "cancelled");
+        }
+    }
+
+    @Override public void onActivityResumed(Activity activity) {
+        if (closed) return;
+        resumed = new WeakReference<>(activity);
+        foreground = true;
+        main.removeCallbacks(background);
+        if (!foregroundSession) {
+            foregroundSession = true;
+            main.removeCallbacks(poll);
+            main.post(poll);
+        }
+    }
+    @Override public void onActivityPaused(Activity activity) {
+        if (resumed.get() != activity) return;
+        resumed.clear();
+        foreground = false;
+        main.removeCallbacks(background);
+        main.postDelayed(background, 600);
+    }
+    @Override public void onActivityDestroyed(Activity activity) { onActivityPaused(activity); }
+    @Override public void onActivityCreated(Activity activity, Bundle state) { }
+    @Override public void onActivityStarted(Activity activity) { }
+    @Override public void onActivityStopped(Activity activity) { }
+    @Override public void onActivitySaveInstanceState(Activity activity, Bundle state) { }
+
+    @Override public void close() {
+        if (closed) return;
+        closed = true;
+        foreground = false;
+        invalidate();
+        main.removeCallbacksAndMessages(null);
+        application.unregisterActivityLifecycleCallbacks(this);
+        source.close();
+        sender.close();
+        generator.close();
+        scanner.shutdownNow();
+        worker.shutdownNow();
+    }
+
+    private static final class Task {
+        final long account, epoch, created = System.currentTimeMillis();
+        final String identity, id = UUID.randomUUID().toString();
+        final CommentReplyEvent event;
+        final AtomicBoolean finished = new AtomicBoolean();
+        final AtomicBoolean remembered = new AtomicBoolean();
+        volatile String text = "", model = "";
+        volatile boolean submitted, boundaryFailed;
+        volatile AutomationRateLimiter.Reservation reservation;
+        volatile SpeechPreparation.Audio audio;
+        volatile LocalOptions settings;
+        final MediaReadCancellation media = new MediaReadCancellation();
+        volatile List<ChatImage> images = Collections.emptyList();
+        volatile String input;
+        volatile int requestImageCount = -1;
+        volatile boolean modelRequestSent;
+        Task(long account, long epoch, String identity, CommentReplyEvent event) {
+            this.account = account; this.epoch = epoch; this.identity = identity; this.event = event;
+            input = input(event);
+        }
+    }
+    static final class SharedReplyGenerator implements Generator {
+        private final ChatCompletionClient ai = new ChatCompletionClient();
+        private final java.util.Random random = new java.util.Random();
+        @Override public Generated generate(long account, CommentReplyEvent event, LocalOptions options) throws Exception {
+            return generate(account, event, options, Collections.emptyList(), input(event), ignored -> { });
+        }
+        @Override public Generated generate(long account, CommentReplyEvent event, LocalOptions options,
+                                            List<ChatImage> images, String prompt, IntConsumer requestSent) throws Exception {
+            if (!"ai".equals(options.text("reply_mode", "fixed"))) {
+                return new Generated(ReplyPolicy.reply(event.text, options, random), "");
+            }
+            AiModelSettings models = AiModelSettings.read(options);
+            String model = models.selected().modelName;
+            String text = ai.reply("comment_reply:" + account + ':' + event.aid + ':' + event.rootId, prompt,
+                    images, models, options.text("reply_prompt", "自然简洁地回复对方，只输出回复正文。"), false, "", requestSent);
+            return new Generated(text, model);
+        }
+        @Override public void acknowledged(long account, CommentReplyEvent event, LocalOptions options, String text) throws Exception {
+            acknowledged(account, event, options, text, Collections.emptyList(), input(event));
+        }
+        @Override public void acknowledged(long account, CommentReplyEvent event, LocalOptions options, String text,
+                                            List<ChatImage> images, String prompt) throws Exception {
+            if (options == null || !"ai".equals(options.text("reply_mode", "fixed"))) return;
+            ai.rememberReply("comment_reply:" + account + ':' + event.aid + ':' + event.rootId, prompt,
+                    images, AiModelSettings.read(options),
+                    options.text("reply_prompt", "自然简洁地回复对方，只输出回复正文。"), text);
+        }
+        @Override public void cancel() { ai.cancelCurrentRequest(); ai.clearHistory(); }
+    }
+}

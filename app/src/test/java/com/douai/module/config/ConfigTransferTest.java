@@ -69,6 +69,72 @@ public final class ConfigTransferTest {
         }
     }
 
+    @Test public void commentReplyReceptionAndSharedReplySettingsRoundTripWithoutLosingLegacyValues() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put(LocalOptions.COMMENT_REPLY_ENABLED, true);
+        source.values.put("comment_reply_prompt", "结合原评论，简洁回复对方");
+        source.values.put("comment_reply_daily_limit", "20");
+        source.values.put("comment_reply_user_cooldown_minutes", "1");
+        source.values.put("comment_reply_thread_limit", "3");
+        source.values.put("comment_reply_tip_enabled", false);
+        source.values.put("comment_reply_tip_seconds", "3");
+        source.values.put("comment_reply_failure_notify", true);
+        source.values.put("native_auto_reply", true);
+        source.values.put("native_auto_comment", false);
+        source.values.put("reply_mode", "ai");
+        source.values.put("reply_prompt", "共享二级提示词");
+        source.values.put("auto_message_text", "共享固定正文");
+        source.values.put("reply_daily_limit", "7");
+        source.values.put("reply_user_cooldown_minutes", "2");
+        source.values.put("reply_tip", true);
+        source.values.put("reply_notice_seconds", "8");
+        source.values.put("reply_save_history", true);
+        source.values.put("reply_voice", true);
+        source.values.put("reply_private_chats", false);
+        source.values.put("reply_group_chats", false);
+        ConfigTransfer.Preview preview = ConfigTransfer.inspect(target, ConfigTransfer.export(source, false));
+        assertEquals(source.values.size(), preview.entryCount);
+        assertTrue(preview.changedKeys.contains(LocalOptions.COMMENT_REPLY_ENABLED));
+        assertTrue(preview.changedKeys.contains("comment_reply_prompt"));
+        ConfigTransfer.apply(target, preview);
+        assertEquals(source.values, target.values);
+        assertTrue(new LocalOptions(target.snapshot()).enabled(LocalOptions.COMMENT_REPLY_ENABLED));
+        assertEquals(20, new LocalOptions(target.snapshot()).integer("comment_reply_daily_limit", 0));
+        assertTrue(new LocalOptions(target.snapshot()).enabled("native_auto_reply"));
+        assertEquals("ai", new LocalOptions(target.snapshot()).text("reply_mode", ""));
+        assertEquals("共享二级提示词", new LocalOptions(target.snapshot()).text("reply_prompt", ""));
+        assertEquals(7, new LocalOptions(target.snapshot()).integer("reply_daily_limit", 0));
+        assertTrue(new LocalOptions(target.snapshot()).enabled("reply_save_history"));
+        assertFalse(new LocalOptions(target.snapshot()).enabled("reply_private_chats"));
+        assertFalse(new LocalOptions(target.snapshot()).enabled("reply_group_chats"));
+        assertFalse(new LocalOptions(target.snapshot()).enabled("native_auto_comment"));
+    }
+
+    @Test public void replyRecognitionBooleansRoundTripIndependentlyOfWorkCommentRecognition() throws Exception {
+        for (boolean images : new boolean[]{false, true}) {
+            for (boolean video : new boolean[]{false, true}) {
+                MemoryStore source = new MemoryStore(), target = new MemoryStore();
+                source.values.put(LocalOptions.REPLY_RECOGNIZE_IMAGES, images);
+                source.values.put(LocalOptions.REPLY_RECOGNIZE_VIDEO, video);
+                source.values.put("comment_recognize_images", !images);
+                source.values.put("comment_recognize_video", !video);
+                String encoded = ConfigTransfer.export(source, false);
+                JSONObject transferred = new JSONObject(encoded).getJSONObject("values");
+                assertEquals("boolean", transferred.getJSONObject(LocalOptions.REPLY_RECOGNIZE_IMAGES).getString("type"));
+                assertEquals("boolean", transferred.getJSONObject(LocalOptions.REPLY_RECOGNIZE_VIDEO).getString("type"));
+                ConfigTransfer.Preview preview = ConfigTransfer.inspect(target, encoded);
+                assertEquals(4, preview.entryCount);
+                ConfigTransfer.apply(target, preview);
+                assertEquals(source.values, target.values);
+                LocalOptions restored = new LocalOptions(target.snapshot());
+                assertEquals(images, restored.enabled(LocalOptions.REPLY_RECOGNIZE_IMAGES, true));
+                assertEquals(video, restored.enabled(LocalOptions.REPLY_RECOGNIZE_VIDEO, false));
+                assertEquals(!images, restored.enabled("comment_recognize_images", true));
+                assertEquals(!video, restored.enabled("comment_recognize_video", false));
+            }
+        }
+    }
+
     @Test public void thirdPartyDirectDownloadBooleanTransfersIndependentlyOfOfficialDefaultBehavior() throws Exception {
         for (boolean enabled : new boolean[]{false, true}) {
             MemoryStore source = new MemoryStore(), target = new MemoryStore();

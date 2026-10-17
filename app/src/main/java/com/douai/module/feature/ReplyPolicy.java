@@ -20,16 +20,22 @@ public final class ReplyPolicy {
         public final long sender;
         public final String text;
         public final java.util.List<String> imageUrls;
+        public final String videoUrl;
         public final String author;
         public final boolean group;
         public final AutomationScopePolicy.Relation relation;
         Incoming(String conversation, String serverId, long sender, String text, java.util.List<String> imageUrls,
                  String author, boolean group, AutomationScopePolicy.Relation relation) {
+            this(conversation, serverId, sender, text, imageUrls, "", author, group, relation);
+        }
+        Incoming(String conversation, String serverId, long sender, String text, java.util.List<String> imageUrls,
+                 String videoUrl, String author, boolean group, AutomationScopePolicy.Relation relation) {
             this.conversation = conversation;
             this.serverId = serverId;
             this.sender = sender;
             this.text = text;
             this.imageUrls = imageUrls;
+            this.videoUrl = videoUrl == null ? "" : videoUrl;
             this.author = author;
             this.group = group;
             this.relation = relation;
@@ -46,21 +52,31 @@ public final class ReplyPolicy {
             Integer type = values.getAsInteger("type");
             Integer conversationType = values.getAsInteger("conversation_type");
             Long created = values.getAsLong("created_time");
+            boolean ai = "ai".equals(options.text("reply_mode", "fixed"));
             if (created != null && created > 0 && created < 1_000_000_000_000L) created *= 1000;
             if (sender == null || sender <= 0 || sender == ownUid || conversation == null || conversation.isEmpty()
                     || id == null || !id.matches("[1-9][0-9]*") || type == null
-                    || type != 7 && !(type == 27 && "ai".equals(options.text("reply_mode", "fixed")))
+                    || type != 7 && !(ai && (type == 27 || AutomationReplyMedia.isVideoMessageType(type)))
                     || conversationType != null && conversationType != 1 && conversationType != 2
                     || created == null || created < startedAt - 30_000) return null;
             boolean group = conversationType != null && conversationType == 2;
             if (group && !options.enabled("reply_group_chats", false)) return null;
             if (!group && !options.enabled("reply_private_chats", true)) return null;
             JSONObject content = new JSONObject(values.getAsString("content"));
-            java.util.List<String> images = type == 27 ? AutomationImages.incoming(content) : java.util.Collections.emptyList();
+            java.util.List<String> images = type == 27 && options.enabled(LocalOptions.REPLY_RECOGNIZE_IMAGES, true)
+                    ? AutomationReplyMedia.incomingImages(content) : java.util.Collections.emptyList();
+            if (type == 27 && options.enabled(LocalOptions.REPLY_RECOGNIZE_IMAGES, true) && images.isEmpty()) return null;
+            boolean videoMessage = AutomationReplyMedia.isVideoMessageType(type);
+            String video = videoMessage
+                    && options.enabled(LocalOptions.REPLY_RECOGNIZE_VIDEO, false)
+                    ? AutomationReplyMedia.incomingVideo(content) : "";
+            // The verified type 30 payload is encrypted. A resolver must prove a playable source first.
+            if (videoMessage && (video == null || video.isEmpty())) return null;
+            if (video == null) video = "";
             String text = content.optString("text", "").trim();
             String messageText = text;
-            if (type == 27 && images.isEmpty()) return null;
             if (text.isEmpty() && !images.isEmpty()) text = "请根据对方发来的图片回复对方。";
+            if (text.isEmpty() && !video.isEmpty()) text = "请根据对方发来的视频画面回复对方。";
             if (text.isEmpty()) return null;
             String uid = sender.toString();
             AutomationScopePolicy.Relation relation = AutomationScopePolicy.fromIncoming(values, sender);
@@ -71,7 +87,7 @@ public final class ReplyPolicy {
                 if (!GroupReplyPolicy.allows(values, ownUid, conversation, sender, author, options)) return null;
             } else if (!ReplyScopePolicy.allows(options, uid, author, messageText,
                     content.optString("title", ""), relation)) return null;
-            return new Incoming(conversation, id, sender, text, images, author, group, relation);
+            return new Incoming(conversation, id, sender, text, images, video, author, group, relation);
         } catch (org.json.JSONException | RuntimeException ignored) { return null; }
     }
 

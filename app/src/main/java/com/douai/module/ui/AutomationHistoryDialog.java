@@ -95,7 +95,8 @@ final class AutomationHistoryDialog {
             history = rows;
         }
         dialog = new MiuixDialogBuilder(context, this.miuix)
-                .setTitle(AutomationHistoryStore.REPLY.equals(kind) ? "回复历史记录" : "评论历史记录")
+                .setTitle(AutomationHistoryStore.COMMENT_REPLY.equals(kind) ? "评论回复历史记录"
+                        : AutomationHistoryStore.REPLY.equals(kind) ? "回复历史记录" : "评论历史记录")
                 .setView(history).setNegativeButton("关闭", null).setNeutralButton("清空记录", null).create();
         if (owner != null) dialog.setOwnerActivity(owner);
         dialog.setOnShowListener(ignored -> {
@@ -174,7 +175,8 @@ final class AutomationHistoryDialog {
         TextView text = label("对象：" + entry.targetName + "\n标识：" + entry.targetId + "\n状态："
                 + status(entry.status) + "\n模型：" + entry.modelName + "\n时间："
                 + DateFormat.getDateTimeInstance().format(new Date(entry.createdAt))
-                + (AutomationHistoryStore.COMMENT.equals(entry.kind)
+                + (AutomationHistoryStore.COMMENT_REPLY.equals(entry.kind) ? "\n来源：评论回复" : "")
+                + (isComment(entry.kind)
                 ? "\n发送方式：" + deliveryMode(entry) + "\n" + imageRequest(entry) : "")
                 + "\n\n原内容\n" + entry.input + "\n\n生成内容\n" + entry.output);
         text.setTextIsSelectable(true);
@@ -204,13 +206,19 @@ final class AutomationHistoryDialog {
             case "failed": return "失败";
             case "cancelled": return "已取消";
             case "sending": return "结果未确认";
+            case "unknown": return "结果未确认";
             default: return "尚未提交";
         }
     }
 
     private static String rowTitle(Entry entry) {
-        return entry.targetName + " · " + status(entry.status)
-                + (AutomationHistoryStore.COMMENT.equals(entry.kind) ? " · " + deliveryMode(entry) : "");
+        return (AutomationHistoryStore.COMMENT_REPLY.equals(entry.kind) ? "评论回复 · " : "")
+                + entry.targetName + " · " + status(entry.status)
+                + (isComment(entry.kind) ? " · " + deliveryMode(entry) : "");
+    }
+
+    private static boolean isComment(String kind) {
+        return AutomationHistoryStore.COMMENT.equals(kind) || AutomationHistoryStore.COMMENT_REPLY.equals(kind);
     }
 
     private static String deliveryMode(Entry entry) {

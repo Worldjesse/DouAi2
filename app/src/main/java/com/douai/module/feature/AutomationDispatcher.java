@@ -6,16 +6,10 @@ import android.app.Application;
 import android.app.Dialog;
 import android.content.Context;
 import android.graphics.Color;
-import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
-import android.view.Gravity;
-import android.view.View;
-import android.view.ViewGroup;
-import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -60,9 +54,11 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
     private volatile LocalOptions options = new LocalOptions(Collections.emptyMap());
     private volatile boolean closed;
     private volatile WeakReference<Activity> resumed = new WeakReference<>(null);
-    private LinearLayout banners;
-    private ScrollView noticeScroll;
+    private Dialog failureDetails;
     private final CommentRingOverlay commentRing;
+    private final CommentRingOverlay replyRing;
+    private Pending submittedReply;
+    private long replyFailureAttentionUntil;
     private String commentHead = "";
     private int commentQueueCount = -1;
     private int commentRetries = 2;
@@ -83,6 +79,9 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         this.log = log == null ? ignored -> { } : log;
         this.worker = worker;
         commentRing = new CommentRingOverlay(application, this::openCommentDetails, this::cancelRingComment);
+        replyRing = new CommentRingOverlay(application, this::openReplyDetails, this::cancelRingReply, true);
+        commentRing.avoid(replyRing);
+        replyRing.avoid(commentRing);
         application.registerActivityLifecycleCallbacks(this);
     }
 
@@ -95,8 +94,8 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
                 if (!enabled(item.kind)) cancel(item);
                 else if (!tipEnabled(item.kind) && item.state.get() == WAITING) dispatch(item);
             }
-            failureNotices.removeIf(entry -> !tipEnabled(entry.kind));
-            renderBanners();
+            failureNotices.removeIf(entry -> !failureEnabled(entry.kind));
+            renderNotices();
         });
     }
 
@@ -138,7 +137,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
                 }
                 if (!"running".equals(phase) || !item.ready) item.phase = "running".equals(phase) ? "generating" : phase;
             }
-            renderBanners();
+            renderNotices();
         });
     }
 
@@ -168,7 +167,13 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
                         BooleanSupplier stillValid, Action action, Consumer<String> outcome) {
         if (stillValid == null || action == null || outcome == null) throw new IllegalArgumentException("Validity, action and outcome are required");
         long now = System.currentTimeMillis();
-        Entry entry = new Entry(id, kind, targetId, targetName, input, output, modelName, "pending", now, now);
+        Entry entry = new Entry(id, kind, targetId, targetName, input, output, modelName, "pending", now, now,
+                AutomationHistoryStore.COMMENT_REPLY.equals(kind) ? AutomationHistoryStore.DELIVERY_TEXT : AutomationHistoryStore.DELIVERY_UNKNOWN);
+        onMain(() -> prepareEntry(entry, stillValid, action, outcome, false));
+    }
+
+    public void prepare(Entry entry, BooleanSupplier stillValid, Action action, Consumer<String> outcome) {
+        if (entry == null || stillValid == null || action == null || outcome == null) throw new IllegalArgumentException("Entry and callbacks are required");
         onMain(() -> prepareEntry(entry, stillValid, action, outcome, false));
     }
 
@@ -199,7 +204,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
             if (pending.size() >= MAX_PENDING) {
                 record(withStatus(entry, "cancelled"));
                 safeLog("Automatic action cancelled because the preview queue is full");
-                outcome.accept("cancelled");
+                outcome.accept(AutomationHistoryStore.COMMENT_REPLY.equals(kind) ? "deferred" : "cancelled");
                 return;
             }
             Pending item = new Pending(entry, stillValid, action, outcome);
@@ -214,7 +219,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
     private void startPreview(Pending item) {
         item.noticeDuration = noticeSeconds(item.kind) * 1000L;
         item.deadline = SystemClock.elapsedRealtime() + item.noticeDuration;
-        renderBanners();
+        renderNotices();
         tick(item);
     }
 
@@ -229,8 +234,8 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
             if (tipEnabled(kind)) {
                 if (failureNotices.size() >= 8) failureNotices.remove(0);
                 failureNotices.add(entry);
-                renderBanners();
-                main.postDelayed(() -> { failureNotices.remove(entry); renderBanners(); }, noticeSeconds(kind) * 1000L);
+                renderNotices();
+                main.postDelayed(() -> { failureNotices.remove(entry); renderNotices(); }, noticeSeconds(kind) * 1000L);
             }
         });
     }
@@ -254,21 +259,25 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         onMain(() -> {
             if (closed) return;
             record(entry);
-            if (!tipEnabled(entry.kind)) return;
+            if (!failureEnabled(entry.kind)) return;
             failureNotices.removeIf(previous -> previous.id.equals(entry.id) && previous.kind.equals(entry.kind));
             if (failureNotices.size() >= 8) failureNotices.remove(0);
             failureNotices.add(entry);
             if (AutomationHistoryStore.COMMENT.equals(entry.kind)) {
                 commentFailureAttentionUntil = SystemClock.elapsedRealtime() + 1500;
                 main.postDelayed(this::renderCommentRing, 1500);
+            } else if (isReply(entry.kind)) {
+                replyFailureAttentionUntil = SystemClock.elapsedRealtime() + 1500;
+                main.postDelayed(this::renderReplyRing, 1500);
             }
-            renderBanners();
-            main.postDelayed(() -> { failureNotices.remove(entry); renderBanners(); }, noticeSeconds(entry.kind) * 1000L);
+            renderNotices();
+            main.postDelayed(() -> { failureNotices.remove(entry); renderNotices(); }, noticeSeconds(entry.kind) * 1000L);
         });
     }
 
     public void cancelKind(String kind) {
-        if (!AutomationHistoryStore.REPLY.equals(kind) && !AutomationHistoryStore.COMMENT.equals(kind)) {
+        if (!AutomationHistoryStore.REPLY.equals(kind) && !AutomationHistoryStore.COMMENT.equals(kind)
+                && !AutomationHistoryStore.COMMENT_REPLY.equals(kind)) {
             throw new IllegalArgumentException("Unknown automation kind");
         }
         onMain(() -> {
@@ -285,14 +294,23 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
 
     private boolean enabled(String kind) {
         LocalOptions current = options;
+        if (AutomationHistoryStore.COMMENT_REPLY.equals(kind)) {
+            return current.enabled(LocalOptions.COMMENT_REPLY_ENABLED) && current.enabled("native_auto_reply");
+        }
         return current.enabled(AutomationHistoryStore.REPLY.equals(kind)
                 ? "native_auto_reply" : "native_auto_comment");
     }
 
-    private boolean tipEnabled(String kind) { return options.enabled(kind + "_tip"); }
+    private boolean tipEnabled(String kind) {
+        return options.enabled(settingsKind(kind) + "_tip");
+    }
+
+    private boolean failureEnabled(String kind) {
+        return tipEnabled(kind);
+    }
 
     private int noticeSeconds(String kind) {
-        return Math.max(2, Math.min(120, options.integer(kind + "_notice_seconds", 8)));
+        return Math.max(2, Math.min(120, options.integer(settingsKind(kind) + "_notice_seconds", 8)));
     }
 
     private boolean valid(Pending item) {
@@ -305,8 +323,8 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         if (!enabled(item.kind) || !valid(item)) { cancel(item); return; }
         long remaining = item.deadline - SystemClock.elapsedRealtime();
         if (remaining <= 0) { dispatch(item); return; }
-        if (item.countdown != null) item.countdown.setText((remaining + 999) / 1000 + " 秒");
         if (AutomationHistoryStore.COMMENT.equals(item.kind)) renderCommentRing();
+        else if (isReply(item.kind)) renderReplyRing();
         main.postDelayed(item.timer, Math.min(1000, Math.max(0, item.deadline - SystemClock.elapsedRealtime())));
     }
 
@@ -321,7 +339,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
                 if (closed || !enabled(item.kind) || !valid(item)) { onMain(() -> cancel(item)); return; }
                 if (!item.state.compareAndSet(QUEUED, SENDING)) return;
                 item.phase = "publishing";
-                onMain(this::renderCommentRing);
+                onMain(this::renderNotices);
                 record(withStatus(item.entry, "sending"));
                 main.postDelayed(item.acknowledgmentTimeout, 30_000);
                 try { item.action.send(status -> finish(item, status)); }
@@ -339,6 +357,11 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         onMain(() -> {
             main.removeCallbacks(item.acknowledgmentTimeout);
             pending.remove(key(item.kind, item.entry.id));
+            if (submittedReply == item) submittedReply = null;
+            if (isReply(item.kind)) {
+                if ("submitted".equals(result)) retainSubmittedReply(item);
+                else if ("failed".equals(result)) addReplyFailure(withStatus(item.entry, result));
+            }
             removeNotice(item);
             record(withStatus(item.entry, result));
             safeLog("Automatic " + item.kind + " outcome: " + result);
@@ -349,6 +372,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
     private void unconfirmed(Pending item) {
         if (!item.state.compareAndSet(SENDING, UNCONFIRMED)) return;
         pending.remove(key(item.kind, item.entry.id));
+        if (isReply(item.kind)) retainSubmittedReply(item);
         removeNotice(item);
         record(withStatus(item.entry, "submitted"));
         item.outcome.accept("submitted");
@@ -374,103 +398,53 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
     }
 
     private void record(Entry entry) {
-        if (!options.enabled(entry.kind + "_save_history")) return;
+        if (!saveHistory(entry.kind)) return;
         try {
             worker.execute(() -> {
-                if (!options.enabled(entry.kind + "_save_history")) return;
+                if (!saveHistory(entry.kind)) return;
                 try { history.upsert(entry); }
                 catch (RuntimeException failure) { safeLog("Could not write automatic action history"); }
             });
         } catch (RejectedExecutionException ignored) { }
     }
 
-    private void renderBanners() {
-        renderCommentRing();
-        Activity activity = resumed.get();
-        if (closed || activity == null || activity.isFinishing() || activity.isDestroyed()
-                || activity.getWindow() == null) return;
-        View decor = activity.getWindow().getDecorView();
-        if (!(decor instanceof ViewGroup)) return;
-        if (banners == null) {
-            noticeScroll = new ScrollView(activity) {
-                @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-                    int limit = Math.max(dp(getContext(), 120), getResources().getDisplayMetrics().heightPixels / 3);
-                    if (View.MeasureSpec.getMode(heightMeasureSpec) != View.MeasureSpec.UNSPECIFIED) {
-                        limit = Math.min(limit, View.MeasureSpec.getSize(heightMeasureSpec));
-                    }
-                    super.onMeasure(widthMeasureSpec, View.MeasureSpec.makeMeasureSpec(limit, View.MeasureSpec.AT_MOST));
-                }
-            };
-            banners = new LinearLayout(activity);
-            banners.setTag("automation.notices");
-            banners.setOrientation(LinearLayout.VERTICAL);
-            banners.setPadding(dp(activity, 12), 0, dp(activity, 12), 0);
-            FrameLayout.LayoutParams layout = new FrameLayout.LayoutParams(
-                    Math.min(activity.getResources().getDisplayMetrics().widthPixels, dp(activity, 560)),
-                    ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-            layout.topMargin = dp(activity, 56);
-            noticeScroll.addView(banners);
-            ((ViewGroup) decor).addView(noticeScroll, layout);
-            noticeScroll.setElevation(dp(activity, 16));
-        }
-        banners.removeAllViews();
-        for (Pending item : pending.values()) {
-            item.countdown = null;
-            if (AutomationHistoryStore.COMMENT.equals(item.kind)) continue;
-            if (item.state.get() != WAITING) continue;
-            LinearLayout banner = new LinearLayout(activity);
-            banner.setTag("automation.notice." + item.entry.id);
-            banner.setOrientation(LinearLayout.VERTICAL);
-            banner.setPadding(dp(activity, 12), dp(activity, 10), dp(activity, 12), dp(activity, 10));
-            GradientDrawable background = new GradientDrawable();
-            background.setColor(Color.WHITE);
-            background.setCornerRadius(dp(activity, 8));
-            background.setStroke(dp(activity, 1), Color.rgb(194, 214, 212));
-            banner.setBackground(background);
-            banner.setClickable(true);
-            banner.setFocusable(true);
-            banner.setTooltipText("长按取消" + verb(item.kind));
-            LinearLayout titleRow = new LinearLayout(activity);
-            titleRow.setGravity(Gravity.CENTER_VERTICAL);
-            TextView title = text(activity, kindName(item.kind) + " · " + target(item.entry), 14, Color.rgb(31, 39, 45));
-            title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-            title.setMaxLines(2);
-            title.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            titleRow.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-            item.countdown = text(activity, "", 12, Color.rgb(0, 121, 107));
-            item.countdown.setGravity(Gravity.END);
-            titleRow.addView(item.countdown, new LinearLayout.LayoutParams(dp(activity, 56), ViewGroup.LayoutParams.WRAP_CONTENT));
-            long remaining = Math.max(0, item.deadline - SystemClock.elapsedRealtime());
-            item.countdown.setText((remaining + 999) / 1000 + " 秒");
-            banner.addView(titleRow);
-            TextView preview = text(activity, item.entry.output, 14, Color.rgb(72, 84, 91));
-            preview.setMaxLines(2);
-            preview.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            banner.addView(preview);
-            banner.setOnClickListener(ignored -> showDetails(item));
-            banner.setOnLongClickListener(ignored -> { cancel(item); return true; });
-            LinearLayout.LayoutParams row = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT);
-            row.bottomMargin = dp(activity, 8);
-            banners.addView(banner, row);
-        }
-        for (Entry entry : failureNotices) {
-            if (AutomationHistoryStore.COMMENT.equals(entry.kind)) continue;
-            TextView failure = text(activity, kindName(entry.kind) + "失败"
-                    + "\n" + target(entry), 14, Color.rgb(174, 49, 57));
-            failure.setTag("automation.failure." + entry.id);
-            failure.setPadding(dp(activity, 12), dp(activity, 10), dp(activity, 12), dp(activity, 10));
-            failure.setMaxLines(3);
-            failure.setBackgroundColor(Color.WHITE);
-            failure.setOnLongClickListener(ignored -> { failureNotices.remove(entry); renderBanners(); return true; });
-            LinearLayout.LayoutParams row = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            row.bottomMargin = dp(activity, 8);
-            banners.addView(failure, row);
-        }
-        banners.setVisibility(banners.getChildCount() == 0 ? View.GONE : View.VISIBLE);
-        noticeScroll.setVisibility(banners.getChildCount() == 0 ? View.GONE : View.VISIBLE);
+    private boolean saveHistory(String kind) {
+        return options.enabled(settingsKind(kind) + "_save_history");
     }
 
+    private static String settingsKind(String kind) { return AutomationHistoryStore.COMMENT_REPLY.equals(kind) ? "reply" : kind; }
+
+    private static boolean isReply(String kind) {
+        return AutomationHistoryStore.REPLY.equals(kind) || AutomationHistoryStore.COMMENT_REPLY.equals(kind);
+    }
+
+    private void retainSubmittedReply(Pending item) {
+        if (closed || !enabled(item.kind) || !tipEnabled(item.kind)) return;
+        if (submittedReply != null && submittedReply != item && submittedReply.details != null) submittedReply.details.dismiss();
+        submittedReply = item;
+        item.phase = "submitted";
+        main.postDelayed(() -> {
+            if (submittedReply != item) return;
+            submittedReply = null;
+            removeNotice(item);
+        }, noticeSeconds(item.kind) * 1000L);
+    }
+
+    private void addReplyFailure(Entry entry) {
+        if (closed || !enabled(entry.kind) || !failureEnabled(entry.kind)) return;
+        failureNotices.removeIf(previous -> previous.id.equals(entry.id) && previous.kind.equals(entry.kind));
+        if (failureNotices.size() >= 8) failureNotices.remove(0);
+        failureNotices.add(entry);
+        replyFailureAttentionUntil = SystemClock.elapsedRealtime() + 1500;
+        main.postDelayed(this::renderReplyRing, 1500);
+        main.postDelayed(() -> { failureNotices.remove(entry); renderNotices(); }, noticeSeconds(entry.kind) * 1000L);
+    }
+
+    private void renderNotices() {
+        // Both reply channels now share their own ring; retain no duplicate per-message banners.
+        renderCommentRing();
+        renderReplyRing();
+    }
     private Pending currentComment() {
         if (commentQueueCount >= 0) return pending.get(key(AutomationHistoryStore.COMMENT, commentHead));
         for (Pending item : pending.values()) if (AutomationHistoryStore.COMMENT.equals(item.kind) && item.state.get() < FINISHED) return item;
@@ -520,13 +494,20 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         Entry failure = lastCommentFailure();
         Activity activity = resumed.get();
         if (failure == null || activity == null) return;
+        showFailureDetails(activity, failure, "自动评论失败");
+    }
+
+    private void showFailureDetails(Activity activity, Entry failure, String title) {
+        if (failureDetails != null) failureDetails.dismiss();
         TextView content = text(activity, target(failure) + "\n\n" + failure.input
                 + (failure.output.isEmpty() ? "" : "\n\n" + failure.output), 15, Color.rgb(31, 39, 45));
         content.setPadding(dp(activity, 20), dp(activity, 12), dp(activity, 20), dp(activity, 12));
         content.setTextIsSelectable(true);
         ScrollView scroll = new ScrollView(activity);
         scroll.addView(content);
-        AlertDialog dialog = new AlertDialog.Builder(activity).setTitle("自动评论失败").setView(scroll).setPositiveButton("关闭", null).create();
+        AlertDialog dialog = new AlertDialog.Builder(activity).setTitle(title).setView(scroll).setPositiveButton("关闭", null).create();
+        failureDetails = dialog;
+        dialog.setOnDismissListener(ignored -> { if (failureDetails == dialog) failureDetails = null; });
         dialog.setOwnerActivity(activity);
         dialog.show();
     }
@@ -546,23 +527,89 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         if (failure != null) { failureNotices.remove(failure); renderCommentRing(); }
     }
 
+    private Pending currentReply() {
+        for (Pending item : pending.values()) {
+            if (isReply(item.kind) && enabled(item.kind) && item.state.get() < FINISHED) return item;
+        }
+        return null;
+    }
+
+    private Entry lastReplyFailure() {
+        for (int index = failureNotices.size() - 1; index >= 0; index--) {
+            Entry entry = failureNotices.get(index);
+            if (isReply(entry.kind) && enabled(entry.kind)) return entry;
+        }
+        return null;
+    }
+
+    private void renderReplyRing() {
+        Activity activity = resumed.get();
+        if (closed || !enabled(AutomationHistoryStore.REPLY) || !tipEnabled(AutomationHistoryStore.REPLY)
+                || activity == null || activity.isFinishing() || activity.isDestroyed()) { replyRing.detach(); return; }
+        Pending item = currentReply();
+        int count = 0;
+        for (Pending value : pending.values()) if (isReply(value.kind) && enabled(value.kind) && value.state.get() < FINISHED) count++;
+        Pending unknown = submittedReply != null && enabled(submittedReply.kind) ? submittedReply : null;
+        Entry failure = lastReplyFailure();
+        if (item == null && unknown == null && failure == null) { replyRing.detach(); return; }
+        String phase = item == null ? unknown == null ? "failed" : "submitted" : item.phase;
+        float progress = -1;
+        int seconds = 0;
+        if (item != null) {
+            int state = item.state.get();
+            if (state == DETAILS) phase = "details";
+            else if (state == WAITING && item.ready) {
+                phase = "preview";
+                long remaining = Math.max(0, item.deadline - SystemClock.elapsedRealtime());
+                seconds = (int) ((remaining + 999) / 1000);
+                progress = Math.max(0, Math.min(1, remaining / (float) Math.max(1, item.noticeDuration)));
+            } else if (state >= QUEUED) phase = "publishing";
+        }
+        if (failure != null && !"details".equals(phase) && SystemClock.elapsedRealtime() < replyFailureAttentionUntil) {
+            phase = "failed";
+            progress = -1;
+        }
+        replyRing.show(activity, count, seconds, phase, progress);
+    }
+
+    private void openReplyDetails() {
+        Pending item = currentReply();
+        if (item != null) { showDetails(item); return; }
+        if (submittedReply != null && enabled(submittedReply.kind)) { showDetails(submittedReply); return; }
+        Entry failure = lastReplyFailure();
+        Activity activity = resumed.get();
+        if (failure != null && activity != null) showFailureDetails(activity, failure, "自动回复失败");
+    }
+
+    private void cancelRingReply() {
+        Pending latest = null;
+        for (Pending item : pending.values()) {
+            if (isReply(item.kind) && item.state.get() < SENDING) latest = item;
+        }
+        if (latest != null) { cancel(latest); return; }
+        Entry failure = lastReplyFailure();
+        if (failure != null) { failureNotices.remove(failure); renderReplyRing(); }
+    }
+
     private void showDetails(Pending item) {
         Activity activity = resumed.get();
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
         if (item.details != null) return;
         int state = item.state.get();
         boolean readOnly = state >= SENDING;
-        if (!readOnly && (state != WAITING && state != GENERATING || !item.state.compareAndSet(state, DETAILS))) return;
+        if (!readOnly && (state != WAITING && state != GENERATING && !(isReply(item.kind) && state == QUEUED)
+                || !item.state.compareAndSet(state, DETAILS))) return;
         if (!readOnly) main.removeCallbacks(item.timer);
-        renderBanners();
+        renderNotices();
         LinearLayout body = new LinearLayout(activity);
         body.setTag("automation.details");
         body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(dp(activity, 20), dp(activity, 12), dp(activity, 20), dp(activity, 12));
         body.addView(text(activity, target(item.entry), 14, Color.rgb(105, 115, 122)));
-        item.detailStatus = text(activity, phaseName(item), 13, Color.rgb(0, 121, 107));
-        if (AutomationHistoryStore.COMMENT.equals(item.kind)) body.addView(item.detailStatus);
-        TextView inputTitle = text(activity, AutomationHistoryStore.REPLY.equals(item.kind) ? "收到的消息" : "视频内容", 13, Color.rgb(105, 115, 122));
+        item.detailStatus = text(activity, phaseName(item), 13, isReply(item.kind) ? Color.rgb(53, 122, 204) : Color.rgb(0, 121, 107));
+        body.addView(item.detailStatus);
+        TextView inputTitle = text(activity, AutomationHistoryStore.COMMENT_REPLY.equals(item.kind) ? "收到的评论回复"
+                : AutomationHistoryStore.REPLY.equals(item.kind) ? "收到的消息" : "视频内容", 13, Color.rgb(105, 115, 122));
         inputTitle.setPadding(0, dp(activity, 16), 0, dp(activity, 4));
         body.addView(inputTitle);
         TextView input = text(activity, item.entry.input, 15, Color.rgb(31, 39, 45));
@@ -581,8 +628,8 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         scroll.addView(body);
         AlertDialog.Builder builder = new AlertDialog.Builder(activity).setTitle(kindName(item.kind)).setView(scroll);
         if (readOnly) builder.setPositiveButton("关闭", null);
-        else builder.setPositiveButton("立即" + verb(item.kind), (ignored, which) -> dispatch(item))
-                .setNegativeButton("取消" + verb(item.kind), (ignored, which) -> cancel(item));
+        else builder.setPositiveButton(isReply(item.kind) ? "立即发送" : "立即" + verb(item.kind), (ignored, which) -> dispatch(item))
+                .setNegativeButton(isReply(item.kind) ? "取消回复" : "取消" + verb(item.kind), (ignored, which) -> cancel(item));
         AlertDialog dialog = builder.create();
         dialog.setOwnerActivity(activity);
         item.details = dialog;
@@ -605,7 +652,8 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
     }
 
     private static String phaseName(Pending item) {
-        if (item.state.get() >= SENDING) return "正在发布";
+        if ("submitted".equals(item.phase)) return "已提交，结果待确认";
+        if (item.state.get() >= SENDING) return isReply(item.kind) ? "正在发送" : "正在发布";
         if (item.ready) return "等待确认";
         if ("waiting".equals(item.phase)) return "等待生成";
         if ("retrying".equals(item.phase)) return "等待重试";
@@ -619,23 +667,15 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
             item.details = null;
             dialog.dismiss();
         }
-        renderBanners();
-    }
-
-    private void detachBanners() {
-        if (noticeScroll != null && noticeScroll.getParent() instanceof ViewGroup) {
-            ((ViewGroup) noticeScroll.getParent()).removeView(noticeScroll);
-        }
-        banners = null;
-        noticeScroll = null;
-        for (Pending item : pending.values()) item.countdown = null;
+        renderNotices();
     }
 
     private static String target(Entry entry) {
         return entry.targetName.isEmpty() ? entry.targetId : entry.targetName;
     }
 
-    private static String verb(String kind) { return AutomationHistoryStore.REPLY.equals(kind) ? "回复" : "评论"; }
+    private static String verb(String kind) { return AutomationHistoryStore.COMMENT_REPLY.equals(kind) ? "评论回复"
+            : AutomationHistoryStore.REPLY.equals(kind) ? "回复" : "评论"; }
     private static String kindName(String kind) { return "自动" + verb(kind); }
 
     private static TextView text(Context context, String value, int size, int color) {
@@ -660,16 +700,17 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
     }
 
     @Override public void onActivityResumed(Activity activity) {
-        detachBanners();
         resumed = new WeakReference<>(activity);
-        renderBanners();
+        renderNotices();
     }
 
     @Override public void onActivityPaused(Activity activity) {
         if (resumed.get() != activity) return;
         resumed.clear();
-        detachBanners();
         commentRing.detach();
+        replyRing.detach();
+        if (failureDetails != null) failureDetails.dismiss();
+        if (submittedReply != null && submittedReply.details != null) submittedReply.details.dismiss();
         for (Pending item : new ArrayList<>(pending.values())) if (item.details != null) {
             if (item.state.get() >= SENDING) item.details.dismiss(); else cancel(item);
         }
@@ -685,9 +726,11 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         if (closed) return;
         closed = true;
         onMain(() -> {
-            for (Pending item : new ArrayList<>(pending.values())) cancel(item);
-            detachBanners();
+            for (Pending item : new ArrayList<>(pending.values())) { cancel(item); removeNotice(item); }
             commentRing.detach();
+            replyRing.detach();
+            if (failureDetails != null) failureDetails.dismiss();
+            if (submittedReply != null) { removeNotice(submittedReply); submittedReply = null; }
             failureNotices.clear();
             resumed.clear();
             application.unregisterActivityLifecycleCallbacks(this);
@@ -710,7 +753,6 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         boolean early;
         boolean ready = true;
         String phase = "preview";
-        TextView countdown;
         TextView detailOutput;
         TextView detailStatus;
         Dialog details;

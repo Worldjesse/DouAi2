@@ -111,17 +111,21 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
     }
 
     private void buildAutoReplyControls(LinearLayout panel) {
-        FeatureSettings settings = repository.load();
-        ToggleControl[] master = new ToggleControl[1];
-        master[0] = addSwitch(panel, "开启自动回复", repository.getBoolean("native_auto_reply", false) && !settings.automationEnabled
-                        ? "已暂停：自动化总开关关闭" : "",
+        ToggleControl[] commentReplies = new ToggleControl[1];
+        OptionRow[] media = new OptionRow[1];
+        addSwitch(panel, "开启自动回复", "",
                 repository.getBoolean("native_auto_reply", false), true, value -> {
                     repository.setEnabled("reply", value);
-                    master[0].setSummary(value && !repository.load().automationEnabled ? "已暂停：自动化总开关关闭" : "");
+                    if (commentReplies[0] != null) commentReplies[0].setSummary(commentReplySummary());
                 });
         addChoiceOption(panel, "回复模式", "reply_mode", new String[]{"固定内容", "AI 模型", "关键词规则", "随机内容"},
-                new String[]{"fixed", "ai", "keyword", "random"}, "fixed");
+                new String[]{"fixed", "ai", "keyword", "random"}, "fixed", () -> {
+                    media[0].setValue(replyMediaPreview());
+                    media[0].setEnabled("ai".equals(repository.getString("reply_mode", "fixed")));
+                });
         addOption(panel, "回复内容", "", null, true, this::showReplyContentSettings);
+        media[0] = addOption(panel, "素材识别", "", replyMediaPreview(),
+                "ai".equals(repository.getString("reply_mode", "fixed")), () -> showReplyMediaSettings(media[0]));
         addSwitch(panel, "语音回复", "", repository.getBoolean(LocalOptions.REPLY_VOICE, false), true,
                 value -> repository.putBoolean(LocalOptions.REPLY_VOICE, value));
         OptionRow[] privateRange = new OptionRow[1];
@@ -132,9 +136,38 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
         addSwitch(panel, "接收群聊", "", repository.getBoolean("reply_group_chats", false), true,
                 value -> { repository.putBoolean("reply_group_chats", value); groupRange[0].setValue(groupReplyPreview()); });
         groupRange[0] = addOption(panel, "群聊范围", "", groupReplyPreview(), true, () -> showGroupReplySettings(groupRange[0]));
-        addAutomationLimitOption(panel, "每日最大回复数", "0 不限制；按本地自然日重置", "reply_daily_limit");
-        addAutomationLimitOption(panel, "同一用户回复间隔（分钟）", "0 不限制；按同一 UID 计算", "reply_user_cooldown_minutes");
+        commentReplies[0] = addSwitch(panel, "接收评论回复", commentReplySummary(),
+                repository.getBoolean(LocalOptions.COMMENT_REPLY_ENABLED, false), true, value -> {
+                    repository.setEnabled("comment_reply", value);
+                    commentReplies[0].setSummary(commentReplySummary());
+                });
+        addAutomationLimitOption(panel, "每日最大回复数", "", "reply_daily_limit");
+        addAutomationLimitOption(panel, "同一用户回复间隔（分钟）", "", "reply_user_cooldown_minutes");
         addOption(panel, "发送与记录", "", null, true, this::showReplyDeliverySettings);
+    }
+
+    private String commentReplySummary() {
+        return repository.getBoolean(LocalOptions.COMMENT_REPLY_ENABLED, false) && !repository.getBoolean("native_auto_reply", false)
+                ? "已暂停：自动回复未开启" : "";
+    }
+
+    private String replyMediaPreview() {
+        if (!"ai".equals(repository.getString("reply_mode", "fixed"))) return "未启用";
+        boolean images = repository.getBoolean(LocalOptions.REPLY_RECOGNIZE_IMAGES, true);
+        boolean video = repository.getBoolean(LocalOptions.REPLY_RECOGNIZE_VIDEO, false);
+        return images && video ? "图片、视频" : images ? "图片" : video ? "视频" : "不识别";
+    }
+
+    private void showReplyMediaSettings(OptionRow preview) {
+        LinearLayout panel = form();
+        showAutomationPanel("素材识别", panel, () -> {
+            addSwitch(panel, "识别图片", "",
+                    repository.getBoolean(LocalOptions.REPLY_RECOGNIZE_IMAGES, true), true,
+                    value -> { repository.putBoolean(LocalOptions.REPLY_RECOGNIZE_IMAGES, value); preview.setValue(replyMediaPreview()); });
+            addSwitch(panel, "识别视频", "",
+                    repository.getBoolean(LocalOptions.REPLY_RECOGNIZE_VIDEO, false), true,
+                    value -> { repository.putBoolean(LocalOptions.REPLY_RECOGNIZE_VIDEO, value); preview.setValue(replyMediaPreview()); });
+        });
     }
 
     private void addAutomationLimitOption(LinearLayout panel, String title, String summary, String key) {
@@ -345,8 +378,8 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
                 true, () -> showCommentScopeSettings(scope[0]));
         boolean ai = "ai".equals(repository.getString("comment_mode", "ai"));
         media[0] = addOption(panel, "素材识别", "", commentMediaPreview(), ai, () -> showCommentMediaSettings(media[0]));
-        addAutomationLimitOption(panel, "每日最大评论数", "0 不限制；按本地自然日重置", "comment_daily_limit");
-        addAutomationLimitOption(panel, "同一作者评论间隔（分钟）", "0 不限制；按作品作者 UID 计算", "comment_user_cooldown_minutes");
+        addAutomationLimitOption(panel, "每日最大评论数", "", "comment_daily_limit");
+        addAutomationLimitOption(panel, "同一作者评论间隔（分钟）", "", "comment_user_cooldown_minutes");
         addOption(panel, "发送与记录", "", null, true, () -> showDeliverySettings(AutomationHistoryStore.COMMENT));
     }
 
@@ -709,7 +742,7 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
     }
 
     private OptionRow addOption(LinearLayout panel, String title, String summary, String value, boolean enabled, Runnable action) {
-        Runnable guarded = () -> { if (isActive(panel)) action.run(); };
+        Runnable guarded = action == null ? null : () -> { if (isActive(panel)) action.run(); };
         Context rowContext = rowContext(panel);
         if (rowContext != null) {
             MiuixSettingsViews.Option option = new MiuixSettingsViews.Option(
@@ -724,7 +757,7 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
         row.setTag("settings.option." + title);
         row.setContentDescription(title);
         row.setEnabled(enabled);
-        row.setFocusable(true);
+        row.setFocusable(action != null);
         LinearLayout labels = new LinearLayout(context);
         labels.setOrientation(LinearLayout.VERTICAL);
         labels.addView(text(title, 15, TEXT, false), matchWrap());
@@ -745,10 +778,12 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
             labels.addView(preview, params);
         }
         row.addView(labels, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        TextView arrow = text("›", 24, MUTED, false);
-        arrow.setGravity(Gravity.CENTER);
-        row.addView(arrow, new LinearLayout.LayoutParams(dp(32), dp(32)));
-        row.setOnClickListener(view -> { if (view.isEnabled()) guarded.run(); });
+        if (guarded != null) {
+            TextView arrow = text("›", 24, MUTED, false);
+            arrow.setGravity(Gravity.CENTER);
+            row.addView(arrow, new LinearLayout.LayoutParams(dp(32), dp(32)));
+            row.setOnClickListener(view -> { if (view.isEnabled()) guarded.run(); });
+        }
         panel.addView(row, matchWrap());
         addDividerTo(panel);
         TextView valuePreview = preview;

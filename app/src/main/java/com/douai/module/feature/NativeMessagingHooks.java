@@ -174,10 +174,16 @@ public final class NativeMessagingHooks implements AutoCloseable {
     }
 
     public void setOptions(LocalOptions value) {
-        boolean invalidate = automationOptionsChanged(options, value);
+        boolean invalidate;
         synchronized (sendLock) {
+            invalidate = automationOptionsChanged(options, value);
+            boolean mediaChanged = options.enabled(LocalOptions.REPLY_RECOGNIZE_IMAGES, true)
+                    != value.enabled(LocalOptions.REPLY_RECOGNIZE_IMAGES, true)
+                    || options.enabled(LocalOptions.REPLY_RECOGNIZE_VIDEO, false)
+                    != value.enabled(LocalOptions.REPLY_RECOGNIZE_VIDEO, false);
             options = value;
             if (invalidate) generation.incrementAndGet();
+            if (mediaChanged) ai.clearHistory();
         }
         if (invalidate) {
             cancelReplies();
@@ -204,6 +210,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
         if (!previous.samePrefix(next, "tts_")) return true;
         for (String key : new String[]{"native_auto_reply", "reply_global", "reply_targets",
                 "reply_mode", "reply_voice", "reply_prompt", "reply_delay_seconds", "reply_daily_limit",
+                LocalOptions.REPLY_RECOGNIZE_IMAGES, LocalOptions.REPLY_RECOGNIZE_VIDEO,
                 "reply_user_cooldown_minutes",
                 "auto_message_text", "reply_keywords",
                 "reply_scope_mode", "reply_scope_relations", "reply_scope_fields", "reply_scope_keywords",
@@ -212,7 +219,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 "reply_group_scope_mode", "reply_group_targets", "reply_group_mode", "reply_group_members",
                 "reply_random", AiModelSettings.KEY, "streak_enabled", "streak_targets", "streak_content",
                 "streak_content_api", "streak_start", "streak_end"}) {
-            boolean defaultEnabled = "reply_private_chats".equals(key);
+            boolean defaultEnabled = "reply_private_chats".equals(key) || LocalOptions.REPLY_RECOGNIZE_IMAGES.equals(key);
             if (previous.enabled(key, defaultEnabled) != next.enabled(key, defaultEnabled)
                     || !previous.text(key, "").equals(next.text(key, ""))) return true;
         }
@@ -404,14 +411,19 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 String modelName = "";
                 AiModelSettings models = "ai".equals(current.text("reply_mode", "fixed")) ? AiModelSettings.read(current) : null;
                 List<ChatImage> images = models == null ? Collections.emptyList()
-                        : AutomationImages.load(incoming.imageUrls, operation.mediaCancellation);
+                        : AutomationReplyMedia.loadIncoming(context, incoming.imageUrls, incoming.videoUrl,
+                                current, operation.mediaCancellation);
                 if (!operation.current()) return;
                 String secondary = current.text("reply_prompt", "自然简洁地回复对方，只输出回复正文。");
                 String response;
                 if (models != null) {
                     modelName = models.selected().modelName;
+                    operation.modelName = modelName;
                     response = ai.reply("reply:" + account + ":" + conversation, text, images, models,
-                            secondary, false);
+                            secondary, false, "", imageCount -> {
+                                operation.requestImageCount = imageCount;
+                                operation.modelRequestSent = true;
+                            });
                 } else response = ReplyPolicy.reply(text, current, random);
                 if (!operation.current()) return;
                 if (!replyStillAllowed(values, account, current)) return;
@@ -429,8 +441,10 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 } else audio = null;
                 if (!operation.handoff()) { if (audio != null) audio.delete(); return; }
                 java.util.concurrent.atomic.AtomicBoolean submitted = new java.util.concurrent.atomic.AtomicBoolean();
-                dispatcher.prepare(AutomationHistoryStore.REPLY, identity, conversation, name,
-                        incoming.imageUrls.isEmpty() ? text : "[图片] " + text, response, modelName,
+                dispatcher.prepare(new AutomationHistoryStore.Entry(identity, AutomationHistoryStore.REPLY, conversation, name,
+                        input(incoming), response, modelName, "pending", operation.createdAt, System.currentTimeMillis(),
+                        operation.requestImageCount, operation.modelRequestSent,
+                        audio == null ? AutomationHistoryStore.DELIVERY_TEXT : AutomationHistoryStore.DELIVERY_VOICE),
                         valid,
                         done -> {
                             if (!valid.getAsBoolean()) { done.accept("cancelled"); return; }
@@ -440,8 +454,15 @@ public final class NativeMessagingHooks implements AutoCloseable {
                                     AutomationRateLimiter.Reservation active = reservation.get();
                                     if (!success && active != null) rateLimiter.release(active);
                                     if (success && models != null) {
-                                        try { ai.rememberReply("reply:" + account + ":" + conversation, text, images, models, secondary, response); }
-                                        catch (Exception failure) { safeLog("Could not retain acknowledged reply context"); }
+                                        synchronized (sendLock) {
+                                            // Selection changes clear history under this same lock. An older send's late
+                                            // acknowledgment must not put its images back into the current context.
+                                            if (!closed && generation.get() == epoch && ownUid() == account
+                                                    && !automationOptionsChanged(current, options)) {
+                                                try { ai.rememberReply("reply:" + account + ":" + conversation, text, images, models, secondary, response); }
+                                                catch (Exception failure) { safeLog("Could not retain acknowledged reply context"); }
+                                            }
+                                        }
                                     }
                                     done.accept(success ? "sent" : active == null ? "cancelled" : "failed");
                                 };
@@ -486,6 +507,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
         final long epoch;
         final String identity;
         final ReplyPolicy.Incoming incoming;
+        final long createdAt = System.currentTimeMillis();
         final MediaReadCancellation mediaCancellation = mediaReads.get();
         final Runnable watchdog = this::watch;
         final java.util.concurrent.atomic.AtomicBoolean failureReported = new java.util.concurrent.atomic.AtomicBoolean();
@@ -493,6 +515,9 @@ public final class NativeMessagingHooks implements AutoCloseable {
         volatile boolean cancelled;
         volatile boolean finished;
         volatile long deadline;
+        volatile int requestImageCount = -1;
+        volatile boolean modelRequestSent;
+        volatile String modelName = "";
 
         ReplyTask(long account, long epoch, String identity, ReplyPolicy.Incoming incoming, int delay) {
             this.account = account;
@@ -574,10 +599,14 @@ public final class NativeMessagingHooks implements AutoCloseable {
 
         void reportFailure() {
             if (!failureReported.compareAndSet(false, true)) return;
-            dispatcher.reportFailure(AutomationHistoryStore.REPLY, identity, incoming.conversation,
-                    Long.toString(incoming.sender), incoming.imageUrls.isEmpty()
-                            ? incoming.text : "[图片] " + incoming.text, "");
+            dispatcher.reportFinalFailure(new AutomationHistoryStore.Entry(identity, AutomationHistoryStore.REPLY,
+                    incoming.conversation, Long.toString(incoming.sender), input(incoming), "", modelName,
+                    "failed", createdAt, System.currentTimeMillis(), requestImageCount, modelRequestSent));
         }
+    }
+
+    private static String input(ReplyPolicy.Incoming incoming) {
+        return (!incoming.videoUrl.isEmpty() ? "[视频] " : incoming.imageUrls.isEmpty() ? "" : "[图片] ") + incoming.text;
     }
 
     private boolean conversationExists(String id, boolean group) {

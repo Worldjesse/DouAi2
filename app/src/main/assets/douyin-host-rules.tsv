@@ -199,3 +199,15 @@ dm_auto_audio_message_server_id	message_voice	method	Lcom/bytedance/im/core/mode
 dm_auto_audio_local_path	message_voice	method	LX/12yj;		LJFF	(Lcom/bytedance/im/core/model/Message;Ljava/lang/String;)V								
 dm_auto_audio_insert	message_voice	method	LX/12uT;		LIZ	(Lcom/bytedance/im/core/model/Message;Ljava/lang/Runnable;Lcom/bytedance/im/core/client/callback/IRequestListener;LX/0r5Z;)V								
 dm_auto_audio_uploader	message_voice	method	LX/12vM;		LIZIZ	()Ljava/lang/Object;								
+
+comment_reply_notice_fetch	comment_reply	method	LX/0dPQ;		fetchNotice	(JJIILjava/lang/Integer;ILjava/lang/Integer;Ljava/lang/Integer;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;ILjava/lang/String;IILjava/lang/String;IILjava/lang/Integer;I)Lcom/google/common/util/concurrent/ListenableFuture;								
+comment_reply_notice_provider	comment_reply	class	LX/0dU1;											b
+comment_reply_notice_response	comment_reply	class	Lcom/ss/android/ugc/aweme/socialnotice/bean/NoticeResponse;											items|hasMore|maxTime|minTime
+comment_reply_base_notice	comment_reply	class	Lcom/ss/android/ugc/aweme/socialnotice/bean/BaseNotice;											commentNotice|nid|createTime|noticeDisable|itemDisable
+comment_reply_comment_notice	comment_reply	class	Lcom/ss/android/ugc/aweme/socialnotice/bean/CommentNotice;											comment|replyComment|level1Comment|aweme|commentUnvisible
+comment_reply_comment_model	comment_reply	class	Lcom/ss/android/ugc/aweme/comment/model/Comment;											cid|awemeId|user|text|createTime|replyId|replyToReplyId
+comment_reply_user_model	comment_reply	class	Lcom/ss/android/ugc/aweme/profile/model/User;											uid|nickname
+comment_reply_work_model	comment_reply	class	Lcom/ss/android/ugc/aweme/feed/model/Aweme;											aid
+comment_reply_push_receive	comment_reply	method	Lcom/ss/android/ugc/aweme/socialnotice/innerpush/SocialInteractionInnerPushHandler;		receiveInnerPush	(Lcom/ss/android/ugc/aweme/innerpush/api/model/InnerPushMessage;Z)V								
+comment_reply_push_parse	comment_reply	method	LX/12bE;		LIZ	(Lcom/ss/android/ugc/aweme/innerpush/api/model/InnerPushMessage;)Lcom/ss/android/ugc/aweme/socialnotice/innerpush/SocialInnerPushMessage;								
+comment_reply_push_model	comment_reply	class	Lcom/ss/android/ugc/aweme/socialnotice/innerpush/SocialInnerPushMessage;											aggrNoticeType

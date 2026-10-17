@@ -13,7 +13,11 @@ public final class LocalOptions {
     public static final String DOWNLOAD_SAVE_TREE = "download_directory_uri";
     public static final String OFFICIAL_DOWNLOAD_DIRECT = "download_official_direct";
     public static final String REPLY_VOICE = "reply_voice";
+    public static final String REPLY_RECOGNIZE_IMAGES = "reply_recognize_images";
+    public static final String REPLY_RECOGNIZE_VIDEO = "reply_recognize_video";
     public static final String COMMENT_VOICE = "comment_voice";
+    /** Receives comment replies as a channel of native_auto_reply, like private/group chat reception. */
+    public static final String COMMENT_REPLY_ENABLED = "native_comment_reply";
 
     public String downloadSaveTree() { return text(DOWNLOAD_SAVE_TREE, "").trim(); }
     public boolean officialDownloadDirect() { return enabled(OFFICIAL_DOWNLOAD_DIRECT); }

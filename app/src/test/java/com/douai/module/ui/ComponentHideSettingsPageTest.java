@@ -143,7 +143,7 @@ public final class ComponentHideSettingsPageTest {
                 {"FILTER", "视频筛选", "14项"},
                 {"DOWNLOAD", "下载相关", "14项"},
                 {"AUTOPLAY", "自动播放", "6项"},
-                {"AUTO_REPLY", "自动回复", "10项"},
+                {"AUTO_REPLY", "自动回复", "13项"},
                 {"AUTO_COMMENT", "自动评论", "8项"},
                 {"COMMENT", "评论相关", "7项"},
                 {"STREAK", "自动续火花", "7项"},
@@ -220,7 +220,7 @@ public final class ComponentHideSettingsPageTest {
         assertEquals(0, ((SeekBar) root.findViewWithTag(Component.AVATAR.key)).getProgress());
         assertEquals(1, ((SeekBar) root.findViewWithTag(Component.TOP_NAV.key)).getProgress());
         assertEquals(72, ((SeekBar) root.findViewWithTag(Component.PROGRESS.key)).getProgress());
-        assertEquals(1, countText(root, "作者昵称头顶的"));
+        assertEquals(0, countText(root, "作者昵称头顶的"));
         activity.finish();
     }
 

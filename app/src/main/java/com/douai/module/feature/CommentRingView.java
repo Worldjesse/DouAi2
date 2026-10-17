@@ -19,6 +19,9 @@ public final class CommentRingView extends View {
     private static final int RED = Color.rgb(255, 127, 144);
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF arc = new RectF();
+    private final String title;
+    private final int primaryColor;
+    private final boolean reply;
     private final Runnable frame = new Runnable() {
         @Override public void run() {
             if (!animates()) return;
@@ -32,8 +35,15 @@ public final class CommentRingView extends View {
     private float progress = -1;
 
     public CommentRingView(Context context) {
+        this(context, "automation.comment.ring", "自动评论", TEAL, false);
+    }
+
+    CommentRingView(Context context, String tag, String title, int color, boolean reply) {
         super(context);
-        setTag("automation.comment.ring");
+        this.title = title;
+        this.primaryColor = color;
+        this.reply = reply;
+        setTag(tag);
         setClickable(true);
         setLongClickable(true);
         setFocusable(true);
@@ -65,6 +75,7 @@ public final class CommentRingView extends View {
     public int getQueueCount() { return queueCount; }
     public int getRetriesLeft() { return retriesLeft; }
     public String getPhase() { return phase; }
+    public int getPrimaryColor() { return primaryColor; }
 
     @Override public boolean performClick() { return super.performClick(); }
 
@@ -126,27 +137,29 @@ public final class CommentRingView extends View {
     private int accent() {
         if ("failed".equals(phase)) return RED;
         if ("retrying".equals(phase)) return AMBER;
+        if ("submitted".equals(phase)) return AMBER;
         if ("details".equals(phase)) return Color.rgb(224, 238, 234);
-        return TEAL;
+        return primaryColor;
     }
 
     private boolean animates() {
         return isAttachedToWindow() && getVisibility() == VISIBLE && progress < 0
-                && !"details".equals(phase) && !"failed".equals(phase);
+                && !"details".equals(phase) && !"failed".equals(phase) && !"submitted".equals(phase);
     }
 
     private void updateDescription() {
         String status;
         switch (phase) {
             case "generating": status = "生成中"; break;
-            case "preview": status = "等待评论"; break;
+            case "preview": status = reply ? "等待回复" : "等待评论"; break;
             case "details": status = "已暂停，等待确认"; break;
-            case "publishing": status = "发布中"; break;
+            case "publishing": status = reply ? "发送中" : "发布中"; break;
             case "retrying": status = "重试中"; break;
-            case "failed": status = "评论失败"; break;
+            case "failed": status = reply ? "回复失败" : "评论失败"; break;
+            case "submitted": status = "已提交，结果待确认"; break;
             default: status = "等待处理";
         }
-        setContentDescription("自动评论，队列 " + queueCount + "，剩余重试 " + retriesLeft + "，" + status);
+        setContentDescription(title + "，队列 " + queueCount + (reply ? "，倒计时 " + retriesLeft + " 秒，" : "，剩余重试 " + retriesLeft + "，") + status);
     }
 
     @Override protected void onAttachedToWindow() {

@@ -145,6 +145,76 @@ public final class NativeMessagingPolicyTest {
         assertFalse(AutomationImages.isMediaUrl("https://p3.douyinpic.com:8080/path"));
     }
 
+    @Test public void imageRecognitionDefaultsOnButDisablingItSkipsImageOnlyMessagesAndKeepsRealText() {
+        ContentValues picture = incoming();
+        picture.put("type", 27);
+        picture.put("content", "{\"resource_url\":{\"url_list\":[\"https://p3.douyinpic.com/photo.jpg\"]}}");
+        LocalOptions enabled = options("native_auto_reply", true, "reply_global", true, "reply_mode", "ai");
+        assertEquals(1, ReplyPolicy.incoming(picture, 100, NOW, enabled).imageUrls.size());
+        LocalOptions disabled = options("native_auto_reply", true, "reply_global", true, "reply_mode", "ai",
+                LocalOptions.REPLY_RECOGNIZE_IMAGES, false);
+        assertNull(ReplyPolicy.incoming(picture, 100, NOW, disabled));
+        picture.put("content", "{\"text\":\"看这张图\",\"resource_url\":{\"url_list\":[\"https://p3.douyinpic.com/photo.jpg\"]}}");
+        ReplyPolicy.Incoming textOnly = ReplyPolicy.incoming(picture, 100, NOW, disabled);
+        assertNotNull(textOnly);
+        assertEquals("看这张图", textOnly.text);
+        assertTrue(textOnly.imageUrls.isEmpty());
+        assertEquals("", textOnly.videoUrl);
+    }
+
+    @Test public void fixedKeywordAndRandomModesStillAcceptOnlyTextMessageTypes() {
+        ContentValues picture = incoming();
+        picture.put("type", 27);
+        picture.put("content", "{\"text\":\"文字与图片\",\"resource_url\":{\"url_list\":[\"https://p3.douyinpic.com/photo.jpg\"]}}");
+        for (String mode : new String[]{"fixed", "keyword", "random"}) {
+            LocalOptions mediaEnabled = options("native_auto_reply", true, "reply_global", true, "reply_mode", mode,
+                    LocalOptions.REPLY_RECOGNIZE_IMAGES, true, LocalOptions.REPLY_RECOGNIZE_VIDEO, true);
+            assertNull(mode, ReplyPolicy.incoming(picture, 100, NOW, mediaEnabled));
+            assertNotNull(mode, ReplyPolicy.incoming(incoming(), 100, NOW, mediaEnabled));
+        }
+    }
+
+    @Test public void enabledImageRecognitionRequiresAReadableAddressEvenWhenTheImageMessageHasText() {
+        ContentValues picture = incoming();
+        picture.put("type", 27);
+        LocalOptions enabled = options("native_auto_reply", true, "reply_global", true, "reply_mode", "ai");
+        LocalOptions disabled = options("native_auto_reply", true, "reply_global", true, "reply_mode", "ai",
+                LocalOptions.REPLY_RECOGNIZE_IMAGES, false);
+        for (String content : new String[]{
+                "{\"text\":\"真实说明\"}",
+                "{\"text\":\"真实说明\",\"resource_url\":{\"url_list\":[]}}",
+                "{\"text\":\"真实说明\",\"resource_url\":{\"url_list\":[\"https://attacker.example/image.png\"]}}",
+                "{\"text\":\"真实说明\",\"resource_url\":{\"url_list\":[\"http://127.0.0.1/image.png\"]}}"}) {
+            picture.put("content", content);
+            assertNull(ReplyPolicy.incoming(picture, 100, NOW, enabled));
+            ReplyPolicy.Incoming textOnly = ReplyPolicy.incoming(picture, 100, NOW, disabled);
+            assertNotNull(textOnly);
+            assertEquals("真实说明", textOnly.text);
+            assertTrue(textOnly.imageUrls.isEmpty());
+        }
+        picture.put("content", "{\"text\":\"真实说明\",\"resource_url\":{\"url_list\":[\"https://p3.douyinpic.com/photo.jpg\"]}}");
+        ReplyPolicy.Incoming recognized = ReplyPolicy.incoming(picture, 100, NOW, enabled);
+        assertNotNull(recognized);
+        assertEquals("真实说明", recognized.text);
+        assertEquals(1, recognized.imageUrls.size());
+    }
+
+    @Test public void encryptedStoryVideoIsRejectedForEveryMediaFlagCombinationAndShareTypeIsNotAVideo() {
+        ContentValues video = incoming();
+        video.put("type", 30);
+        video.put("content", "{\"text\":\"看视频\",\"video\":{\"vid\":\"opaque-id\",\"tkey\":\"opaque-token\",\"skey\":\"opaque-secret\",\"is_new_encrypt\":true}}");
+        for (boolean images : new boolean[]{false, true}) {
+            for (boolean videos : new boolean[]{false, true}) {
+                assertNull(ReplyPolicy.incoming(video, 100, NOW,
+                        options("native_auto_reply", true, "reply_global", true, "reply_mode", "ai",
+                                LocalOptions.REPLY_RECOGNIZE_IMAGES, images, LocalOptions.REPLY_RECOGNIZE_VIDEO, videos)));
+            }
+        }
+        video.put("type", 8);
+        assertNull(ReplyPolicy.incoming(video, 100, NOW, options("native_auto_reply", true,
+                "reply_global", true, "reply_mode", "ai", LocalOptions.REPLY_RECOGNIZE_VIDEO, true)));
+    }
+
     @Test public void imageGenerationInstructionIsNotTreatedAsTheSendersMessageForKeywordFiltering() {
         ContentValues picture = incoming();
         picture.put("type", 27);

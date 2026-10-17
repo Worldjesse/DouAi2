@@ -104,7 +104,7 @@ public final class AutomationCommentMedia {
         return false;
     }
 
-    private static File downloadVideo(Context context, String source, MediaReadCancellation cancellation) throws Exception {
+    static File downloadVideo(Context context, String source, MediaReadCancellation cancellation) throws Exception {
         String current = source;
         for (int redirect = 0; redirect < 4; redirect++) {
             cancellation.check();

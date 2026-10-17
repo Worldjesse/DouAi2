@@ -42,8 +42,12 @@ public final class AutomationMessageSettings implements SettingsStore {
     }
 
     public void setEnabled(String kind, boolean value) {
-        requireKind(kind);
+        if (!"comment_reply".equals(kind)) requireKind(kind);
         if (closed) return;
+        if ("comment_reply".equals(kind)) {
+            putBoolean(LocalOptions.COMMENT_REPLY_ENABLED, value);
+            return;
+        }
         boolean comment = "comment".equals(kind);
         putBoolean(comment ? "native_auto_comment" : "native_auto_reply", value);
         FeatureSettings current = load();
@@ -100,6 +104,8 @@ public final class AutomationMessageSettings implements SettingsStore {
         if (key.endsWith("_user_cooldown_minutes")) return integer(value, 0, 525600, "请输入 0 至 525600 的整数", true);
         if (key.endsWith("_delay_seconds")) return integer(value, 2, 3600, "延迟应为 2 至 3600 秒", false);
         if (key.endsWith("_notice_seconds")) return integer(value, 2, 120, "提示超时应为 2 至 120 秒", false);
+        if ("comment_reply_thread_limit".equals(key)) return integer(value, 1, 100, "每条评论最多回复 1 至 100 次", true);
+        if ("comment_reply_tip_seconds".equals(key)) return integer(value, 2, 120, "发送提示应为 2 至 120 秒", true);
         if (key.endsWith("_scope_mode")) choice(value, "all", "whitelist", "blacklist");
         if (key.endsWith("_filter_mode")) choice(value, "off", "include", "exclude");
         if ("reply_group_mode".equals(key)) choice(value, "all", "selected", "mentions");

@@ -100,6 +100,58 @@ public final class AutomationMessageSettingsTest {
         assertTrue(store.load().autoCommentEnabled);
     }
 
+    @Test public void commentReplyReceptionDoesNotEnableTheMasterOrChangeExistingSettings() {
+        MemoryStore store = new MemoryStore();
+        store.features = new FeatureSettings(true, true, false, false, true, false, false,
+                false, "原配置", false, 0, false, 0, false, true, false, true, true);
+        store.putBoolean("native_auto_reply", false);
+        store.putBoolean("native_auto_comment", true);
+        FeatureSettings original = store.load();
+        AutomationMessageSettings session = new AutomationMessageSettings(store, null);
+        session.setEnabled("comment_reply", true);
+        assertTrue(store.getBoolean(LocalOptions.COMMENT_REPLY_ENABLED, false));
+        assertFalse(store.load().automationEnabled);
+        assertSame(original, store.load());
+        assertFalse(store.getBoolean("native_auto_reply", true));
+        assertTrue(store.getBoolean("native_auto_comment", false));
+        assertTrue(store.load().autoCommentEnabled);
+        assertTrue(store.load().autoMessageEnabled);
+        assertTrue(store.load().autoLikeEnabled);
+        assertEquals("原配置", store.load().keyword);
+        session.setEnabled("comment_reply", false);
+        assertFalse(store.getBoolean(LocalOptions.COMMENT_REPLY_ENABLED, true));
+        assertFalse(store.load().automationEnabled);
+        assertSame(original, store.load());
+        assertTrue(store.load().autoMessageEnabled);
+        session.close();
+        session.setEnabled("comment_reply", true);
+        assertFalse(store.getBoolean(LocalOptions.COMMENT_REPLY_ENABLED, true));
+    }
+
+    @Test public void legacyCommentReplySettingsRemainCompatibleWithoutChangingSharedReplySettings() {
+        MemoryStore store = new MemoryStore();
+        store.putString("reply_daily_limit", "7");
+        store.putString("reply_prompt", "共享提示词");
+        AutomationMessageSettings session = new AutomationMessageSettings(store, null);
+        String[][] invalid = {{"comment_reply_thread_limit", "0"}, {"comment_reply_thread_limit", "101"},
+                {"comment_reply_tip_seconds", "1"}, {"comment_reply_tip_seconds", "121"},
+                {"comment_reply_daily_limit", "-1"}, {"comment_reply_user_cooldown_minutes", "NaN"}};
+        for (String[] input : invalid) {
+            assertThrows(input[0], IllegalArgumentException.class, () -> session.putString(input[0], input[1]));
+            assertFalse(store.values.containsKey(input[0]));
+        }
+        session.putString("comment_reply_daily_limit", "0020");
+        session.putString("comment_reply_user_cooldown_minutes", "01");
+        session.putString("comment_reply_thread_limit", "003");
+        session.putString("comment_reply_tip_seconds", "003");
+        assertEquals("20", store.getString("comment_reply_daily_limit", ""));
+        assertEquals("1", store.getString("comment_reply_user_cooldown_minutes", ""));
+        assertEquals("3", store.getString("comment_reply_thread_limit", ""));
+        assertEquals("3", store.getString("comment_reply_tip_seconds", ""));
+        assertEquals("7", store.getString("reply_daily_limit", ""));
+        assertEquals("共享提示词", store.getString("reply_prompt", ""));
+    }
+
     private static final class MemoryStore implements SettingsStore {
         final Map<String, Object> values = new HashMap<>();
         FeatureSettings features = FeatureSettings.defaults();

@@ -109,6 +109,46 @@ class AutomationHistoryMiuixTest {
         compose.runOnIdle { assertFalse(detail.isShowing) }
     }
 
+    @Test fun replyHistoryIncludesCommentRepliesWithSourceLabelsAndClearsBothTogether() {
+        lateinit var store: AutomationHistoryStore
+        compose.runOnUiThread {
+            compose.activity.getSharedPreferences("douai_automation_history", 0).edit().clear().commit()
+            store = AutomationHistoryStore(compose.activity)
+            store.upsert(AutomationHistoryStore.Entry(
+                "private-message", AutomationHistoryStore.REPLY, "user", "私信用户", "私信", "私信回复",
+                "模型", "sent", 1, 1,
+            ))
+            store.upsert(AutomationHistoryStore.Entry(
+                "comment-reply", AutomationHistoryStore.COMMENT_REPLY, "video", "评论者", "收到的评论", "评论回复正文",
+                "模型", "submitted", 2, 2, AutomationHistoryStore.DELIVERY_TEXT,
+            ))
+            store.upsert(AutomationHistoryStore.Entry(
+                "feed-comment", AutomationHistoryStore.COMMENT, "video", "作品作者", "作品", "自动评论",
+                "模型", "sent", 3, 3,
+            ))
+            page = AutomationHistoryDialog(compose.activity, AutomationHistoryStore.REPLY, true, worker)
+            page!!.dialog().show()
+        }
+        compose.waitForIdle()
+        worker.runNextOnThread()
+        compose.onNodeWithText("私信用户 · 发送成功").assertIsDisplayed()
+        compose.onNodeWithText("评论回复 · 评论者 · 已提交 · 文本").assertIsDisplayed()
+        compose.onNodeWithTag("automation.history.feed-comment").assertDoesNotExist()
+        compose.onNodeWithTag("automation.history.comment-reply").performClick()
+        val detail = ShadowDialog.getLatestDialog() as AlertDialog
+        compose.runOnIdle {
+            assertTrue(containsText(detail.window!!.decorView, "来源：评论回复"))
+            assertTrue(containsText(detail.window!!.decorView, "收到的评论"))
+        }
+        compose.runOnUiThread { detail.dismiss() }
+        compose.onNodeWithTag("miuix.dialog.button.${Dialog.BUTTON_NEUTRAL}").performClick()
+        worker.runNextOnThread()
+        compose.onNodeWithText("暂无记录").assertIsDisplayed()
+        assertTrue(store.read(AutomationHistoryStore.REPLY).isEmpty())
+        assertTrue(store.read(AutomationHistoryStore.COMMENT_REPLY).isEmpty())
+        assertTrue(store.read(AutomationHistoryStore.COMMENT).size == 1)
+    }
+
     private fun containsText(view: View, needle: String): Boolean {
         if (view is TextView && view.text.toString().contains(needle)) return true
         return view is ViewGroup && (0 until view.childCount).any { containsText(view.getChildAt(it), needle) }

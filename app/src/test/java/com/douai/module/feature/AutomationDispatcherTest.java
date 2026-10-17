@@ -44,9 +44,12 @@ public final class AutomationDispatcherTest {
     private AutomationHistoryStore history;
     private ManualExecutor worker;
     private AtomicInteger sends;
+    private final Map<String, String> preparedKinds = new HashMap<>();
 
     @Before public void setup() {
         RuntimeEnvironment.getApplication().getSharedPreferences("douai_automation_history", Context.MODE_PRIVATE)
+                .edit().clear().commit();
+        RuntimeEnvironment.getApplication().getSharedPreferences("douai_automation_ui", Context.MODE_PRIVATE)
                 .edit().clear().commit();
         activity = Robolectric.buildActivity(Activity.class).setup().get();
         worker = new ManualExecutor();
@@ -243,6 +246,7 @@ public final class AutomationDispatcherTest {
     }
 
     private void prepare(String kind, String id, java.util.function.BooleanSupplier valid) {
+        preparedKinds.put(id, kind);
         dispatcher.prepare(kind, id, "target", "目标", "原始内容", "生成内容", "model", valid,
                 callback -> { sends.incrementAndGet(); callback.accept("reply".equals(kind) ? "sent" : "submitted"); });
     }
@@ -261,10 +265,11 @@ public final class AutomationDispatcherTest {
         dispatcher.setOptions(options(true, true));
         dispatcher.reportFailure("reply", "failure", "target", "用户", "消息", "model");
         worker.runAll();
-        assertNotNull(activity.getWindow().getDecorView().findViewWithTag("automation.failure.failure"));
+        assertEquals("failed", replyRing().getPhase());
+        assertNull(activity.getWindow().getDecorView().findViewWithTag("automation.failure.failure"));
         assertEquals("failed", history.read("reply").get(0).status);
         advance(8); worker.runAll();
-        assertNull(activity.getWindow().getDecorView().findViewWithTag("automation.failure.failure"));
+        assertNull(replyRing());
         assertEquals(0, sends.get());
     }
 
@@ -285,6 +290,157 @@ public final class AutomationDispatcherTest {
 
     @Test @Config(qualifiers = "w640dp-h360dp-land-mdpi") @GraphicsMode(GraphicsMode.Mode.NATIVE)
     public void landscapeNoticeRemainsBoundedAndScrollable() { layoutPreview(); }
+
+    @Test public void privateGroupAndCommentRepliesShareOneBlueRingWithoutDuplicatedBanners() {
+        Map<String, Object> values = base(true, true);
+        values.put(LocalOptions.COMMENT_REPLY_ENABLED, true);
+        dispatcher.setOptions(new LocalOptions(values));
+        prepare("reply", "private", () -> true);
+        prepare("reply", "group", () -> true);
+        prepare("comment_reply", "nested", () -> true);
+        prepare("comment", "comment", () -> true);
+        layoutDecor();
+        CommentRingView reply = replyRing();
+        CommentRingView comment = (CommentRingView) activity.getWindow().getDecorView().findViewWithTag("automation.comment.ring");
+        assertNotNull(reply);
+        assertNotNull(comment);
+        assertEquals(3, reply.getQueueCount());
+        assertEquals(1, comment.getQueueCount());
+        assertEquals(8, reply.getRetriesLeft()); // Reply variant displays countdown seconds in its small counter.
+        assertEquals(android.graphics.Color.rgb(100, 178, 255), reply.getPrimaryColor());
+        assertEquals(android.graphics.Color.rgb(112, 229, 211), comment.getPrimaryColor());
+        assertFalse(overlap(reply, comment));
+        assertTrue(reply.getContentDescription().toString().contains("自动回复"));
+        assertFalse(reply.getContentDescription().toString().contains("生成内容"));
+        assertNull(activity.getWindow().getDecorView().findViewWithTag("automation.notice.private"));
+        assertNull(activity.getWindow().getDecorView().findViewWithTag("automation.notices"));
+    }
+
+    @Test public void replyRingCancelsLatestUnsubmittedChannelAndOpensTheOldestRemainingDetails() {
+        Map<String, Object> values = base(true, true);
+        values.put(LocalOptions.COMMENT_REPLY_ENABLED, true);
+        dispatcher.setOptions(new LocalOptions(values));
+        dispatcher.prepare("reply", "first", "u", "私聊", "最早收到的私聊", "准备的回复", "model", () -> true,
+                callback -> { sends.incrementAndGet(); callback.accept("sent"); });
+        prepare("comment_reply", "latest", () -> true);
+        assertEquals(2, replyRing().getQueueCount());
+        replyRing().performLongClick();
+        worker.runAll();
+        assertEquals(1, replyRing().getQueueCount());
+        assertEquals("cancelled", history.read("comment_reply").get(0).status);
+        replyRing().performClick();
+        AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
+        assertEquals("最早收到的私聊", ((TextView) dialog.findViewById(android.R.id.content)
+                .findViewWithTag("automation.details.input")).getText().toString());
+        assertEquals("立即发送", dialog.getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+        advance(20);
+        worker.runAll();
+        assertEquals(0, sends.get());
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        ShadowLooper.idleMainLooper();
+        worker.runAll();
+        assertEquals(1, sends.get());
+    }
+
+    @Test public void sendingAndUnknownReplyDetailsStayReadOnlyAndNeverOfferARepeatSend() {
+        dispatcher.setOptions(options(true, true));
+        dispatcher.prepare("reply", "unknown-ring", "u", "用户", "消息", "回复", "model", () -> true,
+                callback -> sends.incrementAndGet());
+        advance(8);
+        worker.runAll();
+        assertEquals("publishing", replyRing().getPhase());
+        replyRing().performClick();
+        AlertDialog sending = ShadowAlertDialog.getLatestAlertDialog();
+        assertEquals("关闭", sending.getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+        assertNotShown(sending.getButton(AlertDialog.BUTTON_NEGATIVE));
+        replyRing().performLongClick();
+        sending.dismiss();
+        advance(30);
+        worker.runAll();
+        assertEquals("submitted", replyRing().getPhase());
+        replyRing().performClick();
+        AlertDialog unknown = ShadowAlertDialog.getLatestAlertDialog();
+        assertEquals("关闭", unknown.getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+        assertNotShown(unknown.getButton(AlertDialog.BUTTON_NEGATIVE));
+        replyRing().performLongClick();
+        advance(20);
+        worker.runAll();
+        assertEquals(1, sends.get());
+        assertEquals("submitted", history.read("reply").get(0).status);
+        assertNull(replyRing());
+    }
+
+    @Test public void replyFailureCanOnlyBeReviewedOrDismissedAndParentTipControlsOnlyItsOwnRing() {
+        dispatcher.setOptions(options(true, true));
+        dispatcher.reportFinalFailure(new AutomationHistoryStore.Entry("failed-reply", "reply", "u", "用户", "消息",
+                "", "model", "failed", 1, 1));
+        assertEquals("failed", replyRing().getPhase());
+        replyRing().performClick();
+        AlertDialog failure = ShadowAlertDialog.getLatestAlertDialog();
+        assertEquals("关闭", failure.getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+        assertNotShown(failure.getButton(AlertDialog.BUTTON_NEGATIVE));
+        failure.dismiss();
+        prepare("comment", "comment", () -> true);
+        Map<String, Object> withoutReplyTip = base(true, true);
+        withoutReplyTip.put("reply_tip", false);
+        dispatcher.setOptions(new LocalOptions(withoutReplyTip));
+        assertNull(replyRing());
+        assertNotNull(activity.getWindow().getDecorView().findViewWithTag("automation.comment.ring"));
+        assertEquals(0, sends.get());
+    }
+
+    @Test public void pauseAndCloseDetachBothIndependentRingsAndReadOnlyDialogs() {
+        dispatcher.setOptions(options(true, true));
+        prepare("reply", "reply", () -> true);
+        prepare("comment", "comment", () -> true);
+        dispatcher.onActivityPaused(activity);
+        assertNull(replyRing());
+        assertNull(activity.getWindow().getDecorView().findViewWithTag("automation.comment.ring"));
+        dispatcher.onActivityResumed(activity);
+        assertNotNull(replyRing());
+        assertNotNull(activity.getWindow().getDecorView().findViewWithTag("automation.comment.ring"));
+        replyRing().performClick();
+        AlertDialog details = ShadowAlertDialog.getLatestAlertDialog();
+        dispatcher.close();
+        assertFalse(details.isShowing());
+        assertNull(replyRing());
+        assertNull(activity.getWindow().getDecorView().findViewWithTag("automation.comment.ring"));
+    }
+
+    @Test @Config(qualifiers = "w432dp-h800dp-mdpi") @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void blueReplyAndTealCommentRingsRenderTogetherForVisualReview() {
+        dispatcher.setOptions(options(true, false));
+        prepare("reply", "blue", () -> true);
+        prepare("comment", "teal", () -> true);
+        layoutDecor();
+        CommentRingView reply = replyRing();
+        CommentRingView comment = (CommentRingView) activity.getWindow().getDecorView().findViewWithTag("automation.comment.ring");
+        assertFalse(overlap(reply, comment));
+        String output = System.getenv("DOUAI_CHAT_SCREENSHOTS");
+        if (output == null) return;
+        java.io.File folder = new java.io.File(output);
+        assertTrue(folder.isDirectory() || folder.mkdirs());
+        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(432, 800, android.graphics.Bitmap.Config.ARGB_8888);
+        activity.getWindow().getDecorView().draw(new android.graphics.Canvas(bitmap));
+        try (java.io.FileOutputStream stream = new java.io.FileOutputStream(new java.io.File(folder, "automation-reply-comment-rings-432x800.png"))) {
+            assertTrue(bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream));
+        } catch (java.io.IOException failure) { throw new AssertionError(failure); }
+        finally { bitmap.recycle(); }
+    }
+
+    private CommentRingView replyRing() { return (CommentRingView) activity.getWindow().getDecorView().findViewWithTag("automation.reply.ring"); }
+    private static void assertNotShown(View view) { assertTrue(view == null || view.getVisibility() != View.VISIBLE); }
+    private static boolean overlap(View first, View second) {
+        return first.getX() < second.getX() + second.getWidth() && first.getX() + first.getWidth() > second.getX()
+                && first.getY() < second.getY() + second.getHeight() && first.getY() + first.getHeight() > second.getY();
+    }
+    private void layoutDecor() {
+        View decor = activity.getWindow().getDecorView();
+        android.util.DisplayMetrics metrics = activity.getResources().getDisplayMetrics();
+        decor.measure(View.MeasureSpec.makeMeasureSpec(metrics.widthPixels, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(metrics.heightPixels, View.MeasureSpec.EXACTLY));
+        decor.layout(0, 0, metrics.widthPixels, metrics.heightPixels);
+    }
 
     private void layoutPreview() {
         dispatcher.setOptions(options(true, false));
@@ -315,7 +471,8 @@ public final class AutomationDispatcherTest {
 
     private View notice(String id) {
         View reply = activity.getWindow().getDecorView().findViewWithTag("automation.notice." + id);
-        return reply != null ? reply : activity.getWindow().getDecorView().findViewWithTag("automation.comment.ring");
+        return reply != null ? reply : activity.getWindow().getDecorView().findViewWithTag(
+                "comment".equals(preparedKinds.get(id)) ? "automation.comment.ring" : "automation.reply.ring");
     }
 
     private static LocalOptions options(boolean tip, boolean history) { return new LocalOptions(base(tip, history)); }

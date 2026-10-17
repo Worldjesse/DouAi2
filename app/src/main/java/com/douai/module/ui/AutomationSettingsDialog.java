@@ -12,6 +12,7 @@ import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 import com.douai.module.config.FeatureSettings;
+import com.douai.module.config.LocalOptions;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
 import com.douai.module.ui.miuix.MiuixFormControls;
@@ -46,11 +47,11 @@ final class AutomationSettingsDialog implements AutoCloseable {
         LinearLayout panel = new LinearLayout(context);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(16), dp(8), dp(16), dp(8));
-        controls[0] = addToggle(panel, "自动化总开关", "控制自动点赞、关注和草稿预填。",
+        controls[0] = addToggle(panel, "自动化总开关", "",
                 settings.automationEnabled, true, value -> change(Field.MASTER, value));
-        controls[1] = addToggle(panel, "自动点赞", "只处理当前显示且尚未点赞的作品。",
+        controls[1] = addToggle(panel, "自动点赞", "",
                 settings.autoLikeEnabled, settings.automationEnabled, value -> change(Field.LIKE, value));
-        controls[2] = addToggle(panel, "自动关注", "调用抖音原生关注流程。",
+        controls[2] = addToggle(panel, "自动关注", "",
                 settings.autoFollowEnabled, settings.automationEnabled, value -> change(Field.FOLLOW, value));
         Button stop = useMiuix ? MiuixFormControls.button(context) : new Button(context);
         stop.setText("立即停止");
@@ -58,6 +59,7 @@ final class AutomationSettingsDialog implements AutoCloseable {
         stop.setOnClickListener(ignored -> {
             if (closed) return;
             repository.putBoolean("native_auto_reply", false);
+            repository.putBoolean(LocalOptions.COMMENT_REPLY_ENABLED, false);
             repository.putBoolean("native_auto_comment", false);
             repository.putBoolean("streak_enabled", false);
             change(Field.STOP, false);
@@ -119,6 +121,7 @@ final class AutomationSettingsDialog implements AutoCloseable {
         labels.setOrientation(LinearLayout.VERTICAL);
         labels.addView(text(title, 15, TEXT), matchWrap());
         TextView description = text(summary, 12, MUTED);
+        description.setVisibility(summary == null || summary.isEmpty() ? View.GONE : View.VISIBLE);
         LinearLayout.LayoutParams descriptionParams = matchWrap();
         descriptionParams.topMargin = dp(3);
         labels.addView(description, descriptionParams);

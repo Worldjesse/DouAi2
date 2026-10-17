@@ -265,7 +265,7 @@ object MiuixSettingsViews {
         private val summary: String?,
         initialValue: String?,
         initialEnabled: Boolean,
-        private val onClick: Runnable,
+        private val onClick: Runnable?,
     ) {
         private var currentValue by mutableStateOf(initialValue)
         private var enabledState by mutableStateOf(initialEnabled)
@@ -281,7 +281,7 @@ object MiuixSettingsViews {
                         enabled = enabledState,
                         modifier = Modifier.testTag("settings.option.$title")
                             .semantics { if (!enabledState) disabled() },
-                        onClick = { if (enabledState) onClick.run() },
+                        onClick = onClick?.let { action -> { if (enabledState) action.run() } },
                         bottomAction = {
                             currentValue?.let { current ->
                                 Text(
@@ -296,7 +296,8 @@ object MiuixSettingsViews {
                         },
                         endActions = {
                             swatchColor?.let { Box(Modifier.padding(end = 8.dp).size(24.dp).background(Color(it), CircleShape)) }
-                            Icon(MiuixIcons.Basic.ArrowRight, contentDescription = null)
+                            if (onClick != null) Icon(MiuixIcons.Basic.ArrowRight, contentDescription = null,
+                                modifier = Modifier.testTag("settings.option.arrow.$title"))
                         },
                     )
                 }

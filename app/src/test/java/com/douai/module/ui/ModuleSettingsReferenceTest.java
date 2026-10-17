@@ -90,16 +90,16 @@ public final class ModuleSettingsReferenceTest {
                 {"DOWNLOAD", "启用下载菜单", "下载方式", "保存位置", "下载任务", "默认行为", "是否启用抖音下载自定义命名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
                 {"AUTOPLAY", "自动滑动到下一个视频", "自动倍速播放", "倍速数值", "打开评论时,不滑动视频",
                         "滑动智能判断上下", "互动自动化"},
-                {"AUTO_REPLY", "开启自动回复", "回复模式", "回复内容", "语音回复", "接收私聊", "私聊范围", "接收群聊", "群聊范围",
-                        "每日最大回复数", "同一用户回复间隔（分钟）", "发送与记录"},
+                {"AUTO_REPLY", "开启自动回复", "回复模式", "回复内容", "素材识别", "语音回复", "接收私聊", "私聊范围", "接收群聊", "群聊范围",
+                        "接收评论回复", "每日最大回复数", "同一用户回复间隔（分钟）", "发送与记录"},
                 {"AUTO_COMMENT", "开启自动评论", "评论模式", "评论内容", "语音评论", "作品范围", "素材识别",
                         "每日最大评论数", "同一作者评论间隔（分钟）", "发送与记录"},
                 {"COMMENT", "评论自动添加后缀", "后缀内容", "替换语音文件",
-                        "评论自动文本转语音(文本前面输入\"#\"符号将自动转换)", "长按操作", "彩色评论", "彩色评论类型"},
+                        "评论自动文本转语音", "长按操作", "彩色评论", "彩色评论类型"},
                 {"STREAK", "自动续火花", "选择用户", "续火花内容", "续火花成功弹出Tip",
                         "重试结果未知的续火花", "清空续火花记录", "续火花限制时间", "内容Api"},
                 {"MESSAGE", "消息防撤回", "自己撤回的消息", "对方撤回的消息", "撤回的背景色", "替换私聊语音",
-                        "自动文本转语音(文本前面输入\"#\"符号将自动转换)"},
+                        "自动文本转语音"},
                 {"SPOOF", "伪装总开关", "获赞数量", "关注数量", "粉丝数量", "互关数量", "版本信息"},
                 {"EXTENSION", "AI 模型设置", "文本转语音设置"}
         };
@@ -113,6 +113,31 @@ public final class ModuleSettingsReferenceTest {
         }
     }
 
+    @Test public void settingsSwitchRowsKeepTheirTitlesAndCurrentValuesWithoutExplanatorySubtitles() {
+        store.putString("playback_speed", "1.75");
+        for (String category : new String[]{"BASIC", "INTERFACE", "FILTER", "DOWNLOAD", "AUTOPLAY",
+                "AUTO_REPLY", "AUTO_COMMENT", "COMMENT", "STREAK", "MESSAGE", "SPOOF"}) {
+            View page = openCategory(category);
+            for (Switch control : collect(page, Switch.class)) {
+                ViewGroup row = (ViewGroup) control.getParent();
+                ViewGroup labels = (ViewGroup) row.getChildAt(0);
+                int visibleLabels = 0;
+                for (int index = 0; index < labels.getChildCount(); index++) {
+                    if (labels.getChildAt(index).getVisibility() == View.VISIBLE) visibleLabels++;
+                }
+                assertEquals(category + ": " + control.getContentDescription(), 1, visibleLabels);
+            }
+            if ("AUTOPLAY".equals(category)) {
+                assertEquals("1.75", ((TextView) page.findViewWithTag("settings.value.倍速数值")).getText().toString());
+                assertFalse(containsText(page, "0.25 至 4"));
+            }
+            if ("AUTO_REPLY".equals(category)) {
+                assertEquals("固定内容", ((TextView) page.findViewWithTag("settings.value.回复模式")).getText().toString());
+            }
+            screen.dismissChildPages();
+        }
+    }
+
     @Test public void thirdPartyDownloadsKeepDefaultBehaviorAboveTheirParserConfiguration() {
         store.putString(ThirdPartyDownloadSettings.METHOD, ThirdPartyDownloadSettings.THIRD_PARTY);
         store.putString(ThirdPartyDownloadSettings.SIGNATURE_MODE, ThirdPartyDownloadSettings.SIGNATURE_NONE);
@@ -122,7 +147,7 @@ public final class ModuleSettingsReferenceTest {
                 settingTitles(page));
         Switch direct = toggle(page, "默认行为");
         assertFalse(direct.isChecked());
-        assertTrue(containsText((View) direct.getParent(), "开启后解析成功即保存所选下载字段，不显示下载选择。"));
+        assertFalse(containsText((View) direct.getParent(), "开启后解析成功即保存所选下载字段，不显示下载选择。"));
         direct.setChecked(true);
         assertTrue(toggle(page, "启用下载菜单").isChecked());
         assertTrue(store.load().downloadEnabled);
@@ -138,8 +163,8 @@ public final class ModuleSettingsReferenceTest {
         assertEquals("0", ((TextView) reply.findViewWithTag("settings.value.同一用户回复间隔（分钟）")).getText().toString());
         assertNull(reply.findViewWithTag("settings.option.每日最大评论数"));
         assertNull(reply.findViewWithTag("settings.option.同一作者评论间隔（分钟）"));
-        assertTrue(containsText(option(reply, "每日最大回复数"), "本地自然日"));
-        assertTrue(containsText(option(reply, "同一用户回复间隔（分钟）"), "UID"));
+        assertFalse(containsText(option(reply, "每日最大回复数"), "本地自然日"));
+        assertFalse(containsText(option(reply, "同一用户回复间隔（分钟）"), "UID"));
         editOption(reply, "每日最大回复数", "120");
         editOption(reply, "同一用户回复间隔（分钟）", "15");
         assertFalse(store.values.containsKey("comment_daily_limit"));
@@ -1031,14 +1056,165 @@ public final class ModuleSettingsReferenceTest {
         assertEquals("[{\"keyword\":\"茶\",\"reply\":\"关键词草稿\"}]", store.getString("reply_keywords", ""));
     }
 
-    @Test public void pausedReplyStatusClearsWhenTheUserReenablesTheReplySwitch() {
+    @Test public void replyMediaRecognitionKeepsAiChoicesAcrossOtherModesWithoutChangingCommentRecognition() {
+        store.putBoolean("comment_recognize_images", false);
+        store.putBoolean("comment_recognize_video", true);
+        View reply = openCategory("AUTO_REPLY");
+        assertFalse(option(reply, "素材识别").isEnabled());
+        assertEquals("未启用", ((TextView) reply.findViewWithTag("settings.value.素材识别")).getText().toString());
+        option(reply, "回复模式").performClick();
+        ((AlertDialog) ShadowDialog.getLatestDialog()).getListView().performItemClick(null, 1, 1);
+        assertTrue(option(reply, "素材识别").isEnabled());
+        assertEquals("图片", ((TextView) reply.findViewWithTag("settings.value.素材识别")).getText().toString());
+        option(reply, "素材识别").performClick();
+        Dialog recognition = ShadowDialog.getLatestDialog();
+        View media = recognition.getWindow().getDecorView();
+        assertEquals(Arrays.asList("识别图片", "识别视频"), settingTitles(media));
+        assertTrue(toggle(media, "识别图片").isChecked());
+        assertFalse(toggle(media, "识别视频").isChecked());
+        assertFalse(containsText(media, "需模型支持图片输入"));
+        assertFalse(containsText(media, "优先对方附图，无附图才读作品图片/封面"));
+        assertFalse(containsText(media, "抽帧不含音频"));
+        assertFalse(containsText(media, "私聊/群聊加密原视频暂不支持"));
+        toggle(media, "识别图片").setChecked(false);
+        assertEquals("不识别", ((TextView) reply.findViewWithTag("settings.value.素材识别")).getText().toString());
+        toggle(media, "识别视频").setChecked(true);
+        assertEquals("视频", ((TextView) reply.findViewWithTag("settings.value.素材识别")).getText().toString());
+        recognition.dismiss();
+        for (int mode : new int[]{0, 2, 3}) {
+            option(reply, "回复模式").performClick();
+            ((AlertDialog) ShadowDialog.getLatestDialog()).getListView().performItemClick(null, mode, mode);
+            assertFalse(option(reply, "素材识别").isEnabled());
+            assertEquals("未启用", ((TextView) reply.findViewWithTag("settings.value.素材识别")).getText().toString());
+            assertFalse(store.getBoolean(LocalOptions.REPLY_RECOGNIZE_IMAGES, true));
+            assertTrue(store.getBoolean(LocalOptions.REPLY_RECOGNIZE_VIDEO, false));
+        }
+        option(reply, "回复模式").performClick();
+        ((AlertDialog) ShadowDialog.getLatestDialog()).getListView().performItemClick(null, 1, 1);
+        assertTrue(option(reply, "素材识别").isEnabled());
+        assertEquals("视频", ((TextView) reply.findViewWithTag("settings.value.素材识别")).getText().toString());
+        option(reply, "素材识别").performClick();
+        media = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        assertFalse(toggle(media, "识别图片").isChecked());
+        assertTrue(toggle(media, "识别视频").isChecked());
+        toggle(media, "识别图片").setChecked(true);
+        assertEquals("图片、视频", ((TextView) reply.findViewWithTag("settings.value.素材识别")).getText().toString());
+        assertFalse(store.getBoolean("comment_recognize_images", true));
+        assertTrue(store.getBoolean("comment_recognize_video", false));
+    }
+
+    @Test public void interactionAutomationOffDoesNotMisreportTheAutoReplyMasterAsPaused() {
         store.putBoolean("native_auto_reply", true);
         View reply = openCategory("AUTO_REPLY");
-        assertTrue(containsText(reply, "已暂停：自动化总开关关闭"));
-        toggle(reply, "开启自动回复").setChecked(false);
-        toggle(reply, "开启自动回复").setChecked(true);
-        assertTrue(store.load().automationEnabled);
+        assertTrue(toggle(reply, "开启自动回复").isChecked());
+        assertFalse(store.load().automationEnabled);
         assertFalse(containsText(reply, "已暂停：自动化总开关关闭"));
+    }
+
+    @Test public void commentReplyReceptionUsesTheSharedParentControlsWithoutEnablingTheMaster() {
+        store.putString("comment_reply_prompt", "保留的旧独立提示词");
+        store.putString("comment_reply_daily_limit", "20");
+        View reply = openCategory("AUTO_REPLY");
+        Switch master = toggle(reply, "开启自动回复");
+        Switch comments = toggle(reply, "接收评论回复");
+        assertFalse(master.isChecked());
+        assertFalse(comments.isChecked());
+        assertEquals("固定内容", ((TextView) reply.findViewWithTag("settings.value.回复模式")).getText().toString());
+        assertFalse(containsText((View) comments.getParent(), "引用本页回复设置"));
+        assertFalse(containsText((View) comments.getParent(), "已暂停"));
+        assertNull(reply.findViewWithTag("settings.option.评论回复设置"));
+        assertNull(reply.findViewWithTag("settings.toggle.开启评论回复"));
+        comments.setChecked(true);
+        assertTrue(store.getBoolean(LocalOptions.COMMENT_REPLY_ENABLED, false));
+        assertFalse(master.isChecked());
+        assertFalse(store.getBoolean("native_auto_reply", false));
+        assertFalse(store.load().automationEnabled);
+        assertTrue(containsText((View) comments.getParent(), "已暂停：自动回复未开启"));
+        master.setChecked(true);
+        assertTrue(comments.isChecked());
+        assertFalse(containsText((View) comments.getParent(), "已暂停"));
+        toggle(reply, "接收私聊").setChecked(false);
+        toggle(reply, "接收群聊").setChecked(false);
+        assertFalse(store.getBoolean("reply_private_chats", true));
+        assertFalse(store.getBoolean("reply_group_chats", false));
+        assertTrue(comments.isChecked());
+        option(reply, "回复内容").performClick();
+        Dialog content = ShadowDialog.getLatestDialog();
+        assertEquals(Arrays.asList("固定回复内容"), settingTitles(content.getWindow().getDecorView()));
+        editOption(content.getWindow().getDecorView(), "固定回复内容", "所有已接收渠道共享固定正文");
+        content.dismiss();
+        toggle(reply, "语音回复").setChecked(true);
+        editOption(reply, "每日最大回复数", "7");
+        editOption(reply, "同一用户回复间隔（分钟）", "2");
+        assertEquals("所有已接收渠道共享固定正文", store.getString("auto_message_text", ""));
+        assertTrue(store.getBoolean(LocalOptions.REPLY_VOICE, false));
+        assertEquals("7", store.getString("reply_daily_limit", ""));
+        assertEquals("2", store.getString("reply_user_cooldown_minutes", ""));
+        assertEquals("保留的旧独立提示词", store.getString("comment_reply_prompt", ""));
+        assertEquals("20", store.getString("comment_reply_daily_limit", ""));
+        assertFalse(store.values.containsKey("comment_reply_mode"));
+        master.setChecked(false);
+        assertTrue(comments.isChecked());
+        assertTrue(containsText((View) comments.getParent(), "已暂停：自动回复未开启"));
+        comments.setChecked(false);
+        assertFalse(containsText((View) comments.getParent(), "已暂停"));
+        assertFalse(master.isChecked());
+    }
+
+    @Test public void commentReplyReceptionKeepsOneAiPromptAndSharedDeliverySettings() {
+        store.putString("reply_mode", "ai");
+        store.putString("reply_prompt", "共享二级提示词");
+        store.putString("comment_reply_prompt", "历史独立提示词");
+        View reply = openCategory("AUTO_REPLY");
+        toggle(reply, "接收评论回复").setChecked(true);
+        toggle(reply, "开启自动回复").setChecked(true);
+        option(reply, "回复内容").performClick();
+        Dialog content = ShadowDialog.getLatestDialog();
+        assertEquals(Arrays.asList("模型配置", "二级提示词"), settingTitles(content.getWindow().getDecorView()));
+        option(content.getWindow().getDecorView(), "二级提示词").performClick();
+        PromptEditorDialog prompt = (PromptEditorDialog) ShadowDialog.getLatestDialog();
+        setEditorInput(prompt, "二级提示词", "更新后的共享二级提示词");
+        prompt.getButton(Dialog.BUTTON_POSITIVE).performClick();
+        ShadowLooper.idleMainLooper();
+        assertEquals("更新后的共享二级提示词", store.getString("reply_prompt", ""));
+        assertEquals("历史独立提示词", store.getString("comment_reply_prompt", ""));
+        content.dismiss();
+        option(reply, "发送与记录").performClick();
+        View delivery = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        toggle(delivery, "保存历史记录").setChecked(true);
+        toggle(delivery, "悬浮提示").setChecked(true);
+        editOption(delivery, "提示超时（秒）", "10");
+        editOption(delivery, "延迟回复", "5");
+        assertTrue(store.getBoolean("reply_save_history", false));
+        assertTrue(store.getBoolean("reply_tip", false));
+        assertEquals("10", store.getString("reply_notice_seconds", ""));
+        assertEquals("5", store.getString("reply_delay_seconds", ""));
+        assertNotNull(delivery.findViewWithTag("settings.option.回复历史记录"));
+        assertNull(delivery.findViewWithTag("settings.option.评论回复记录"));
+        assertFalse(store.values.containsKey("comment_reply_tip_enabled"));
+        assertFalse(store.values.containsKey("comment_reply_tip_seconds"));
+    }
+
+    @Test public void commentReplySummaryTracksTheParentAndClosedCallbacksCannotWrite() {
+        store.putBoolean("native_auto_reply", true);
+        store.putBoolean(LocalOptions.COMMENT_REPLY_ENABLED, true);
+        View reply = openCategory("AUTO_REPLY");
+        Switch master = toggle(reply, "开启自动回复");
+        Switch comments = toggle(reply, "接收评论回复");
+        assertTrue(comments.isChecked());
+        assertFalse(store.load().automationEnabled);
+        assertFalse(containsText((View) master.getParent(), "已暂停"));
+        assertFalse(containsText((View) comments.getParent(), "已暂停"));
+        master.setChecked(false);
+        assertTrue(comments.isChecked());
+        assertTrue(containsText((View) comments.getParent(), "已暂停：自动回复未开启"));
+        master.setChecked(true);
+        assertFalse(containsText((View) comments.getParent(), "已暂停"));
+        screen.dismissChildPages();
+        comments.setChecked(false);
+        master.setChecked(false);
+        assertTrue(store.getBoolean(LocalOptions.COMMENT_REPLY_ENABLED, false));
+        assertTrue(store.getBoolean("native_auto_reply", false));
     }
 
     @Test public void commentModesKeepDraftsAndOnlyAiModeEnablesMediaControls() {
@@ -1333,7 +1509,7 @@ public final class ModuleSettingsReferenceTest {
         assertFalse(menu.isChecked());
         Switch direct = toggle(page, "默认行为");
         assertFalse(direct.isChecked());
-        assertTrue(containsText((View) direct.getParent(), "开启后手势直接保存视频或全部图片，不显示下载选择。"));
+        assertFalse(containsText((View) direct.getParent(), "开启后手势直接保存视频或全部图片，不显示下载选择。"));
         direct.setChecked(true);
         assertTrue(menu.isChecked());
         assertTrue(store.load().downloadEnabled);

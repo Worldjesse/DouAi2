@@ -1,0 +1,334 @@
+package com.douai.module.feature;
+
+import android.content.Context;
+import android.content.SharedPreferences;
+
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
+import org.robolectric.annotation.Config;
+
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
+import static org.junit.Assert.*;
+
+@RunWith(RobolectricTestRunner.class)
+@Config(manifest = Config.NONE, sdk = 35)
+public final class CommentReplyLedgerTest {
+    private SharedPreferences preferences;
+    private MutableClock clock;
+    private CommentReplyLedger ledger;
+
+    @Before public void reset() {
+        preferences = RuntimeEnvironment.getApplication()
+                .getSharedPreferences("comment_reply_ledger_test", Context.MODE_PRIVATE);
+        preferences.edit().clear().commit();
+        clock = new MutableClock();
+        ledger = recreate();
+    }
+
+    @Test public void baselineAndMonotonicWatermarkSurviveRecreationAndStayAccountScoped() {
+        assertFalse(ledger.initialized(100));
+        ledger.initialize(100, 1000);
+        ledger.advance(100, 2000);
+        ledger.advance(100, 1500);
+        ledger.initialize(100, 3000);
+
+        CommentReplyLedger restarted = recreate();
+        assertTrue(restarted.initialized(100));
+        assertEquals(1000, restarted.baseline(100));
+        assertEquals(2000, restarted.watermark(100));
+        assertFalse(restarted.initialized(101));
+        assertEquals(0, restarted.watermark(101));
+    }
+
+    @Test public void pendingClaimsRecoverAsImmediatelyRetryableBecauseNothingWasSubmitted() {
+        assertTrue(ledger.claim(100, "incoming", "root", 3));
+        assertFalse(ledger.claim(100, "incoming", "root", 3));
+        CommentReplyLedger restarted = recreate();
+        assertTrue(restarted.contains(100, "incoming"));
+        assertTrue(restarted.retryable(100, "incoming"));
+        assertTrue(restarted.claim(100, "incoming", "root", 3));
+    }
+
+    @Test public void failedPendingRecoveryFailsClosedUntilTheLedgerIsRecreatedSuccessfully() {
+        ledger.initialize(100, 1000);
+        assertTrue(ledger.claim(100, "incoming", "root", 1));
+        CommentReplyLedger failing = new CommentReplyLedger(preferences, clock, editor -> false);
+        clock.advance(CommentReplyLedger.RETRY_DELAY_MILLIS);
+        assertFalse(failing.initialized(100));
+        assertFalse(failing.claim(100, "incoming", "root", 1));
+        assertFalse(failing.claim(100, "new", "root", 1));
+        assertFalse(failing.submitted(100, "incoming"));
+        assertTrue(recreate().retryable(100, "incoming"));
+    }
+
+    @Test public void baselineIdsArePersistedAtomicallyAndDoNotBlockNewCommentsFromTheSameSecond() {
+        assertTrue(ledger.initialize(100, 1000, List.of("old-a", "old-b", "old-a")));
+        assertTrue(recreate().initialized(100));
+        assertTrue(ledger.contains(100, "old-a"));
+        assertFalse(ledger.claim(100, "old-a", "root", 1));
+        assertFalse(ledger.retryable(100, "old-a"));
+        assertFalse(ledger.threadExhausted(100, "root", 1));
+        assertTrue(ledger.claim(100, "new-same-second", "root", 1));
+        assertTrue(ledger.initialize(100, 2000, List.of("later-existing")));
+        assertEquals(1000, ledger.baseline(100));
+        assertFalse(ledger.contains(100, "later-existing"));
+        assertFalse(ledger.contains(101, "old-a"));
+    }
+
+    @Test public void baselineCommitFailureDoesNotAuthorizeProcessingOrForgetExistingIds() {
+        CommentReplyLedger failing = new CommentReplyLedger(preferences, clock, editor -> false);
+        assertFalse(failing.initialize(100, 1000, List.of("old-a")));
+        assertFalse(failing.initialized(100));
+        assertFalse(failing.claim(100, "new-same-second", "root", 1));
+        assertFalse(failing.contains(100, "old-a"));
+        assertFalse(ledger.initialize(100, 1000, List.of("")));
+        assertFalse(ledger.initialized(100));
+    }
+
+    @Test public void sameIncomingIdIsIndependentAcrossAccountsAndOtherCommentsStayDistinct() {
+        assertTrue(ledger.claim(100, "incoming-a", "video-root", 3));
+        assertTrue(ledger.claim(101, "incoming-a", "video-root", 3));
+        assertTrue(ledger.claim(100, "incoming-b", "video-root", 3));
+        assertFalse(ledger.contains(100, "never-seen"));
+        assertFalse(ledger.contains(102, "incoming-a"));
+    }
+
+    @Test public void submittedUnknownAndLateSuccessNeverPermitAutomaticResending() {
+        assertTrue(ledger.claim(100, "incoming", "root", 3));
+        assertTrue(ledger.submitted(100, "incoming"));
+        assertFalse(ledger.submitted(100, "incoming"));
+        assertFalse(recreate().claim(100, "incoming", "root", 3));
+        ledger.finish(100, "incoming", "unknown");
+        ledger.finish(100, "incoming", "failed");
+        assertFalse(ledger.retryable(100, "incoming"));
+        clock.advance(CommentReplyLedger.RETRY_DELAY_MILLIS * 2);
+        assertFalse(recreate().claim(100, "incoming", "root", 3));
+        ledger.finish(100, "incoming", "sent");
+        ledger.finish(100, "incoming", "failed");
+        assertFalse(recreate().claim(100, "incoming", "root", 3));
+    }
+
+    @Test public void definiteFailuresReleaseThreadReservationAndRetryOnlyAfterBackoff() {
+        assertTrue(ledger.claim(100, "incoming", "root", 1));
+        assertTrue(ledger.submitted(100, "incoming"));
+        ledger.finish(100, "incoming", "failed");
+        assertTrue(ledger.retryable(100, "incoming"));
+        assertFalse(ledger.claim(100, "incoming", "root", 1));
+        clock.advance(CommentReplyLedger.RETRY_DELAY_MILLIS);
+        assertTrue(recreate().claim(100, "incoming", "root", 1));
+        ledger.finish(100, "incoming", "failed");
+        clock.advance(CommentReplyLedger.RETRY_DELAY_MILLIS);
+        assertTrue(recreate().claim(100, "incoming", "root", 1));
+        ledger.finish(100, "incoming", "failed");
+        clock.advance(CommentReplyLedger.RETRY_DELAY_MILLIS);
+        assertFalse(ledger.retryable(100, "incoming"));
+        assertFalse(recreate().claim(100, "incoming", "root", 1));
+        assertTrue(ledger.claim(100, "another", "root", 1));
+    }
+
+    @Test public void pendingSubmittedUnknownAndSuccessfulRepliesAllConsumeThreadLimit() {
+        assertTrue(ledger.claim(100, "a", "root", 3));
+        assertTrue(ledger.claim(100, "b", "root", 3));
+        assertTrue(ledger.submitted(100, "b"));
+        ledger.finish(100, "b", "unknown");
+        assertTrue(ledger.claim(100, "c", "root", 3));
+        assertTrue(ledger.submitted(100, "c"));
+        ledger.finish(100, "c", "sent");
+        assertFalse(ledger.claim(100, "d", "root", 3));
+        assertTrue(ledger.claim(100, "different-root", "other-root", 3));
+        assertTrue(ledger.claim(101, "d", "root", 3));
+    }
+
+    @Test public void threadExhaustionDistinguishesPendingSlotsFromSubmittedQuota() {
+        assertTrue(ledger.claim(100, "a", "root", 2));
+        assertTrue(ledger.claim(100, "b", "root", 2));
+        assertFalse(ledger.claim(100, "c", "root", 2));
+        assertFalse(ledger.threadExhausted(100, "root", 2));
+        assertTrue(ledger.submitted(100, "a"));
+        ledger.finish(100, "a", "sent");
+        assertFalse(ledger.threadExhausted(100, "root", 2));
+        assertTrue(ledger.submitted(100, "b"));
+        ledger.finish(100, "b", "unknown");
+        assertTrue(recreate().threadExhausted(100, "root", 2));
+        assertFalse(ledger.threadExhausted(101, "root", 2));
+        assertFalse(ledger.threadExhausted(100, "other-root", 2));
+        assertFalse(ledger.threadExhausted(100, "root", 0));
+    }
+
+    @Test public void manualCancellationIsTerminalWithoutConsumingThreadQuota() {
+        assertTrue(ledger.claim(100, "cancelled", "root", 1));
+        ledger.finish(100, "cancelled", "cancelled");
+        assertTrue(recreate().contains(100, "cancelled"));
+        assertFalse(ledger.retryable(100, "cancelled"));
+        clock.advance(CommentReplyLedger.RETRY_DELAY_MILLIS * 10);
+        assertFalse(recreate().claim(100, "cancelled", "root", 1));
+        ledger.finish(100, "cancelled", "failed");
+        assertFalse(ledger.retryable(100, "cancelled"));
+        assertFalse(ledger.threadExhausted(100, "root", 1));
+        assertTrue(ledger.claim(100, "new", "root", 1));
+    }
+
+    @Test public void temporaryDeferralsReleaseThreadSlotsAndPreserveAllActualFailureAttempts() {
+        for (int index = 0; index < 10; index++) {
+            assertTrue(ledger.claim(100, "incoming", "root", 1));
+            ledger.defer(100, "incoming");
+            assertTrue(ledger.retryable(100, "incoming"));
+            assertFalse(ledger.threadExhausted(100, "root", 1));
+        }
+        for (int attempt = 1; attempt <= CommentReplyLedger.MAX_ATTEMPTS; attempt++) {
+            assertTrue(ledger.claim(100, "incoming", "root", 1));
+            ledger.finish(100, "incoming", "failed");
+            clock.advance(CommentReplyLedger.RETRY_DELAY_MILLIS);
+            if (attempt < CommentReplyLedger.MAX_ATTEMPTS) assertTrue(ledger.retryable(100, "incoming"));
+        }
+        assertFalse(ledger.retryable(100, "incoming"));
+        assertFalse(ledger.claim(100, "incoming", "root", 1));
+    }
+
+    @Test public void deferralCannotReleaseSubmittedUnknownSentOrManuallyCancelledRecords() {
+        assertTrue(ledger.claim(100, "submitted", "root", 4));
+        assertTrue(ledger.submitted(100, "submitted"));
+        ledger.defer(100, "submitted");
+        assertFalse(ledger.retryable(100, "submitted"));
+        ledger.finish(100, "submitted", "unknown");
+        ledger.defer(100, "submitted");
+        assertFalse(ledger.retryable(100, "submitted"));
+        ledger.finish(100, "submitted", "sent");
+        ledger.defer(100, "submitted");
+        assertFalse(ledger.retryable(100, "submitted"));
+
+        assertTrue(ledger.claim(100, "cancelled", "other-root", 1));
+        ledger.finish(100, "cancelled", "cancelled");
+        ledger.defer(100, "cancelled");
+        assertFalse(ledger.retryable(100, "cancelled"));
+    }
+
+    @Test public void repeatedPendingProcessRecoveryDoesNotSpendActualFailureAttempts() {
+        for (int restart = 0; restart < 10; restart++) {
+            assertTrue(ledger.claim(100, "incoming", "root", 1));
+            ledger = recreate();
+            assertTrue(ledger.retryable(100, "incoming"));
+        }
+        assertTrue(ledger.claim(100, "incoming", "root", 1));
+        ledger.finish(100, "incoming", "failed");
+        clock.advance(CommentReplyLedger.RETRY_DELAY_MILLIS);
+        assertTrue(ledger.claim(100, "incoming", "root", 1));
+        ledger.finish(100, "incoming", "failed");
+        clock.advance(CommentReplyLedger.RETRY_DELAY_MILLIS);
+        assertTrue(ledger.claim(100, "incoming", "root", 1));
+        ledger.finish(100, "incoming", "failed");
+        clock.advance(CommentReplyLedger.RETRY_DELAY_MILLIS);
+        assertFalse(ledger.claim(100, "incoming", "root", 1));
+    }
+
+    @Test public void deferringTheLastAvailableAttemptStillAllowsThatSameAttemptToResume() {
+        for (int attempt = 1; attempt < CommentReplyLedger.MAX_ATTEMPTS; attempt++) {
+            assertTrue(ledger.claim(100, "incoming", "root", 1));
+            ledger.finish(100, "incoming", "failed");
+            clock.advance(CommentReplyLedger.RETRY_DELAY_MILLIS);
+        }
+        assertTrue(ledger.claim(100, "incoming", "root", 1));
+        ledger.defer(100, "incoming");
+        assertTrue(recreate().retryable(100, "incoming"));
+        assertTrue(ledger.claim(100, "incoming", "root", 1));
+        ledger.finish(100, "incoming", "failed");
+        clock.advance(CommentReplyLedger.RETRY_DELAY_MILLIS);
+        assertFalse(ledger.retryable(100, "incoming"));
+        assertFalse(ledger.claim(100, "incoming", "root", 1));
+    }
+
+    @Test public void definitivelyRejectedSubmissionStopsConsumingPermanentThreadQuota() {
+        assertTrue(ledger.claim(100, "a", "root", 1));
+        assertTrue(ledger.submitted(100, "a"));
+        assertTrue(ledger.threadExhausted(100, "root", 1));
+        ledger.finish(100, "a", "failed");
+        assertFalse(ledger.threadExhausted(100, "root", 1));
+        assertTrue(ledger.retryable(100, "a"));
+        assertTrue(ledger.claim(100, "b", "root", 1));
+    }
+
+    @Test public void sharedLockStopsTwoInstancesClaimingTheSameIncomingComment() throws Exception {
+        CommentReplyLedger other = recreate();
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Boolean> first = executor.submit(() -> {
+                start.await(); return ledger.claim(100, "incoming", "root", 3);
+            });
+            Future<Boolean> second = executor.submit(() -> {
+                start.await(); return other.claim(100, "incoming", "root", 3);
+            });
+            start.countDown();
+            assertEquals(1, (first.get() ? 1 : 0) + (second.get() ? 1 : 0));
+        } finally { executor.shutdownNow(); }
+    }
+
+    @Test public void failedOrThrowingPersistenceNeverAuthorizesASend() {
+        CommentReplyLedger failing = new CommentReplyLedger(preferences, clock, editor -> false);
+        failing.initialize(100, 1000);
+        assertFalse(failing.initialized(100));
+        assertFalse(failing.claim(100, "incoming", "root", 3));
+        assertFalse(failing.contains(100, "incoming"));
+        assertTrue(ledger.claim(100, "incoming", "root", 3));
+        assertFalse(failing.submitted(100, "incoming"));
+
+        CommentReplyLedger throwing = new CommentReplyLedger(preferences, clock, editor -> {
+            throw new IllegalStateException("disk unavailable");
+        });
+        assertFalse(throwing.claim(100, "new", "root", 3));
+        assertFalse(throwing.submitted(100, "incoming"));
+    }
+
+    @Test public void corruptRecordsBlockClaimsInsteadOfSilentlyForgettingUnknownSends() {
+        preferences.edit().putString("incoming.100.corrupt", "invalid").commit();
+        assertTrue(ledger.contains(100, "corrupt"));
+        assertFalse(ledger.claim(100, "corrupt", "root", 3));
+        assertFalse(ledger.claim(100, "other", "root", 3));
+    }
+
+    @Test public void capacityRefusesNewClaimsAndPreservesEveryUnknownRecord() {
+        SharedPreferences.Editor editor = preferences.edit();
+        String unknown = "{\"root\":\"root\",\"status\":\"unknown\",\"attempts\":1,\"at\":1000}";
+        for (int index = 0; index < CommentReplyLedger.MAX_ENTRIES; index++) {
+            editor.putString("incoming.100.old-" + index, unknown);
+        }
+        assertTrue(editor.commit());
+
+        assertFalse(ledger.claim(100, "new", "new-root", 0));
+        assertEquals(CommentReplyLedger.MAX_ENTRIES, preferences.getAll().size());
+        assertTrue(recreate().contains(100, "old-0"));
+        assertFalse(recreate().claim(100, "old-0", "root", 0));
+    }
+
+    @Test public void invalidIdentifiersAndUnclaimedSubmissionAreRejected() {
+        assertFalse(ledger.claim(0, "a", "root", 3));
+        assertFalse(ledger.claim(100, "", "root", 3));
+        assertFalse(ledger.claim(100, "a", "", 3));
+        assertFalse(ledger.claim(100, "a".repeat(513), "root", 3));
+        assertFalse(ledger.submitted(100, "unclaimed"));
+    }
+
+    private CommentReplyLedger recreate() {
+        return new CommentReplyLedger(preferences, clock, SharedPreferences.Editor::commit);
+    }
+
+    private static final class MutableClock extends Clock {
+        private Instant now = Instant.ofEpochMilli(1_000_000);
+        void advance(long millis) { now = now.plusMillis(millis); }
+        @Override public ZoneId getZone() { return ZoneOffset.UTC; }
+        @Override public Clock withZone(ZoneId zone) { return Clock.fixed(now, zone); }
+        @Override public Instant instant() { return now; }
+    }
+}

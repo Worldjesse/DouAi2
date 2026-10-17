@@ -337,29 +337,29 @@ public final class ModuleSettingsScreen {
     private void buildCategoryControls(Category category) {
         switch (category) {
             case BASIC:
-                addLocalSwitch("去除启动和闪屏广告", "关闭启动广告展示入口。", "remove_splash_ads");
-                addLocalSwitch("去除更新弹窗", "阻止应用内更新提示。", "remove_update_dialog");
-                addLocalSwitch("去除青少年弹窗", "关闭青少年模式引导提示。", "remove_teen_dialog");
+                addLocalSwitch("去除启动和闪屏广告", "", "remove_splash_ads");
+                addLocalSwitch("去除更新弹窗", "", "remove_update_dialog");
+                addLocalSwitch("去除青少年弹窗", "", "remove_teen_dialog");
                 break;
             case INTERFACE:
-                addLocalSwitch("悬浮条", "当前视频页的快捷工具条。", "toolbar_enabled");
-                addLocalSwitch("隐藏拍摄+号图标", "保留原按钮点击区域。", "hide_camera_plus");
-                addLocalSwitch("隐藏上下黑边", "隐藏视频页顶部和底部留白。", "hide_video_black_edges");
-                addLocalSwitch("禁用双击点赞", "关闭视频双击点赞动作。", "disable_double_tap_like");
-                addLocalSwitch("不允许系统跳过已隐藏视频", "阻止当前信息流的删除跳过动作。", "prevent_skip_hidden");
-                addLocalSwitch("不允许中途插入视频", "阻止播放过程中追加插播内容。", "prevent_insert_video");
-                addLocalSwitch("拦截长按倍数启用场景", "关闭抖音自带的长按倍速入口。", "block_long_press_speed");
-                addLocalSwitch("拦截系统长按手势", "未设置快捷动作时阻止抖音原生长按。",
+                addLocalSwitch("悬浮条", "", "toolbar_enabled");
+                addLocalSwitch("隐藏拍摄+号图标", "", "hide_camera_plus");
+                addLocalSwitch("隐藏上下黑边", "", "hide_video_black_edges");
+                addLocalSwitch("禁用双击点赞", "", "disable_double_tap_like");
+                addLocalSwitch("不允许系统跳过已隐藏视频", "", "prevent_skip_hidden");
+                addLocalSwitch("不允许中途插入视频", "", "prevent_insert_video");
+                addLocalSwitch("拦截长按倍数启用场景", "", "block_long_press_speed");
+                addLocalSwitch("拦截系统长按手势", "",
                         LocalOptions.INTERCEPT_NATIVE_LONG_PRESS);
                 addOption("长按事件", "", null, true, () -> showGestureSettings("长按事件", "long_press"));
                 addOption("双击事件", "", null, true, () -> showGestureSettings("双击事件", "double_tap"));
                 addOption("沉浸式全屏", "", null, true, this::showSystemBarSettings);
-                addSwitch("隐藏顶部Tab开关", "按名称隐藏抖音主页顶部 Tab。",
+                addSwitch("隐藏顶部Tab开关", "",
                         repository.getBoolean("hide_top_tabs", false), true,
                         value -> repository.putBoolean("hide_top_tabs", value));
                 addOption("设置顶部Tab", "", repository.getString("hidden_top_tabs", ""),
                         true, this::showTopTabs);
-                addSwitch("首页刷新确认", "重复点击首页标签时先确认。",
+                addSwitch("首页刷新确认", "",
                         repository.getBoolean("confirm_refresh", false), true,
                         value -> repository.putBoolean("confirm_refresh", value));
                 break;
@@ -370,37 +370,37 @@ public final class ModuleSettingsScreen {
                 buildDownloadControls();
                 break;
             case AUTOPLAY:
-                addSwitch("自动滑动到下一个视频", "播放结束后跟随最近一次手动滑动方向。",
+                addSwitch("自动滑动到下一个视频", "",
                         repository.getBoolean("auto_play", false), true,
                         value -> repository.putBoolean("auto_play", value));
-                addLocalSwitch("自动倍速播放", "切换视频时应用设定倍速。", "auto_speed");
-                addEditableOption("倍速数值", "0.25 至 4", effectivePlaybackSpeed(
+                addLocalSwitch("自动倍速播放", "", "auto_speed");
+                addEditableOption("倍速数值", "", effectivePlaybackSpeed(
                                 repository.getString("playback_speed", "2")), true, true, false,
                         value -> repository.putString("playback_speed", validatePlaybackSpeed(value)));
-                addLocalSwitch("打开评论时,不滑动视频", "评论展开时暂停自动下一条。", "pause_auto_on_comments");
-                addSwitch("滑动智能判断上下", "开启时跟随最近一次手动滑动方向。",
+                addLocalSwitch("打开评论时,不滑动视频", "", "pause_auto_on_comments");
+                addSwitch("滑动智能判断上下", "",
                         repository.getBoolean("smart_swipe", true), true,
                         value -> repository.putBoolean("smart_swipe", value));
                 addOption("互动自动化", "", null, true, this::showAutomationSettings);
                 break;
             case COMMENT:
-                addLocalSwitch("评论自动添加后缀", "在本人提交的文字评论末尾添加。", "comment_append_suffix");
+                addLocalSwitch("评论自动添加后缀", "", "comment_append_suffix");
                 addEditableOption("后缀内容", "", repository.getString("comment_suffix", ""),
                         false, true, false, value -> repository.putString("comment_suffix", value));
-                addSwitch("替换语音文件", "使用所选文件替换本人录制的评论语音。",
+                addSwitch("替换语音文件", "",
                         repository.getBoolean("comment_voice_replace", false), true, value -> {
                             repository.putBoolean("comment_voice_replace", value);
                             if (value) showAudioPathEditor("评论语音文件", "comment_voice_path");
                         });
-                addLocalSwitch("评论自动文本转语音(文本前面输入\"#\"符号将自动转换)",
+                addLocalSwitch("评论自动文本转语音",
                         "", "comment_tts");
                 addCommentLongPressOption();
-                addLocalSwitch("彩色评论", "使用抖音原生文字附加参数；显示取决于客户端支持。", "colored_comment");
+                addLocalSwitch("彩色评论", "", "colored_comment");
                 addChoiceOption("彩色评论类型", "colored_comment_type", new String[]{"类型 0", "类型 33"},
                         new String[]{"0", "33"}, "0");
                 break;
             case STREAK:
-                addSwitch("自动续火花", "每 30 秒检查，只对所选单聊每日发送一次。",
+                addSwitch("自动续火花", "",
                         repository.getBoolean("streak_enabled", false), true, value -> {
                             repository.putBoolean("streak_enabled", value);
                             if (value) update(s -> withAutomation(s, true, null, null, null, null));
@@ -409,35 +409,35 @@ public final class ModuleSettingsScreen {
                         true, () -> showTargetSelection("选择用户", "streak_targets"));
                 addEditableOption("续火花内容", "", repository.getString("streak_content", ""),
                         false, true, false, value -> repository.putString("streak_content", value));
-                addLocalSwitch("续火花成功弹出Tip", "发送结果提醒。", "streak_tip");
-                addOption("重试结果未知的续火花", "重新发送可能造成重复消息。", null, true,
+                addLocalSwitch("续火花成功弹出Tip", "", "streak_tip");
+                addOption("重试结果未知的续火花", "", null, true,
                         this::confirmUnknownStreakRetry);
                 addOption("清空续火花记录", "", null, true, () -> {
                     repository.putString("streak_reset_token", Long.toString(System.currentTimeMillis()));
                     android.widget.Toast.makeText(context, "续火花记录已清空", android.widget.Toast.LENGTH_SHORT).show();
                 });
                 addOption("续火花限制时间", "", null, true, this::showStreakWindow);
-                addEditableOption("内容Api", "HTTPS，返回的文字优先于固定内容。",
+                addEditableOption("内容Api", "",
                         repository.getString("streak_content_api", ""), false, true, false,
                         value -> repository.putString("streak_content_api", value));
                 break;
             case MESSAGE:
-                addLocalSwitch("消息防撤回", "保留本地已有的消息内容。", "prevent_message_recall");
+                addLocalSwitch("消息防撤回", "", "prevent_message_recall");
                 addSwitch("自己撤回的消息", "", repository.getBoolean("recall_self", true), true,
                         value -> repository.putBoolean("recall_self", value));
                 addSwitch("对方撤回的消息", "", repository.getBoolean("recall_other", true), true,
                         value -> repository.putBoolean("recall_other", value));
                 addColorOption();
-                addSwitch("替换私聊语音", "替换本人录音完成后的语音文件。",
+                addSwitch("替换私聊语音", "",
                         repository.getBoolean("dm_voice_replace", false), true, value -> {
                             repository.putBoolean("dm_voice_replace", value);
                             if (value) showAudioPathEditor("私聊语音文件", "dm_voice_path");
                         });
-                addLocalSwitch("自动文本转语音(文本前面输入\"#\"符号将自动转换)",
-                        "点击原生发送按钮时生成语音，失败时保留草稿。", "dm_tts");
+                addLocalSwitch("自动文本转语音",
+                        "", "dm_tts");
                 break;
             case SPOOF:
-                addLocalSwitch("伪装总开关", "只影响本人主页的本地显示。", "spoof_profile");
+                addLocalSwitch("伪装总开关", "", "spoof_profile");
                 addProfileCount("获赞数量", "profile_like_count");
                 addProfileCount("关注数量", "profile_following_count");
                 addProfileCount("粉丝数量", "profile_follower_count");
@@ -455,7 +455,7 @@ public final class ModuleSettingsScreen {
     }
 
     private void buildDownloadControls() {
-        ToggleControl master = addSwitch("启用下载菜单", "控制全部扩展下载入口。",
+        ToggleControl master = addSwitch("启用下载菜单", "",
                 settings.downloadEnabled, true, false, value -> update(s -> copy(s, value, null)));
         LinearLayout selectedControls = new LinearLayout(context);
         selectedControls.setOrientation(LinearLayout.VERTICAL);
@@ -485,7 +485,7 @@ public final class ModuleSettingsScreen {
         directory[0] = addOption("保存位置", "", HostDownloadDirectoryPicker.displayName(
                 repository.getString(HostDownloadDirectoryPicker.SETTINGS_KEY, "")), true,
                 () -> showDownloadDirectory(directory[0]));
-        addOption("下载任务", "查看进度或取消下载", null, true, () -> {
+        addOption("下载任务", "", null, true, () -> {
             DownloadTasksDialog tasks = new DownloadTasksDialog(context, miuixHome != null);
             showOptionDialog(tasks.dialog(), tasks::close);
         });
@@ -520,31 +520,31 @@ public final class ModuleSettingsScreen {
     }
 
     private void buildOfficialDownloadControls(ToggleControl master) {
-        addSwitch("默认行为", "开启后手势直接保存视频或全部图片，不显示下载选择。",
+        addSwitch("默认行为", "",
                 repository.getBoolean(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, false), true, value -> {
                     if (value) master.setChecked(true);
                     repository.putBoolean(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, value);
                 });
-        addSwitch("是否启用抖音下载自定义命名", "按模板保存视频、图集和音频。",
+        addSwitch("是否启用抖音下载自定义命名", "",
                 repository.getBoolean("download_custom_name", false), true, value -> {
                     if (value) master.setChecked(true);
                     repository.putBoolean("download_custom_name", value);
                 });
-        addEditableOption("文件名模板", "#author#、#desc#、#aid#、#date#、#index#、#ext#",
+        addEditableOption("文件名模板", "",
                 repository.getString("download_name_template", "#author#_#aid#_#index#.#ext#"),
                 false, true, false, value -> repository.putString("download_name_template", value));
-        addSwitch("去除下载限制", "允许保存当前作品已有的可读取媒体来源。",
+        addSwitch("去除下载限制", "",
                 repository.getBoolean("remove_download_limits", false), true, value -> {
                     if (value) master.setChecked(true);
                     repository.putBoolean("remove_download_limits", value);
                 });
         addSwitch("无水印下载图集或者视频",
-                "通过抖音原生长按下载入口保存；仅对已识别的无水印资源生效。",
+                "",
                 settings.removeWatermark, true, value -> update(s -> copy(s, null, value)));
     }
 
     private void buildThirdPartyDownloadControls(ToggleControl master) {
-        addSwitch("默认行为", "开启后解析成功即保存所选下载字段，不显示下载选择。",
+        addSwitch("默认行为", "",
                 repository.getBoolean(ThirdPartyDownloadSettings.DIRECT, false), true, value -> {
                     if (value) master.setChecked(true);
                     repository.putBoolean(ThirdPartyDownloadSettings.DIRECT, value);
@@ -616,45 +616,45 @@ public final class ModuleSettingsScreen {
     }
 
     private void buildFeedFilters() {
-        addSwitch("过滤总开关", "按下列条件筛选推荐内容。", settings.feedFilterEnabled, true,
+        addSwitch("过滤总开关", "", settings.feedFilterEnabled, true,
                 false, value -> {
                     update(s -> withFeedEnabled(s, value));
                     setFeedFilterControlsEnabled(value);
                 });
-        addSwitch("中断开关", "整页筛空时保留原列表，跳过本次筛选。",
+        addSwitch("中断开关", "",
                 repository.getBoolean("filter_interrupt", true), settings.feedFilterEnabled, true,
                 value -> repository.putBoolean("filter_interrupt", value));
-        addSwitch("去广告开关", "隐藏标记为广告的推荐内容。", settings.hideAds, settings.feedFilterEnabled,
+        addSwitch("去广告开关", "", settings.hideAds, settings.feedFilterEnabled,
                 true, value -> update(s -> withFilter(s, value, Filter.AD)));
-        addSwitch("去直播开关", "隐藏直播推荐内容。", settings.hideLives, settings.feedFilterEnabled,
+        addSwitch("去直播开关", "", settings.hideLives, settings.feedFilterEnabled,
                 true, value -> update(s -> withFilter(s, value, Filter.LIVE)));
-        addSwitch("去推荐卡片开关", "隐藏推荐卡片。", settings.hideRecommendationCards,
+        addSwitch("去推荐卡片开关", "", settings.hideRecommendationCards,
                 settings.feedFilterEnabled, true, value -> update(s -> withFilter(s, value, Filter.CARD)));
-        addSwitch("去推荐商家开关", "隐藏推荐商家。", settings.hideRecommendationMerchants,
+        addSwitch("去推荐商家开关", "", settings.hideRecommendationMerchants,
                 settings.feedFilterEnabled, true,
                 value -> update(s -> withRecommendationMerchants(s, value)));
-        addSwitch("去小游戏开关", "过滤明确标记小游戏的内容。",
+        addSwitch("去小游戏开关", "",
                 repository.getBoolean("hide_mini_games", false), settings.feedFilterEnabled, true,
                 value -> repository.putBoolean("hide_mini_games", value));
-        addSwitch("去长视频开关", "过滤长视频作品及超过设定时长的视频。",
+        addSwitch("去长视频开关", "",
                 repository.getBoolean("hide_long_videos", false), settings.feedFilterEnabled, true,
                 value -> repository.putBoolean("hide_long_videos", value));
-        addEditableOption("长视频时间界定", "单位：秒，默认 120",
+        addEditableOption("长视频时间界定", "",
                 repository.getString("maximum_duration_seconds", "120"), true,
                 settings.feedFilterEnabled, true,
                 value -> repository.putString("maximum_duration_seconds", value));
-        addEditableOption("去低赞视频开关", "实际赞；0 表示关闭", settings.minimumLikesEnabled
+        addEditableOption("去低赞视频开关", "", settings.minimumLikesEnabled
                         ? Integer.toString(settings.minimumLikeCount) : "0",
                 true, settings.feedFilterEnabled, true,
                 value -> update(s -> withLikes(withFilter(s, parseNonNegative(value) > 0, Filter.LIKES),
                         parseNonNegative(value))));
-        addSwitch("去图集开关", "隐藏图文或图集作品。", settings.hideImagePosts,
+        addSwitch("去图集开关", "", settings.hideImagePosts,
                 settings.feedFilterEnabled, true,
                 value -> update(s -> withFilter(s, value, Filter.IMAGE)));
-        addEditableOption("过滤字符串", "文案、音乐标题、作者名等；多个词以逗号分隔，留空关闭",
+        addEditableOption("过滤字符串", "",
                 settings.keyword, false, settings.feedFilterEnabled, true,
                 value -> update(s -> withKeyword(withFilter(s, !value.trim().isEmpty(), Filter.KEYWORD), value)));
-        addSwitch("过滤短视频", "过滤低于设定时长的视频。", settings.minimumDurationEnabled,
+        addSwitch("过滤短视频", "", settings.minimumDurationEnabled,
                 settings.feedFilterEnabled, true,
                 value -> update(s -> withFilter(s, value, Filter.DURATION)));
         addEditableOption("最短时长（秒）", "", Integer.toString(settings.minimumDurationSeconds),
@@ -697,7 +697,7 @@ public final class ModuleSettingsScreen {
     }
 
     private void addProfileCount(String title, String key) {
-        addEditableOption(title, "留空使用原始数量", repository.getString(key, ""),
+        addEditableOption(title, "", repository.getString(key, ""),
                 true, true, false, value -> repository.putString(key, value));
     }
 
@@ -746,7 +746,7 @@ public final class ModuleSettingsScreen {
         boolean checked = repository.getBoolean(keys[0], false)
                 || repository.getBoolean(keys[1], false)
                 || repository.getBoolean(keys[2], false);
-        ToggleControl toggle = addSwitch("长按操作", "包含复制评论、保存评论图片和复制源数据。",
+        ToggleControl toggle = addSwitch("长按操作", "",
                 checked, true, false, value -> {
                     if (!syncing[0]) for (String key : keys) repository.putBoolean(key, value);
                 });
@@ -781,8 +781,8 @@ public final class ModuleSettingsScreen {
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(16), dp(8), dp(16), dp(8));
         content = panel;
-        addOption("添加模型配置", "选择供应商预设", null, true, this::showAiPresetPicker);
-        addOption("测试当前配置", "发送一条测试消息", null, true, this::showAiChat);
+        addOption("添加模型配置", "", null, true, this::showAiPresetPicker);
+        addOption("测试当前配置", "", null, true, this::showAiChat);
         addSectionLabel("已配置模型");
         AiModelSettings settings = aiSettings();
         java.util.Map<Button, String> activationButtons = new java.util.LinkedHashMap<>();
@@ -1186,7 +1186,7 @@ public final class ModuleSettingsScreen {
         LinearLayout previous = content;
         LinearLayout panel = form();
         content = panel;
-        addSwitch("版本信息修改", "修改抖音进程读到的版本信息。",
+        addSwitch("版本信息修改", "",
                 repository.getBoolean("spoof_version", false), true,
                 value -> repository.putBoolean("spoof_version", value));
         addEditableOption("版本名称", "", repository.getString("fake_version_name", ""),
@@ -1771,7 +1771,7 @@ public final class ModuleSettingsScreen {
         FILTER("视频筛选", 14),
         DOWNLOAD("下载相关", 14),
         AUTOPLAY("自动播放", 6),
-        AUTO_REPLY("自动回复", 10),
+        AUTO_REPLY("自动回复", 13),
         AUTO_COMMENT("自动评论", 8),
         COMMENT("评论相关", 7),
         STREAK("自动续火花", 7),

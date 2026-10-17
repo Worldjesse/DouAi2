@@ -178,4 +178,16 @@ public final class NativeMessagingHooksTest {
             assertFalse(records.contains("streak.100.2026-10-12.200.pending"));
         } finally { hook.close(); }
     }
+
+    @Test public void changingEitherSharedMediaOptionInvalidatesRepliesButExplicitImageDefaultDoesNot() throws Exception {
+        Method changed = NativeMessagingHooks.class.getDeclaredMethod("automationOptionsChanged", LocalOptions.class, LocalOptions.class);
+        changed.setAccessible(true);
+        LocalOptions defaults = new LocalOptions(Collections.emptyMap());
+        assertEquals(false, changed.invoke(null, defaults,
+                new LocalOptions(Collections.singletonMap(LocalOptions.REPLY_RECOGNIZE_IMAGES, true))));
+        assertEquals(true, changed.invoke(null, defaults,
+                new LocalOptions(Collections.singletonMap(LocalOptions.REPLY_RECOGNIZE_IMAGES, false))));
+        assertEquals(true, changed.invoke(null, defaults,
+                new LocalOptions(Collections.singletonMap(LocalOptions.REPLY_RECOGNIZE_VIDEO, true))));
+    }
 }

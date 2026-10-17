@@ -59,10 +59,16 @@ final class NativeCommentPublisher implements AutoCloseable {
 
     static NativeCommentPublisher install(XposedInterface framework, HostScanReport report,
                                          ClassLoader loader, Consumer<String> log) throws Exception {
+        return install(framework, report, loader, log, "DouAi.AutoComment");
+    }
+
+    static NativeCommentPublisher install(XposedInterface framework, HostScanReport report,
+                                         ClassLoader loader, Consumer<String> log, String namespace) throws Exception {
+        if (namespace == null || namespace.trim().isEmpty()) throw new IllegalArgumentException("Hook namespace is required");
         NativeCommentPublisher publisher = new NativeCommentPublisher(report, loader, log);
         try {
             Method upload = HostTargets.method(report, "auto_comment_audio_upload", loader);
-            XposedInterface.HookHandle uploadHandle = framework.hook(upload).setId("DouAi.AutoComment.AudioUpload")
+            XposedInterface.HookHandle uploadHandle = framework.hook(upload).setId(namespace + ".AudioUpload")
                     .setExceptionMode(XposedInterface.ExceptionMode.PASSTHROUGH).intercept(chain -> {
                         Pending pending = publisher.submitting.get();
                         Object callback = chain.getArg(2);
@@ -81,7 +87,7 @@ final class NativeCommentPublisher implements AutoCloseable {
             for (String rule : new String[]{"auto_comment_publish_success", "auto_comment_publish_failure"}) {
                 Method target = HostTargets.method(report, rule, loader);
                 boolean success = rule.endsWith("success");
-                XposedInterface.HookHandle handle = framework.hook(target).setId("DouAi.AutoComment." + rule)
+                XposedInterface.HookHandle handle = framework.hook(target).setId(namespace + "." + rule)
                         .setExceptionMode(XposedInterface.ExceptionMode.PASSTHROUGH).intercept(chain -> {
                             Object owner = chain.getThisObject();
                             Object response = chain.getArg(0);
@@ -91,7 +97,8 @@ final class NativeCommentPublisher implements AutoCloseable {
                             finally {
                                 publisher.main.post(() -> {
                                     Pending tracked = publisher.requests.get(owner);
-                                    String status = !success ? "failed" : tracked != null && validResponse(response, tracked.aid) ? "sent" : "submitted";
+                                    String status = !success ? "failed" : tracked == null ? "submitted"
+                                            : responseStatus(response, tracked.aid, tracked.rootId, tracked.incomingId);
                                     publisher.received(owner, status, callbackDiagnostic(response));
                                 });
                             }
@@ -115,6 +122,23 @@ final class NativeCommentPublisher implements AutoCloseable {
 
     void send(Object work, String aid, String text, SpeechPreparation.Audio audio, BooleanSupplier valid,
               BooleanSupplier beforeNativeSend, Runnable acceptedRequest, Consumer<String> result) {
+        send(work, aid, text, audio, null, valid, beforeNativeSend, acceptedRequest, result);
+    }
+
+    void sendReply(CommentReplyEvent event, String text, BooleanSupplier valid, BooleanSupplier beforeNativeSend,
+                   Runnable acceptedRequest, Consumer<String> result) {
+        sendReply(event, text, null, valid, beforeNativeSend, acceptedRequest, result);
+    }
+
+    void sendReply(CommentReplyEvent event, String text, SpeechPreparation.Audio audio,
+                   BooleanSupplier valid, BooleanSupplier beforeNativeSend,
+                   Runnable acceptedRequest, Consumer<String> result) {
+        if (event == null) { main.post(() -> result.accept("failed")); return; }
+        send(event.work, event.aid, text, audio, event, valid, beforeNativeSend, acceptedRequest, result);
+    }
+
+    private void send(Object work, String aid, String text, SpeechPreparation.Audio audio, CommentReplyEvent reply,
+                      BooleanSupplier valid, BooleanSupplier beforeNativeSend, Runnable acceptedRequest, Consumer<String> result) {
         main.post(() -> {
             if (closed || !valid.getAsBoolean()) { result.accept("cancelled"); return; }
             Object request = null;
@@ -125,6 +149,13 @@ final class NativeCommentPublisher implements AutoCloseable {
                 Object origin = state == null ? null : resolveAweme.invoke(null, state);
                 if (!aid.equals(HostTargets.invoke(origin, "getAid"))) throw new IllegalStateException("Origin work changed");
                 Object model = modelConstructor.newInstance();
+                Field replyTarget = reply == null ? null : HostTargets.field(model.getClass(), "p");
+                if (reply != null) {
+                    if ((audio == null && (text == null || text.trim().isEmpty())) || !validReplyTarget(reply, replyTarget)) {
+                        throw new IllegalStateException("Comment reply target unavailable or changed");
+                    }
+                    replyTarget.set(model, reply.targetComment);
+                }
                 String outputText = audio == null ? text : "";
                 modelText.set(model, outputText);
                 modelContext.set(model, state);
@@ -140,14 +171,18 @@ final class NativeCommentPublisher implements AutoCloseable {
                     attachment.set(model, media);
                     HostTargets.field(model.getClass(), "d").set(model, java.util.Collections.emptyList());
                 }
-                HostTargets.field(model.getClass(), "n").set(model, "douai_auto");
+                HostTargets.field(model.getClass(), "n").set(model, reply == null ? "douai_auto" : "douai_comment_reply");
                 ownedModels.put(model, outputText);
                 request = requestConstructor.newInstance();
-                pending = new Pending(aid, request, model, audio == null ? null : audio.file.getAbsolutePath(), result);
+                pending = new Pending(aid, request, model, audio == null ? null : audio.file.getAbsolutePath(),
+                        reply == null ? null : reply.rootId, reply == null ? null : reply.incomingId, result);
                 requests.put(request, pending);
                 if (!valid.getAsBoolean() || !beforeNativeSend.getAsBoolean()) {
                     received(request, "cancelled");
                     return;
+                }
+                if (reply != null && (replyTarget.get(model) != reply.targetComment || !validReplyTarget(reply, replyTarget))) {
+                    throw new IllegalStateException("Comment reply target changed before submission");
                 }
                 safeLog("Automatic comment native submission; media=" + (audio == null ? "text" : "audio")
                         + "; audioMillis=" + (audio == null ? 0 : audio.duration)
@@ -215,6 +250,33 @@ final class NativeCommentPublisher implements AutoCloseable {
                 && (origin == null || "".equals(origin) || aid.equals(origin));
     }
 
+    private static boolean validReplyTarget(CommentReplyEvent event, Field targetField) {
+        if (event.targetComment == null || !targetField.getType().isInstance(event.targetComment)
+                || event.incomingId == null || event.incomingId.isEmpty() || event.rootId == null || event.rootId.isEmpty()
+                || event.aid == null || event.aid.isEmpty()
+                || !event.incomingId.equals(HostTargets.read(event.targetComment, "cid"))
+                || !event.aid.equals(HostTargets.read(event.targetComment, "awemeId"))) return false;
+        Object parent = HostTargets.read(event.targetComment, "replyId");
+        String root = parent instanceof String && !((String) parent).isEmpty() && !"0".equals(parent)
+                ? (String) parent : event.incomingId;
+        return event.rootId.equals(root);
+    }
+
+    static boolean validReplyResponse(Object response, String aid, String rootId, String incomingId) {
+        if (!validResponse(response, aid) || rootId == null || rootId.isEmpty() || incomingId == null || incomingId.isEmpty()) return false;
+        Object comment = HostTargets.read(response, "comment");
+        return aid.equals(HostTargets.read(comment, "awemeId"))
+                && rootId.equals(HostTargets.read(comment, "replyId"))
+                && (rootId.equals(incomingId) || incomingId.equals(HostTargets.read(comment, "replyToReplyId")));
+    }
+
+    static String responseStatus(Object response, String aid, String rootId, String incomingId) {
+        Object status = HostTargets.read(response, "status_code");
+        if (status instanceof Number && ((Number) status).longValue() != 0) return "failed";
+        return (rootId == null ? validResponse(response, aid) : validReplyResponse(response, aid, rootId, incomingId))
+                ? "sent" : "submitted";
+    }
+
     private void safeLog(String message) { try { log.accept(message); } catch (RuntimeException ignored) { } }
 
     @Override public void close() {
@@ -232,12 +294,15 @@ final class NativeCommentPublisher implements AutoCloseable {
         final Object owner;
         final Object model;
         final String audioPath;
+        final String rootId;
+        final String incomingId;
         final Consumer<String> result;
         final AtomicBoolean timedOut = new AtomicBoolean();
         boolean uploadStarted;
         boolean callbackSeen;
-        Pending(String aid, Object owner, Object model, String audioPath, Consumer<String> result) {
+        Pending(String aid, Object owner, Object model, String audioPath, String rootId, String incomingId, Consumer<String> result) {
             this.aid = aid; this.owner = owner; this.model = model; this.audioPath = audioPath; this.result = result;
+            this.rootId = rootId; this.incomingId = incomingId;
         }
     }
 }

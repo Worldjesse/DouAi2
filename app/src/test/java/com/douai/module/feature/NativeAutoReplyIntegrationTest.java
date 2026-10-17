@@ -6,6 +6,8 @@ import android.view.View;
 
 import com.bytedance.im.core.client.callback.IRequestListener;
 import com.douai.module.config.AutomationHistoryStore;
+import com.douai.module.config.AiModelConfig;
+import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
@@ -231,6 +233,227 @@ public final class NativeAutoReplyIntegrationTest {
         }
     }
 
+    @Test public void disablingImageRecognitionRejectsImageOnlyMessagesBeforeDownloadingOrCallingAi() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies("reply_mode", "ai", LocalOptions.REPLY_RECOGNIZE_IMAGES, "false")) {
+            java.util.concurrent.atomic.AtomicInteger downloads = new java.util.concurrent.atomic.AtomicInteger();
+            fixture.hook.mediaReads = () -> new MediaReadCancellation(60_000, System::nanoTime, uri -> {
+                downloads.incrementAndGet();
+                throw new AssertionError("Disabled image recognition must never download the image");
+            });
+            assertNull(fixture.enqueue(200, "thread", true));
+            fixture.flush();
+            assertEquals(0, downloads.get());
+            assertEquals(0, fixture.database.imSdkContext.sends);
+            assertTrue(fixture.history().isEmpty());
+        }
+    }
+
+    @Test public void imageCaptionWithRecognitionDisabledUsesTextOnlyAiAndRecordsItsActualRequest() throws Throwable {
+        try (okhttp3.mockwebserver.MockWebServer server = new okhttp3.mockwebserver.MockWebServer();
+             LimitedReplies fixture = new LimitedReplies("reply_mode", "ai", LocalOptions.REPLY_RECOGNIZE_IMAGES, "false")) {
+            server.enqueue(new okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "application/json")
+                    .setBody("{\"choices\":[{\"message\":{\"content\":\"只回复真实文字\"}}]}"));
+            configureAi(fixture, server);
+            java.util.concurrent.atomic.AtomicInteger downloads = new java.util.concurrent.atomic.AtomicInteger();
+            fixture.hook.mediaReads = () -> new MediaReadCancellation(60_000, System::nanoTime, uri -> {
+                downloads.incrementAndGet();
+                throw new AssertionError("Disabled images must not be fetched for a caption");
+            });
+            Runnable reply = fixture.enqueueContent(200, "thread", 27,
+                    "{\"text\":\"只读取这段说明\",\"resource_url\":{\"url_list\":[\"https://p.byteimg.com/image.png\"]}}");
+            assertNotNull(reply);
+            reply.run();
+            fixture.flush();
+            assertEquals(0, downloads.get());
+            assertEquals(1, fixture.database.imSdkContext.sends);
+            okhttp3.mockwebserver.RecordedRequest request = server.takeRequest(2, TimeUnit.SECONDS);
+            assertNotNull(request);
+            org.json.JSONArray messages = new org.json.JSONObject(request.getBody().readUtf8()).getJSONArray("messages");
+            String content = messages.getJSONObject(messages.length() - 1).getString("content");
+            assertTrue(content.contains("只读取这段说明"));
+            assertFalse(content.contains("请根据对方发来的图片"));
+            AutomationHistoryStore.Entry history = fixture.history().get(0);
+            assertTrue(history.modelRequestSent);
+            assertEquals(0, history.requestImageCount);
+            assertEquals("sent", history.status);
+        }
+    }
+
+    @Test public void encryptedIncomingVideoDoesNotCreateReplyWorkOrConsumeAllowance() throws Throwable {
+        for (String[] flags : new String[][]{{"true", "false"}, {"false", "false"}, {"true", "true"}}) {
+            try (LimitedReplies fixture = new LimitedReplies("reply_mode", "ai", "reply_daily_limit", "1",
+                    LocalOptions.REPLY_RECOGNIZE_IMAGES, flags[0], LocalOptions.REPLY_RECOGNIZE_VIDEO, flags[1])) {
+                java.util.concurrent.atomic.AtomicInteger downloads = new java.util.concurrent.atomic.AtomicInteger();
+                fixture.hook.mediaReads = () -> new MediaReadCancellation(60_000, System::nanoTime, uri -> {
+                    downloads.incrementAndGet();
+                    throw new AssertionError("Encrypted story video has no verified playable source");
+                });
+                assertNull(fixture.enqueueContent(200, "thread", 30,
+                        "{\"video\":{\"vid\":\"opaque\",\"tkey\":\"token\",\"skey\":\"secret\",\"is_new_encrypt\":true}}"));
+                fixture.flush();
+                assertEquals(0, downloads.get());
+                assertEquals(0, fixture.database.imSdkContext.sends);
+                assertTrue(new AutomationRateLimiter(fixture.activity)
+                        .canSend(AutomationHistoryStore.REPLY, 100, "200", new LocalOptions(fixture.values)));
+            }
+        }
+    }
+
+    @Test public void enabledIncomingImageIsSentToAiAndRememberedOnlyAfterNativeAcknowledgment() throws Throwable {
+        try (okhttp3.mockwebserver.MockWebServer server = new okhttp3.mockwebserver.MockWebServer();
+             LimitedReplies fixture = new LimitedReplies("reply_mode", "ai")) {
+            server.enqueue(new okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "application/json")
+                    .setBody("{\"choices\":[{\"message\":{\"content\":\"图片回复\"}}]}"));
+            server.enqueue(new okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "application/json")
+                    .setBody("{\"choices\":[{\"message\":{\"content\":\"后续回复\"}}]}"));
+            configureAi(fixture, server);
+            java.util.concurrent.atomic.AtomicInteger downloads = new java.util.concurrent.atomic.AtomicInteger();
+            fixture.hook.mediaReads = () -> new MediaReadCancellation(60_000, System::nanoTime, uri -> {
+                downloads.incrementAndGet();
+                return new ImageMediaConnection();
+            });
+            Runnable imageReply = fixture.enqueue(200, "thread", true);
+            assertNotNull(imageReply);
+            imageReply.run();
+            fixture.flush();
+            assertEquals(1, fixture.database.imSdkContext.sends);
+            assertEquals(1, downloads.get());
+            AutomationHistoryStore.Entry imageHistory = fixture.history().get(0);
+            assertTrue(imageHistory.modelRequestSent);
+            assertEquals(1, imageHistory.requestImageCount);
+            assertEquals("sent", imageHistory.status);
+            okhttp3.mockwebserver.RecordedRequest first = server.takeRequest(2, TimeUnit.SECONDS);
+            assertNotNull(first);
+            org.json.JSONArray firstMessages = new org.json.JSONObject(first.getBody().readUtf8()).getJSONArray("messages");
+            assertEquals(1, inlineImageUrls(firstMessages).size());
+            assertTrue(inlineImageUrls(firstMessages).get(0).startsWith("data:image/jpeg;base64,"));
+
+            fixture.receive(200, "thread");
+            fixture.flush();
+            assertEquals(2, fixture.database.imSdkContext.sends);
+            assertEquals(1, downloads.get());
+            okhttp3.mockwebserver.RecordedRequest second = server.takeRequest(2, TimeUnit.SECONDS);
+            assertNotNull(second);
+            org.json.JSONArray remembered = new org.json.JSONObject(second.getBody().readUtf8()).getJSONArray("messages");
+            assertEquals(3, remembered.length());
+            assertEquals(1, inlineImageUrls(remembered).size());
+            assertTrue(inlineImageUrls(remembered).get(0).startsWith("data:image/jpeg;base64,"));
+            assertEquals("图片回复", remembered.getJSONObject(1).getString("content"));
+            assertTrue(remembered.getJSONObject(2).getString("content").contains("incoming"));
+            AutomationHistoryStore.Entry textHistory = fixture.history().stream()
+                    .filter(entry -> "后续回复".equals(entry.output)).findFirst().orElseThrow();
+            assertTrue(textHistory.modelRequestSent);
+            assertEquals(0, textHistory.requestImageCount);
+        }
+    }
+
+    @Test public void disablingRecognitionClearsPreviouslyAcknowledgedImagesFromTheNextTextRequest() throws Throwable {
+        try (okhttp3.mockwebserver.MockWebServer server = new okhttp3.mockwebserver.MockWebServer();
+             LimitedReplies fixture = new LimitedReplies("reply_mode", "ai")) {
+            server.enqueue(aiResponse("已经回复图片"));
+            server.enqueue(aiResponse("现在仅回复文字"));
+            configureAi(fixture, server);
+            fixture.hook.mediaReads = () -> new MediaReadCancellation(60_000, System::nanoTime, uri -> new ImageMediaConnection());
+            Runnable first = fixture.enqueue(200, "thread", true);
+            assertNotNull(first);
+            first.run();
+            fixture.flush();
+            assertEquals(1, fixture.database.imSdkContext.sends);
+            assertEquals("sent", fixture.history().get(0).status);
+            okhttp3.mockwebserver.RecordedRequest imageRequest = server.takeRequest(2, TimeUnit.SECONDS);
+            assertNotNull(imageRequest);
+            assertEquals(1, inlineImageUrls(new org.json.JSONObject(imageRequest.getBody().readUtf8()).getJSONArray("messages")).size());
+
+            fixture.values.put(LocalOptions.REPLY_RECOGNIZE_IMAGES, false);
+            fixture.values.put(LocalOptions.REPLY_RECOGNIZE_VIDEO, false);
+            fixture.applyOptions();
+            fixture.receive(200, "thread");
+            fixture.flush();
+            assertEquals(2, fixture.database.imSdkContext.sends);
+            okhttp3.mockwebserver.RecordedRequest textRequest = server.takeRequest(2, TimeUnit.SECONDS);
+            assertNotNull(textRequest);
+            org.json.JSONArray messages = new org.json.JSONObject(textRequest.getBody().readUtf8()).getJSONArray("messages");
+            assertTrue("Disabling recognition must also remove images from prior turns", inlineImageUrls(messages).isEmpty());
+            assertEquals(1, messages.length());
+            assertTrue(messages.getJSONObject(0).getString("content").contains("incoming"));
+        }
+    }
+
+    @Test public void anOldSendsLateAcknowledgmentCannotRestoreImagesAfterRecognitionIsDisabled() throws Throwable {
+        try (okhttp3.mockwebserver.MockWebServer server = new okhttp3.mockwebserver.MockWebServer();
+             LimitedReplies fixture = new LimitedReplies("reply_mode", "ai")) {
+            server.enqueue(aiResponse("等待旧图片确认"));
+            server.enqueue(aiResponse("新的纯文字回复"));
+            configureAi(fixture, server);
+            fixture.hook.mediaReads = () -> new MediaReadCancellation(60_000, System::nanoTime, uri -> new ImageMediaConnection());
+            fixture.database.imSdkContext.suppressCallbacks = true;
+            Runnable first = fixture.enqueue(200, "thread", true);
+            assertNotNull(first);
+            first.run();
+            fixture.flush();
+            assertEquals(1, fixture.database.imSdkContext.sends);
+            assertEquals("sending", fixture.history().get(0).status);
+            assertEquals(1, fixture.database.imSdkContext.pendingCallbacks.size());
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+
+            fixture.values.put(LocalOptions.REPLY_RECOGNIZE_IMAGES, false);
+            fixture.values.put(LocalOptions.REPLY_RECOGNIZE_VIDEO, false);
+            fixture.applyOptions();
+            fixture.database.imSdkContext.suppressCallbacks = false;
+            fixture.database.imSdkContext.pendingCallbacks.remove(0).run();
+            fixture.flush();
+            assertEquals("sent", fixture.history().get(0).status);
+            fixture.receive(200, "thread");
+            fixture.flush();
+            okhttp3.mockwebserver.RecordedRequest afterLateAck = server.takeRequest(2, TimeUnit.SECONDS);
+            assertNotNull(afterLateAck);
+            org.json.JSONArray messages = new org.json.JSONObject(afterLateAck.getBody().readUtf8()).getJSONArray("messages");
+            assertEquals(1, messages.length());
+            assertTrue("A superseded send must not restore its old image turn", inlineImageUrls(messages).isEmpty());
+            assertEquals(2, fixture.database.imSdkContext.sends);
+        }
+    }
+
+    @Test public void modelHttpFailureRetainsTheActualSentImageCountInReplyHistory() throws Throwable {
+        try (okhttp3.mockwebserver.MockWebServer server = new okhttp3.mockwebserver.MockWebServer();
+             LimitedReplies fixture = new LimitedReplies("reply_mode", "ai")) {
+            server.enqueue(new okhttp3.mockwebserver.MockResponse().setResponseCode(500)
+                    .setHeader("Content-Type", "application/json").setBody("{\"error\":\"fixture failure\"}"));
+            configureAi(fixture, server);
+            fixture.hook.mediaReads = () -> new MediaReadCancellation(60_000, System::nanoTime, uri -> new ImageMediaConnection());
+            Runnable imageReply = fixture.enqueue(200, "thread", true);
+            assertNotNull(imageReply);
+            imageReply.run();
+            fixture.flush();
+            assertEquals(0, fixture.database.imSdkContext.sends);
+            assertEquals(1, server.getRequestCount());
+            AutomationHistoryStore.Entry history = fixture.history().get(0);
+            assertEquals("failed", history.status);
+            assertTrue(history.modelRequestSent);
+            assertEquals(1, history.requestImageCount);
+        }
+    }
+
+    @Test public void changingEitherMediaOptionActivelyDisconnectsAnUnsubmittedImageRead() throws Throwable {
+        for (String key : new String[]{LocalOptions.REPLY_RECOGNIZE_IMAGES, LocalOptions.REPLY_RECOGNIZE_VIDEO}) {
+            BlockingMediaConnection connection = new BlockingMediaConnection(true);
+            try (LimitedReplies fixture = new LimitedReplies("reply_mode", "ai")) {
+                try {
+                    fixture.startBlockedImage(connection);
+                    fixture.values.put(key, LocalOptions.REPLY_RECOGNIZE_VIDEO.equals(key));
+                    fixture.applyOptions();
+                    awaitDisconnected(connection);
+                    fixture.awaitWorker(); fixture.flush();
+                    assertEquals(0, fixture.database.imSdkContext.sends);
+                    fixture.values.put("reply_mode", "fixed");
+                    fixture.applyOptions();
+                    fixture.receive(201, "other"); fixture.flush();
+                    assertEquals(1, fixture.database.imSdkContext.sends);
+                } finally { connection.disconnect(); }
+            }
+        }
+    }
+
     @Test public void accountSwitchWithoutAnotherIncomingMessageDisconnectsBlockedReply() throws Throwable {
         BlockingMediaConnection connection = new BlockingMediaConnection(true);
         try (LimitedReplies fixture = new LimitedReplies("reply_mode", "ai")) {
@@ -418,7 +641,7 @@ public final class NativeAutoReplyIntegrationTest {
             }
             assertNotNull(reply); scheduled.getQueue().remove(reply); reply.run();
             ShadowLooper.idleMainLooper();
-            View notice = activity.getWindow().getDecorView().findViewWithTag("automation.notice.100:thread:7001");
+            View notice = replyNotice(activity, "100:thread:7001");
             assertNotNull(notice);
             assertEquals(0, database.imSdkContext.sends);
             if (disablePrivate) {
@@ -454,6 +677,7 @@ public final class NativeAutoReplyIntegrationTest {
         volatile long account = 100;
         final java.util.concurrent.CountDownLatch enumerated = new java.util.concurrent.CountDownLatch(1);
         boolean failNext; boolean suppressCallbacks;
+        final List<Runnable> pendingCallbacks = new ArrayList<>();
         Runnable beforeSender = () -> { };
         public long uid() { return account; }
         public Bean bean() { return new Bean(); }
@@ -505,7 +729,7 @@ public final class NativeAutoReplyIntegrationTest {
         }
         public void send(Message message, Map<String, String> extras) {
             sdk.sends++; sdk.last = message;
-            if (sdk.suppressCallbacks) return;
+            if (sdk.suppressCallbacks) { sdk.pendingCallbacks.add(() -> listener.onSuccess(message)); return; }
             if (sdk.failNext) {
                 sdk.failNext = false;
                 listener.onFailure(new IllegalStateException("Rejected by native SDK"));
@@ -532,7 +756,9 @@ public final class NativeAutoReplyIntegrationTest {
             values.put("reply_save_history", true);
             values.put("auto_message_text", "reply");
             for (int i = 0; i < limits.length; i += 2) values.put(limits[i],
-                    "reply_voice".equals(limits[i]) ? Boolean.parseBoolean(limits[i + 1]) : limits[i + 1]);
+                    "reply_voice".equals(limits[i]) || LocalOptions.REPLY_RECOGNIZE_IMAGES.equals(limits[i])
+                            || LocalOptions.REPLY_RECOGNIZE_VIDEO.equals(limits[i])
+                            ? Boolean.parseBoolean(limits[i + 1]) : limits[i + 1]);
             LocalOptions options = new LocalOptions(values);
             dispatcher.setOptions(options);
             List<String> diagnostics = new ArrayList<>();
@@ -551,16 +777,20 @@ public final class NativeAutoReplyIntegrationTest {
         }
 
         Runnable enqueue(long sender, String conversation, boolean image) throws Throwable {
+            return enqueueContent(sender, conversation, image ? 27 : 7, image
+                    ? "{\"resource_url\":{\"url_list\":[\"https://p.byteimg.com/image.png\"]}}"
+                    : "{\"text\":\"incoming\"}");
+        }
+
+        Runnable enqueueContent(long sender, String conversation, int type, String content) throws Throwable {
             ContentValues incoming = new ContentValues();
             incoming.put("conversation_id", conversation);
             incoming.put("conversation_type", "group".equals(conversation) ? 2 : 1);
             incoming.put("sender", sender);
             incoming.put("msg_server_id", Integer.toString(++serverId));
             incoming.put("created_time", System.currentTimeMillis());
-            incoming.put("type", image ? 27 : 7);
-            incoming.put("content", image
-                    ? "{\"resource_url\":{\"url_list\":[\"https://p.byteimg.com/image.png\"]}}"
-                    : "{\"text\":\"incoming\"}");
+            incoming.put("type", type);
+            incoming.put("content", content);
             framework.invoke(Database.class.getMethod("insert", String.class, String.class, ContentValues.class),
                     database, "msg", null, incoming);
             Runnable reply = scheduled.getQueue().peek();
@@ -599,6 +829,61 @@ public final class NativeAutoReplyIntegrationTest {
             hook.close(); dispatcher.close(); ShadowLooper.idleMainLooper(); worker.runAll(); activity.finish();
             FollowListSnapshot.reset();
         }
+    }
+
+    private static void configureAi(LimitedReplies fixture, okhttp3.mockwebserver.MockWebServer server) throws Exception {
+        org.json.JSONObject config = new org.json.JSONObject().put("id", "im-media").put("name", "IM media fixture")
+                .put("protocol", AiModelConfig.CHAT).put("apiEndpoint", server.url("/v1").toString())
+                .put("modelName", "media-model").put("allowInsecureHttp", true).put("contextRounds", 1);
+        fixture.values.put(AiModelSettings.KEY, new AiModelSettings(
+                Collections.singletonList(AiModelConfig.fromJson(config)), "im-media").serialize());
+        fixture.applyOptions();
+    }
+
+    private static okhttp3.mockwebserver.MockResponse aiResponse(String text) throws Exception {
+        return new okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "application/json")
+                .setBody(new org.json.JSONObject().put("choices", new org.json.JSONArray().put(
+                        new org.json.JSONObject().put("message", new org.json.JSONObject().put("content", text)))).toString());
+    }
+
+    private static List<String> inlineImageUrls(org.json.JSONArray messages) throws Exception {
+        List<String> urls = new ArrayList<>();
+        for (int i = 0; i < messages.length(); i++) {
+            org.json.JSONArray parts = messages.getJSONObject(i).optJSONArray("content");
+            if (parts == null) continue;
+            for (int j = 0; j < parts.length(); j++) {
+                org.json.JSONObject part = parts.optJSONObject(j);
+                if (part != null && "image_url".equals(part.optString("type"))) {
+                    urls.add(part.getJSONObject("image_url").getString("url"));
+                }
+            }
+        }
+        return urls;
+    }
+
+    private static View replyNotice(Activity activity, String identity) {
+        View decor = activity.getWindow().getDecorView();
+        View notice = decor.findViewWithTag("automation.notice." + identity);
+        return notice == null ? decor.findViewWithTag("automation.reply.ring") : notice;
+    }
+
+    private static final class ImageMediaConnection extends java.net.HttpURLConnection {
+        private final byte[] png;
+        ImageMediaConnection() throws Exception {
+            super(new java.net.URL("https://p.byteimg.com/image.png"));
+            android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(2, 2, android.graphics.Bitmap.Config.ARGB_8888);
+            try {
+                java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
+                assertTrue(bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output));
+                png = output.toByteArray();
+            } finally { bitmap.recycle(); }
+        }
+        @Override public int getResponseCode() { return 200; }
+        @Override public long getContentLengthLong() { return png.length; }
+        @Override public java.io.InputStream getInputStream() { return new java.io.ByteArrayInputStream(png); }
+        @Override public void disconnect() { }
+        @Override public boolean usingProxy() { return false; }
+        @Override public void connect() { }
     }
 
     private static HostScanReport report() throws Exception {

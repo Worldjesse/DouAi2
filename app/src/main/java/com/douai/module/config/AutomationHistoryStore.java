@@ -17,6 +17,7 @@ import java.util.List;
 public final class AutomationHistoryStore {
     public static final String REPLY = "reply";
     public static final String COMMENT = "comment";
+    public static final String COMMENT_REPLY = "comment_reply";
     public static final String DELIVERY_UNKNOWN = "unknown";
     public static final String DELIVERY_TEXT = "text";
     public static final String DELIVERY_VOICE = "voice";
@@ -36,9 +37,10 @@ public final class AutomationHistoryStore {
         requireKind(kind);
         synchronized (LOCK) {
             List<Entry> selected = new ArrayList<>();
-            for (Entry entry : readAll()) if (kind.equals(entry.kind)) selected.add(entry);
+            for (Entry entry : readAll()) if (matchesKind(kind, entry.kind)) selected.add(entry);
             selected.sort(Comparator.comparingLong((Entry entry) -> entry.createdAt).reversed()
-                    .thenComparing(entry -> entry.id));
+                    .thenComparing(entry -> entry.id).thenComparing(entry -> entry.kind));
+            if (selected.size() > MAX_PER_KIND) selected.subList(MAX_PER_KIND, selected.size()).clear();
             return Collections.unmodifiableList(selected);
         }
     }
@@ -47,9 +49,12 @@ public final class AutomationHistoryStore {
         requireKind(kind);
         synchronized (LOCK) {
             List<Entry> entries = readAll();
-            entries.removeIf(entry -> kind.equals(entry.kind));
+            entries.removeIf(entry -> matchesKind(kind, entry.kind));
             persist(entries);
-            preferences.edit().putLong("cleared_at_" + kind, System.currentTimeMillis()).apply();
+            long now = System.currentTimeMillis();
+            SharedPreferences.Editor editor = preferences.edit().putLong("cleared_at_" + kind, now);
+            if (REPLY.equals(kind)) editor.putLong("cleared_at_" + COMMENT_REPLY, now);
+            editor.apply();
         }
     }
 
@@ -100,11 +105,15 @@ public final class AutomationHistoryStore {
 
     private static void trimKind(List<Entry> entries, String kind) {
         int count = 0;
-        for (Entry entry : entries) if (kind.equals(entry.kind)) count++;
+        for (Entry entry : entries) if (matchesKind(kind, entry.kind)) count++;
         for (int i = 0; count > MAX_PER_KIND && i < entries.size();) {
-            if (kind.equals(entries.get(i).kind)) { entries.remove(i); count--; }
+            if (matchesKind(kind, entries.get(i).kind)) { entries.remove(i); count--; }
             else i++;
         }
+    }
+
+    private static boolean matchesKind(String requested, String stored) {
+        return requested.equals(stored) || REPLY.equals(requested) && COMMENT_REPLY.equals(stored);
     }
 
     private List<Entry> readAll() {
@@ -115,7 +124,7 @@ public final class AutomationHistoryStore {
         List<Entry> entries = new ArrayList<>();
         try {
             JSONArray array = new JSONArray(source);
-            for (int i = Math.max(0, array.length() - 2 * MAX_PER_KIND); i < array.length(); i++) {
+            for (int i = Math.max(0, array.length() - 3 * MAX_PER_KIND); i < array.length(); i++) {
                 JSONObject json = array.optJSONObject(i);
                 if (json == null) continue;
                 try {
@@ -158,7 +167,9 @@ public final class AutomationHistoryStore {
     }
 
     private static void requireKind(String kind) {
-        if (!REPLY.equals(kind) && !COMMENT.equals(kind)) throw new IllegalArgumentException("Unknown automation kind");
+        if (!REPLY.equals(kind) && !COMMENT.equals(kind) && !COMMENT_REPLY.equals(kind)) {
+            throw new IllegalArgumentException("Unknown automation kind");
+        }
     }
 
     private static String bounded(String text, int limit) {
@@ -211,7 +222,8 @@ public final class AutomationHistoryStore {
             requireKind(kind);
             if (id == null || id.isEmpty()) throw new IllegalArgumentException("Entry ID is required");
             if (!"pending".equals(status) && !"cancelled".equals(status) && !"sent".equals(status)
-                    && !"submitted".equals(status) && !"failed".equals(status) && !"sending".equals(status)) {
+                    && !"submitted".equals(status) && !"failed".equals(status) && !"sending".equals(status)
+                    && !"unknown".equals(status)) {
                 throw new IllegalArgumentException("Unknown automation status");
             }
             this.id = bounded(id, 512);

@@ -54,6 +54,72 @@ public final class AutomationHistoryStoreTest {
         assertEquals(1, store.read("comment").size());
     }
 
+    @Test public void replyHistoryCombinesMessagesAndCommentRepliesUnderOneRetentionAndClearControl() {
+        for (int index = 0; index < 205; index++) {
+            store.upsert(entry("message-" + index, AutomationHistoryStore.REPLY, "sent", index * 2L, "私信", "回复"));
+            store.upsert(entry("comment-reply-" + index, AutomationHistoryStore.COMMENT_REPLY,
+                    "sent", index * 2L + 1, "评论", "回复"));
+        }
+        store.upsert(entry("feed-comment", AutomationHistoryStore.COMMENT, "sent", 1000, "作品", "评论"));
+        AutomationHistoryStore restored = new AutomationHistoryStore(context);
+        assertEquals(200, restored.read(AutomationHistoryStore.REPLY).size());
+        assertEquals("comment-reply-204", restored.read(AutomationHistoryStore.REPLY).get(0).id);
+        assertEquals(AutomationHistoryStore.COMMENT_REPLY, restored.read(AutomationHistoryStore.REPLY).get(0).kind);
+        assertEquals("message-204", restored.read(AutomationHistoryStore.REPLY).get(1).id);
+        assertEquals(100, restored.read(AutomationHistoryStore.COMMENT_REPLY).size());
+        restored.clear(AutomationHistoryStore.REPLY);
+        assertTrue(restored.read(AutomationHistoryStore.REPLY).isEmpty());
+        assertTrue(restored.read(AutomationHistoryStore.COMMENT_REPLY).isEmpty());
+        assertEquals(1, restored.read(AutomationHistoryStore.COMMENT).size());
+    }
+
+    @Test public void internalCommentReplyClearKeepsMessageAndFeedCommentHistory() {
+        store.upsert(entry("same-id", AutomationHistoryStore.REPLY, "sent", 10, "私信", "回复"));
+        store.upsert(entry("same-id", AutomationHistoryStore.COMMENT_REPLY, "sent", 20, "评论", "回复"));
+        store.upsert(entry("same-id", AutomationHistoryStore.COMMENT, "sent", 30, "作品", "评论"));
+        AutomationHistoryStore restored = new AutomationHistoryStore(context);
+        restored.clear(AutomationHistoryStore.COMMENT_REPLY);
+        assertTrue(restored.read(AutomationHistoryStore.COMMENT_REPLY).isEmpty());
+        assertEquals(1, restored.read(AutomationHistoryStore.REPLY).size());
+        assertEquals(AutomationHistoryStore.REPLY, restored.read(AutomationHistoryStore.REPLY).get(0).kind);
+        assertEquals(1, restored.read(AutomationHistoryStore.COMMENT).size());
+    }
+
+    @Test public void clearingParentReplyHistoryPreventsLateMessageAndCommentReplyCallbacksRestoringIt() {
+        long created = System.currentTimeMillis() - 100;
+        for (String kind : new String[]{AutomationHistoryStore.REPLY, AutomationHistoryStore.COMMENT_REPLY}) {
+            store.upsert(entry("old", kind, "pending", created, "输入", ""));
+        }
+        store.upsert(entry("feed-comment", AutomationHistoryStore.COMMENT, "sent", created, "作品", "评论"));
+        store.clear(AutomationHistoryStore.REPLY);
+        AutomationHistoryStore restored = new AutomationHistoryStore(context);
+        for (String kind : new String[]{AutomationHistoryStore.REPLY, AutomationHistoryStore.COMMENT_REPLY}) {
+            restored.markModelRequestSent(kind, "old", 0);
+            restored.upsert(entry("old", kind, "sent", created, "输入", "迟到回复"));
+        }
+        assertTrue(restored.read(AutomationHistoryStore.REPLY).isEmpty());
+        assertTrue(restored.read(AutomationHistoryStore.COMMENT_REPLY).isEmpty());
+        assertEquals(1, restored.read(AutomationHistoryStore.COMMENT).size());
+    }
+
+    @Test public void unknownCommentReplyStatusAndRequestMetadataSurviveRecreation() {
+        store.upsert(new AutomationHistoryStore.Entry("incoming", AutomationHistoryStore.COMMENT_REPLY,
+                "root", "评论者", "评论", "回复", "model", "pending", 10, 20,
+                AutomationHistoryStore.DELIVERY_TEXT));
+        store.markModelRequestSent(AutomationHistoryStore.COMMENT_REPLY, "incoming", 0);
+        store.upsert(new AutomationHistoryStore.Entry("incoming", AutomationHistoryStore.COMMENT_REPLY,
+                "root", "评论者", "评论", "回复", "model", "unknown", 10, 30,
+                AutomationHistoryStore.DELIVERY_TEXT));
+        AutomationHistoryStore.Entry loaded = new AutomationHistoryStore(context)
+                .read(AutomationHistoryStore.COMMENT_REPLY).get(0);
+        assertEquals("unknown", loaded.status);
+        assertTrue(loaded.modelRequestSent);
+        assertEquals(0, loaded.requestImageCount);
+        assertEquals(AutomationHistoryStore.DELIVERY_TEXT, loaded.deliveryMode);
+        assertEquals(1, store.read(AutomationHistoryStore.REPLY).size());
+        assertEquals(AutomationHistoryStore.COMMENT_REPLY, store.read(AutomationHistoryStore.REPLY).get(0).kind);
+    }
+
     @Test public void fieldAndUtf8StorageBoundsPruneTheOldestRecords() {
         String large = "汉".repeat(10000);
         for (int i = 0; i < 70; i++) store.upsert(entry("large" + i, "reply", "sent", i, large, large));

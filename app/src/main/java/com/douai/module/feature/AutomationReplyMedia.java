@@ -1,0 +1,119 @@
+package com.douai.module.feature;
+
+import android.content.Context;
+
+import com.douai.module.config.LocalOptions;
+import org.json.JSONObject;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+
+/** Visual input for automatic replies, using the parent reply switches and captured sources. */
+public final class AutomationReplyMedia {
+    public static final String RECOGNIZE_IMAGES = "reply_recognize_images";
+    public static final String RECOGNIZE_VIDEO = "reply_recognize_video";
+
+    private AutomationReplyMedia() { }
+
+    static List<ChatImage> comment(Context context, CommentReplyEvent event, LocalOptions options,
+                                   MediaReadCancellation cancellation) throws Exception {
+        cancellation.start();
+        cancellation.check();
+        boolean images = options.enabled(RECOGNIZE_IMAGES, true);
+        boolean video = options.enabled(RECOGNIZE_VIDEO, false);
+        if (!images && !video) return Collections.emptyList();
+        if (event == null) throw new IllegalArgumentException("评论回复素材目标为空");
+        // The incoming comment's images are a separate subject. Do not mix in the work or own original comment.
+        if (images && hasCommentImages(event.targetComment)) {
+            List<String> sources = commentImageUrls(event.targetComment);
+            if (sources.isEmpty()) throw new IllegalArgumentException("对方评论附图没有可读取的地址");
+            return Collections.unmodifiableList(new ArrayList<>(AutomationImages.load(sources, cancellation)));
+        }
+        List<String> sources = images ? AutomationCommentMedia.imageUrls(event.work) : Collections.emptyList();
+        String source = video ? AutomationCommentMedia.videoUrl(event.work) : null;
+        return loadIncoming(context, sources, source, options, cancellation);
+    }
+
+    /** The label describes exactly the sources selected by comment(), not an assumed image subject. */
+    static String commentSourceLabel(CommentReplyEvent event, LocalOptions options) {
+        if (event == null) return "";
+        boolean images = options.enabled(RECOGNIZE_IMAGES, true);
+        boolean video = options.enabled(RECOGNIZE_VIDEO, false);
+        if (images && hasCommentImages(event.targetComment)) return "对方评论附图";
+        boolean workImages = images && !AutomationCommentMedia.imageUrls(event.work).isEmpty();
+        boolean workVideo = video && AutomationCommentMedia.videoUrl(event.work) != null;
+        if (workImages && workVideo) return "原作品图片/封面与视频帧";
+        if (workVideo) return "原作品视频帧（不含音频）";
+        return workImages ? "原作品图片/封面" : "";
+    }
+
+    static boolean hasCommentImages(Object comment) {
+        Object value = DownloadActionHook.jsonValue(comment, "image_list");
+        return value instanceof List<?> && !((List<?>) value).isEmpty();
+    }
+
+    /** Comment.image_list -> CommentImageStruct's explicit UrlModel fields, verified against the APK. */
+    static List<String> commentImageUrls(Object comment) {
+        Object value = DownloadActionHook.jsonValue(comment, "image_list");
+        if (!(value instanceof Iterable<?>)) return Collections.emptyList();
+        Set<String> result = new LinkedHashSet<>();
+        for (Object image : (Iterable<?>) value) {
+            String source = null;
+            for (String name : new String[]{"origin_url", "download_url", "medium_url", "crop_url", "thumb_url"}) {
+                source = safeImageUrl(DownloadActionHook.jsonValue(image, name));
+                if (source != null) break;
+            }
+            if (source == null) throw new IllegalArgumentException("对方评论附图地址不受支持");
+            result.add(source);
+            if (result.size() == ChatCompletionClient.MAX_IMAGES_PER_MESSAGE) break;
+        }
+        return Collections.unmodifiableList(new ArrayList<>(result));
+    }
+
+    private static String safeImageUrl(Object address) {
+        Object urls = address instanceof Iterable<?> ? address : DownloadActionHook.jsonValue(address, "url_list");
+        if (!(urls instanceof Iterable<?>)) return null;
+        for (Object value : (Iterable<?>) urls) {
+            if (value instanceof String && AutomationImages.isMediaUrl((String) value)) return (String) value;
+        }
+        return null;
+    }
+
+    static List<String> incomingImages(JSONObject content) {
+        return content == null ? Collections.emptyList() : AutomationImages.incoming(content);
+    }
+
+    /** 40.6.0 maps type 30 to StoryVideoContent; type 8 is a shared-aweme card. */
+    static boolean isVideoMessageType(int type) { return type == 30; }
+
+    /**
+     * StoryVideoContent.video contains encrypted vid/tkey/skey, not a playable URL.
+     * Its native resolver/decryption path is not adapted here. Never infer video_url or use the poster as video.
+     */
+    static String incomingVideo(JSONObject content) { return null; }
+
+    /** Loads verified explicit sources. IM encrypted payloads cannot supply videoUrl in this version. */
+    static List<ChatImage> loadIncoming(Context context, List<String> urls, String videoUrl, LocalOptions options,
+                                       MediaReadCancellation cancellation) throws Exception {
+        cancellation.start();
+        cancellation.check();
+        boolean images = options.enabled(RECOGNIZE_IMAGES, true);
+        boolean video = options.enabled(RECOGNIZE_VIDEO, false) && videoUrl != null && !videoUrl.isEmpty();
+        List<String> selected = images && urls != null ? urls : Collections.emptyList();
+        int imageLimit = video ? 1 : ChatCompletionClient.MAX_IMAGES_PER_MESSAGE;
+        List<ChatImage> result = new ArrayList<>(AutomationImages.load(
+                selected.subList(0, Math.min(imageLimit, selected.size())), cancellation));
+        if (video) {
+            File local = AutomationCommentMedia.downloadVideo(context, videoUrl, cancellation);
+            try { result.addAll(ChatMediaLoader.loadVideoFile(local,
+                    ChatCompletionClient.MAX_IMAGES_PER_MESSAGE - result.size(), cancellation)); }
+            finally { ChatMediaLoader.deleteTemporary(local); }
+        }
+        cancellation.check();
+        return Collections.unmodifiableList(result);
+    }
+}

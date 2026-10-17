@@ -11,7 +11,7 @@ public final class HostAdaptation {
     public static final String VERIFIED_VERSION_NAME = "40.6.0";
     public static final long VERIFIED_VERSION_CODE = 400601L;
     public static final String VERIFIED_RULES_FINGERPRINT =
-            "6302fca0bc650b08b44b7ceeff026c5448f89f6ffe08b7307c84c443ba4ee6a1";
+            "865cc3a39352b022e101f7fcf5501aa44be889868c26bc75873ab4977320786d";
     private static final Map<Integer, String> FEED_RESOURCES = feedResources();
 
     private HostAdaptation() { }

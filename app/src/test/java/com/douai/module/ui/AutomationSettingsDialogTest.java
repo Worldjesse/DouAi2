@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.view.View;
 import android.widget.Switch;
 import com.douai.module.config.FeatureSettings;
+import com.douai.module.config.LocalOptions;
 import com.douai.module.config.SettingsStore;
 import org.junit.After;
 import org.junit.Before;
@@ -55,9 +56,23 @@ public final class AutomationSettingsDialogTest {
         assertEquals(5, store.saves);
     }
 
+    @Test public void controlsShowOnlyTheirNamesWithoutExplanatorySubtitles() {
+        open();
+        for (String title : new String[]{"自动化总开关", "自动点赞", "自动关注"}) {
+            android.view.ViewGroup row = (android.view.ViewGroup) toggle(title).getParent();
+            android.view.ViewGroup labels = (android.view.ViewGroup) row.getChildAt(0);
+            int visible = 0;
+            for (int index = 0; index < labels.getChildCount(); index++) {
+                if (labels.getChildAt(index).getVisibility() == View.VISIBLE) visible++;
+            }
+            assertEquals(title, 1, visible);
+        }
+    }
+
     @Test public void stopClearsAllAutomationAndClosedPageCannotWriteAgain() {
         store.settings = fixture(true, true, true, true, true);
-        for (String key : new String[]{"native_auto_reply", "native_auto_comment", "streak_enabled"}) {
+        for (String key : new String[]{"native_auto_reply", "native_auto_comment", "streak_enabled",
+                LocalOptions.COMMENT_REPLY_ENABLED}) {
             store.putBoolean(key, true);
         }
         open();
@@ -68,7 +83,8 @@ public final class AutomationSettingsDialogTest {
         assertFalse(store.settings.autoCommentEnabled);
         assertFalse(store.settings.autoMessageEnabled);
         assertTrue(store.settings.downloadEnabled);
-        for (String key : new String[]{"native_auto_reply", "native_auto_comment", "streak_enabled"}) {
+        for (String key : new String[]{"native_auto_reply", "native_auto_comment", "streak_enabled",
+                LocalOptions.COMMENT_REPLY_ENABLED}) {
             assertFalse(store.getBoolean(key, true));
         }
         assertFalse(toggle("自动化总开关").isChecked());
@@ -80,6 +96,20 @@ public final class AutomationSettingsDialogTest {
         toggle("自动化总开关").setChecked(true);
         assertEquals(1, store.saves);
         assertFalse(store.settings.automationEnabled);
+    }
+
+    @Test public void masterPausePreservesCommentReplyChoiceButImmediateStopDisablesItsSwitch() {
+        store.settings = fixture(true, false, false, false, false);
+        store.putBoolean(LocalOptions.COMMENT_REPLY_ENABLED, true);
+        open();
+        toggle("自动化总开关").setChecked(false);
+        assertTrue(store.getBoolean(LocalOptions.COMMENT_REPLY_ENABLED, false));
+
+        root.findViewWithTag("automation.stop").performClick();
+        assertFalse(store.getBoolean(LocalOptions.COMMENT_REPLY_ENABLED, true));
+        toggle("自动化总开关").setChecked(true);
+        assertTrue(store.settings.automationEnabled);
+        assertFalse(store.getBoolean(LocalOptions.COMMENT_REPLY_ENABLED, true));
     }
 
     private void open() {

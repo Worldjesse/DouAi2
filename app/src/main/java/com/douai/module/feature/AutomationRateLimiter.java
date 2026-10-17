@@ -62,7 +62,7 @@ public final class AutomationRateLimiter {
     public boolean canSend(String kind, long account, String userId, LocalOptions options) {
         if (!valid(kind, account, userId, options)) return false;
         synchronized (LOCK) {
-            return allowed(read(), kind, account, userId, options, clock.millis());
+            return allowed(read(), canonicalKind(kind), account, userId, options, clock.millis());
         }
     }
 
@@ -70,13 +70,14 @@ public final class AutomationRateLimiter {
     public Reservation tryReserve(String kind, long account, String userId, LocalOptions options) {
         if (!valid(kind, account, userId, options)) return null;
         synchronized (LOCK) {
+            String limitKind = canonicalKind(kind);
             long now = clock.millis();
             List<Record> records = read();
-            if (!allowed(records, kind, account, userId, options, now)) return null;
+            if (!allowed(records, limitKind, account, userId, options, now)) return null;
             String key = PREFIX + UUID.randomUUID();
             String encoded;
             try {
-                encoded = new JSONObject().put("kind", kind).put("account", account)
+                encoded = new JSONObject().put("kind", limitKind).put("account", account)
                         .put("user", userId).put("at", now).toString();
             } catch (JSONException impossible) { throw new IllegalStateException(impossible); }
             SharedPreferences.Editor editor = preferences.edit().putString(key, encoded);
@@ -102,7 +103,8 @@ public final class AutomationRateLimiter {
     private boolean allowed(List<Record> records, String kind, long account, String userId,
                             LocalOptions options, long now) {
         if (records == null) return false;
-        int dailyLimit = Math.max(0, Math.min(MAX_DAILY_LIMIT, options.integer(kind + "_daily_limit", 0)));
+        int dailyLimit = Math.max(0, Math.min(MAX_DAILY_LIMIT,
+                options.integer(kind + "_daily_limit", 0)));
         long interval = intervalMinutes(kind, options) * 60_000L;
         int count = 0;
         LocalDate today = date(now);
@@ -116,11 +118,12 @@ public final class AutomationRateLimiter {
     }
 
     private static int intervalMinutes(String kind, LocalOptions options) {
-        return Math.max(0, Math.min(MAX_INTERVAL_MINUTES, options.integer(kind + "_user_cooldown_minutes", 0)));
+        return Math.max(0, Math.min(MAX_INTERVAL_MINUTES,
+                options.integer(canonicalKind(kind) + "_user_cooldown_minutes", 0)));
     }
 
     private static boolean valid(String kind, long account, String userId, LocalOptions options) {
-        return ("comment".equals(kind) || "reply".equals(kind)) && account > 0 && options != null
+        return validKind(kind) && account > 0 && options != null
                 && userId != null && (!userId.trim().isEmpty() || intervalMinutes(kind, options) == 0);
     }
 
@@ -138,12 +141,19 @@ public final class AutomationRateLimiter {
                 String kind = object.getString("kind");
                 long account = object.getLong("account");
                 long timestamp = object.getLong("at");
-                if (!("comment".equals(kind) || "reply".equals(kind)) || account <= 0 || timestamp < 0) return null;
-                records.add(new Record(entry.getKey(), kind, account, object.getString("user"), timestamp));
+                if (!validKind(kind) || account <= 0 || timestamp < 0) return null;
+                records.add(new Record(entry.getKey(), canonicalKind(kind), account, object.getString("user"), timestamp));
             } catch (JSONException | RuntimeException failure) { return null; }
         }
         return records;
     }
+
+    private static boolean validKind(String kind) {
+        return "comment".equals(kind) || "reply".equals(kind) || "comment_reply".equals(kind);
+    }
+
+    /** Comment replies are part of automatic replies, including reservations written by older builds. */
+    private static String canonicalKind(String kind) { return "comment_reply".equals(kind) ? "reply" : kind; }
 
     private static final class Record {
         final String key;

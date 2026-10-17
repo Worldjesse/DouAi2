@@ -24,6 +24,9 @@ final class ConfigKeys {
                 + "hide_camera_plus hide_video_black_edges prevent_insert_video prevent_skip_hidden remove_splash_ads "
                 + "remove_teen_dialog remove_update_dialog");
         add(keys, "boolean", LocalOptions.OFFICIAL_DOWNLOAD_DIRECT);
+        add(keys, "boolean", LocalOptions.REPLY_RECOGNIZE_IMAGES + " " + LocalOptions.REPLY_RECOGNIZE_VIDEO);
+        add(keys, "boolean", LocalOptions.COMMENT_REPLY_ENABLED
+                + " comment_reply_tip_enabled comment_reply_failure_notify");
         add(keys, "boolean", ThirdPartyDownloadSettings.DIRECT);
         add(keys, "int", "minimum_duration_seconds minimum_like_count");
         add(keys, "string", "keyword video_right_alpha hidden_top_tabs fake_version_name fake_version_code auto_comment_text "
@@ -42,6 +45,9 @@ final class ConfigKeys {
                 + prefix + "_user_cooldown_minutes " + prefix + "_delay_seconds " + prefix + "_notice_seconds "
                 + prefix + "_scope_mode " + prefix + "_scope_relations " + prefix + "_scope_keywords "
                 + prefix + "_scope_fields " + prefix + "_filter_mode " + prefix + "_filter_keywords " + prefix + "_filter_fields");
+        // Preserve previous backups; comment replies now use the shared reply settings at runtime.
+        add(keys, "string", "comment_reply_prompt comment_reply_daily_limit comment_reply_user_cooldown_minutes "
+                + "comment_reply_thread_limit comment_reply_tip_seconds");
         add(keys, "boolean", "component_hide_enabled component_hide_uniform_enabled component_hide_on_switch "
                 + "component_hide_open_comments_on_show component_hide_show_on_pause");
         add(keys, "string", "component_hide_uniform_alpha");

@@ -72,6 +72,60 @@ public final class CommentRingOverlayTest {
         assertTrue(ring.getContentDescription().toString().contains("发布中"));
     }
 
+    @Test public void independentReplyPositionAndBlueStyleDoNotChangeTheSavedCommentPosition() {
+        CommentRingOverlay reply = new CommentRingOverlay(activity, () -> { }, () -> { }, true);
+        overlay.avoid(reply);
+        reply.avoid(overlay);
+        try {
+            show("preview", .8f);
+            reply.show(activity, 2, 8, "preview", .8f);
+            layout();
+            float commentX = overlay.view().getX(), commentY = overlay.view().getY();
+            CommentRingView ring = reply.view();
+            assertEquals("automation.reply.ring", ring.getTag());
+            assertEquals(Color.rgb(100, 178, 255), ring.getPrimaryColor());
+            assertEquals(Color.rgb(112, 229, 211), overlay.view().getPrimaryColor());
+            long now = SystemClock.uptimeMillis();
+            MotionEvent down = MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, 16, 16, 0);
+            MotionEvent move = MotionEvent.obtain(now, now + 50, MotionEvent.ACTION_MOVE, 86, 66, 0);
+            MotionEvent up = MotionEvent.obtain(now, now + 100, MotionEvent.ACTION_UP, 86, 66, 0);
+            try { ring.dispatchTouchEvent(down); ring.dispatchTouchEvent(move); ring.dispatchTouchEvent(up); }
+            finally { down.recycle(); move.recycle(); up.recycle(); }
+            float savedX = ring.getX(), savedY = ring.getY();
+            assertEquals(commentX, overlay.view().getX(), .1f);
+            assertEquals(commentY, overlay.view().getY(), .1f);
+            assertTrue(activity.getSharedPreferences("douai_automation_ui", Context.MODE_PRIVATE).contains("reply_ring_x"));
+            assertFalse(activity.getSharedPreferences("douai_automation_ui", Context.MODE_PRIVATE).contains("comment_ring_x"));
+            reply.detach();
+            reply = new CommentRingOverlay(activity, () -> { }, () -> { }, true);
+            overlay.avoid(reply);
+            reply.avoid(overlay);
+            reply.show(activity, 1, 0, "publishing", -1);
+            layout();
+            assertEquals(savedX, reply.view().getX(), .1f);
+            assertEquals(savedY, reply.view().getY(), .1f);
+        } finally { reply.detach(); }
+    }
+
+    @Test public void ringsAvoidOverlapEvenWhenTheirSavedPositionsAreIdentical() {
+        overlay.detach();
+        activity.getSharedPreferences("douai_automation_ui", Context.MODE_PRIVATE).edit()
+                .putFloat("comment_ring_x", .2f).putFloat("comment_ring_y", .35f)
+                .putFloat("reply_ring_x", .2f).putFloat("reply_ring_y", .35f).commit();
+        overlay = new CommentRingOverlay(activity, clicks::incrementAndGet, cancellations::incrementAndGet);
+        CommentRingOverlay reply = new CommentRingOverlay(activity, () -> { }, () -> { }, true);
+        overlay.avoid(reply);
+        reply.avoid(overlay);
+        try {
+            show("preview", .8f);
+            reply.show(activity, 1, 8, "preview", .8f);
+            layout();
+            CommentRingView first = overlay.view(), second = reply.view();
+            assertTrue(Math.abs(first.getX() - second.getX()) >= first.getWidth()
+                    || Math.abs(first.getY() - second.getY()) >= first.getHeight());
+        } finally { reply.detach(); }
+    }
+
     @Test public void tapOpensDetailsAndTouchDoesNotReachHost() {
         show("preview", .8f);
         AtomicInteger hostTouches = new AtomicInteger();

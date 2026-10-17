@@ -126,7 +126,7 @@ public final class ComponentHideSettingsPage {
         addToggle("暂停播放时,显示View", ComponentHideSettings.SHOW_ON_PAUSE,
                 settings.showOnPause);
         for (Component component : Component.values()) {
-            addAlpha(component.title, component == Component.CARD ? "作者昵称头顶的" : null,
+            addAlpha(component.title, null,
                     component.key, settings.individualAlpha(component));
         }
         addCustomViewsSection(settings.customViews);

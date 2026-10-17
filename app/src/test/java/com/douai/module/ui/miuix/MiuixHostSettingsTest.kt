@@ -66,6 +66,82 @@ class MiuixHostSettingsTest {
 
     @Test
     @Config(sdk = [28])
+    fun commentReplyReceptionUsesTheParentModeAndContentWithoutOpeningSeparateSettings() {
+        compose.onNodeWithTag("settings.category.5").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertEquals("fixed", store.getString("reply_mode", "fixed"))
+            assertFalse(store.getBoolean("native_auto_reply", false))
+            assertFalse(store.getBoolean("native_comment_reply", false))
+        }
+        compose.waitForIdle()
+        compose.runOnUiThread {
+            findNativeScroll(ShadowDialog.getLatestDialog().window!!.decorView)!!.fullScroll(View.FOCUS_DOWN)
+        }
+        compose.waitForIdle()
+        compose.onNodeWithTag("settings.toggle.接收评论回复").assertIsDisplayed().performClick()
+        compose.runOnIdle {
+            assertTrue(store.getBoolean("native_comment_reply", false))
+            assertFalse(store.getBoolean("native_auto_reply", false))
+            assertFalse(store.load().automationEnabled)
+        }
+        compose.onNodeWithText("已暂停：自动回复未开启").assertExists()
+        compose.onNodeWithTag("settings.option.评论回复设置").assertDoesNotExist()
+        compose.onNodeWithTag("settings.option.每条评论最多回复数").assertDoesNotExist()
+        compose.runOnUiThread {
+            findNativeScroll(ShadowDialog.getLatestDialog().window!!.decorView)!!.fullScroll(View.FOCUS_UP)
+        }
+        compose.waitForIdle()
+        compose.onNodeWithTag("settings.toggle.开启自动回复").performClick()
+        compose.runOnIdle {
+            assertTrue(store.getBoolean("native_auto_reply", false))
+            assertTrue(store.getBoolean("native_comment_reply", false))
+        }
+        compose.onNodeWithText("已暂停：自动回复未开启").assertDoesNotExist()
+        compose.onNodeWithTag("settings.option.回复模式").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.1").performClick()
+        compose.runOnIdle { assertEquals("ai", store.getString("reply_mode", "")) }
+        compose.onNodeWithTag("settings.option.回复内容").performClick()
+        compose.onNodeWithTag("settings.option.模型配置").assertIsDisplayed()
+        compose.onNodeWithTag("settings.option.二级提示词").assertIsDisplayed()
+        saveDialogPreview("auto-reply-shared-settings")
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun replyRecognitionUsesTheAiGateAndRetainsIndependentImageAndVideoChoices() {
+        compose.runOnUiThread {
+            store.putBoolean("comment_recognize_images", false)
+            store.putBoolean("comment_recognize_video", true)
+        }
+        compose.onNodeWithTag("settings.category.5").performScrollTo().performClick()
+        compose.onNodeWithTag("settings.option.素材识别").assertIsNotEnabled()
+        compose.onNodeWithTag("settings.option.回复模式").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.1").performClick()
+        compose.onNodeWithTag("settings.option.素材识别").assertIsEnabled().performClick()
+        compose.onNodeWithTag("settings.toggle.识别视频").performClick()
+        compose.onNodeWithTag("settings.toggle.识别图片").performClick()
+        compose.runOnIdle {
+            assertFalse(store.getBoolean("reply_recognize_images", true))
+            assertTrue(store.getBoolean("reply_recognize_video", false))
+            assertFalse(store.getBoolean("comment_recognize_images", true))
+            assertTrue(store.getBoolean("comment_recognize_video", false))
+        }
+        compose.runOnUiThread { ShadowDialog.getLatestDialog().dismiss() }
+        compose.onNodeWithTag("settings.option.回复模式").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.0").performClick()
+        compose.onNodeWithTag("settings.option.素材识别").assertIsNotEnabled()
+        compose.onNodeWithTag("settings.option.回复模式").performClick()
+        compose.onNodeWithTag("miuix.dialog.choice.1").performClick()
+        compose.onNodeWithTag("settings.option.素材识别").assertIsEnabled().performClick()
+        compose.runOnIdle {
+            assertFalse(store.getBoolean("reply_recognize_images", true))
+            assertTrue(store.getBoolean("reply_recognize_video", false))
+        }
+        saveDialogPreview("auto-reply-recognition")
+    }
+
+    @Test
+    @Config(sdk = [28])
     fun searchFindsCategoriesAndDownloadSwitchesKeepTheirDependency() {
         compose.onNodeWithTag("settings.search").performTextReplacement("下载")
         compose.onNodeWithText("基本功能").assertDoesNotExist()

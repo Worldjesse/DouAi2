@@ -151,6 +151,41 @@ public final class AutomationHistoryDialogTest {
         assertFalse(containsText(list().getAdapter().getView(0, null, list()), "语音"));
     }
 
+    @Test public void parentReplyHistoryIncludesCommentRepliesAndLabelsTheirSource() throws Exception {
+        store.upsert(new AutomationHistoryStore.Entry("incoming", AutomationHistoryStore.COMMENT_REPLY,
+                "root", "评论者", "收到的评论", "生成回复", "模型", "unknown", 1, 1,
+                0, true, AutomationHistoryStore.DELIVERY_TEXT));
+        store.upsert(new AutomationHistoryStore.Entry("private", AutomationHistoryStore.REPLY,
+                "target", "私信用户", "私信", "私信回复", "模型", "sent", 2, 2));
+        store.upsert(new AutomationHistoryStore.Entry("feed-comment", AutomationHistoryStore.COMMENT,
+                "video", "作品作者", "作品", "自动评论", "模型", "sent", 3, 3));
+        page.dialog().dismiss();
+        page = new AutomationHistoryDialog(activity, AutomationHistoryStore.REPLY, false, worker);
+        page.dialog().show();
+        ShadowLooper.idleMainLooper();
+        worker.runNextOnThread();
+        ShadowLooper.idleMainLooper();
+        assertTrue(containsText(page.dialog().getWindow().getDecorView(), "回复历史记录"));
+        assertEquals(2, list().getAdapter().getCount());
+        View messageRow = list().getAdapter().getView(0, null, list());
+        assertTrue(containsText(messageRow, "私信用户 · 发送成功"));
+        assertFalse(containsText(messageRow, "评论回复"));
+        View row = list().getAdapter().getView(1, null, list());
+        assertTrue(containsText(row, "评论回复 · 评论者 · 结果未确认 · 文本"));
+        row.performClick();
+        AlertDialog detail = (AlertDialog) org.robolectric.shadows.ShadowDialog.getLatestDialog();
+        assertTrue(containsText(detail.getWindow().getDecorView(), "收到的评论"));
+        assertTrue(containsText(detail.getWindow().getDecorView(), "来源：评论回复"));
+        assertTrue(containsText(detail.getWindow().getDecorView(), "发送方式：文本"));
+        detail.dismiss();
+        page.dialog().getButton(AlertDialog.BUTTON_NEUTRAL).performClick();
+        worker.runNextOnThread();
+        ShadowLooper.idleMainLooper();
+        assertTrue(store.read(AutomationHistoryStore.REPLY).isEmpty());
+        assertTrue(store.read(AutomationHistoryStore.COMMENT_REPLY).isEmpty());
+        assertEquals(1, store.read(AutomationHistoryStore.COMMENT).size());
+    }
+
     @Test public void commentRowsAndDetailsShowPersistedDeliveryMode() throws Exception {
         String[] modes = {AutomationHistoryStore.DELIVERY_UNKNOWN, AutomationHistoryStore.DELIVERY_TEXT,
                 AutomationHistoryStore.DELIVERY_VOICE};

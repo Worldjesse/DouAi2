@@ -65,6 +65,7 @@ import com.douai.module.feature.AutoFollowHook;
 import com.douai.module.feature.AutoPlayHook;
 import com.douai.module.feature.AutoCommentHook;
 import com.douai.module.feature.AutomationDispatcher;
+import com.douai.module.feature.CommentReplyHook;
 import com.douai.module.feature.AutoMessageDraftHook;
 import com.douai.module.feature.CommentToolsHook;
 import com.douai.module.feature.ImmersiveModeController;
@@ -118,6 +119,8 @@ public final class DouAiModule extends XposedModule {
     private volatile AutoFollowHook autoFollowHook;
     private volatile AutoPlayHook autoPlayHook;
     private volatile AutoCommentHook autoCommentDraftHook;
+    private volatile CommentReplyHook commentReplyHook;
+    private volatile String commentReplyHookFailure;
     private volatile AutoMessageDraftHook autoMessageDraftHook;
     private volatile CommentToolsHook commentToolsHook;
     private volatile ImmersiveModeController immersiveModeController;
@@ -526,6 +529,7 @@ public final class DouAiModule extends XposedModule {
             boolean replyChanged = initial || changes.any("automation_enabled", "native_auto_reply", "reply_global",
                     "reply_targets", "reply_mode", "reply_prompt", "reply_delay_seconds", "auto_message_text",
                     "reply_daily_limit", "reply_user_cooldown_minutes",
+                    LocalOptions.REPLY_RECOGNIZE_IMAGES, LocalOptions.REPLY_RECOGNIZE_VIDEO,
                     "reply_keywords", "reply_scope_mode", "reply_scope_relations", "reply_scope_fields",
                     "reply_scope_keywords", "reply_scope_users", "reply_filter_mode", "reply_filter_keywords",
                     "reply_filter_fields", "reply_private_chats", "reply_group_chats", "reply_group_scope_mode",
@@ -541,6 +545,7 @@ public final class DouAiModule extends XposedModule {
                     "comment_scope_users", "comment_filter_mode", "comment_filter_keywords",
                     "comment_filter_fields", "ai_model_settings_v2", LocalOptions.COMMENT_VOICE)
                     || changes.hasPrefix("tts_");
+            boolean commentReplyChanged = replyChanged || changes.any(LocalOptions.COMMENT_REPLY_ENABLED);
             boolean feedUiChanged = initial || changes.any("hide_interface", "video_right_alpha",
                     "component_hide_enabled", "component_hide_uniform_enabled", "component_hide_uniform_alpha",
                     "component_hide_on_switch", "component_hide_open_comments_on_show", "component_hide_show_on_pause",
@@ -565,7 +570,7 @@ public final class DouAiModule extends XposedModule {
                     NativeFollowLists.REFRESH_KEY))) {
                 nativeFollowLists.setOptions(options);
             }
-            if (automationDispatcher != null && (replyChanged || commentAutomationChanged
+            if (automationDispatcher != null && (replyChanged || commentAutomationChanged || commentReplyChanged
                     || changes.any("reply_tip", "comment_tip", "reply_notice_seconds", "comment_notice_seconds",
                     "streak_tip", "reply_save_history", "comment_save_history"))) {
                 automationDispatcher.setOptions(options);
@@ -607,6 +612,7 @@ public final class DouAiModule extends XposedModule {
             if (autoPlay != null && autoPlayChanged) autoPlay.setSettings(extended, options);
             AutoCommentHook autoComment = autoCommentDraftHook;
             if (autoComment != null && commentAutomationChanged) autoComment.setOptions(options);
+            if (commentReplyHook != null && commentReplyChanged) commentReplyHook.setOptions(options);
             AutoMessageDraftHook autoMessage = autoMessageDraftHook;
             if (autoMessage != null && (initial || changes.any("automation_enabled", "auto_message_enabled",
                     "native_auto_reply", "auto_message_text", "hide_interface"))) {
@@ -810,6 +816,23 @@ public final class DouAiModule extends XposedModule {
                 log(6, TAG, "Native automatic comment hook installation failed", failure);
             }
         }
+        if (commentReplyHook == null) {
+            try {
+                commentReplyHook = CommentReplyHook.install(this, hostScanReport, hostClassLoader,
+                        targetContext, localOptions, automationDispatcher, message -> log(3, TAG, message));
+                commentReplyHookFailure = null;
+                Activity resumed = hostUiController == null ? null : hostUiController.getResumedActivity();
+                if (resumed != null) {
+                    CommentReplyHook installed = commentReplyHook;
+                    new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                        if (hostUiController != null && hostUiController.getResumedActivity() == resumed) installed.onActivityResumed(resumed);
+                    });
+                }
+            } catch (Throwable failure) {
+                commentReplyHookFailure = HostAdaptationDiagnostics.installationFailure(failure);
+                log(6, TAG, "Comment reply hook installation failed: " + commentReplyHookFailure);
+            }
+        }
         if (autoMessageDraftHook == null) {
             try {
                 autoMessageDraftHook = AutoMessageDraftHook.install(this, hostScanReport,
@@ -912,7 +935,8 @@ public final class DouAiModule extends XposedModule {
             try {
                 candidate = NativeCommentSpeechHook.install(this, hostScanReport, hostClassLoader,
                         localOptions, message -> log(3, TAG, message));
-                if (autoCommentDraftHook != null) candidate.setAutomaticPublishGuard(autoCommentDraftHook::ownsPublish);
+                candidate.setAutomaticPublishGuard(model -> autoCommentDraftHook != null && autoCommentDraftHook.ownsPublish(model)
+                        || commentReplyHook != null && commentReplyHook.ownsPublish(model));
                 candidate.setContext(targetContext);
                 nativeCommentSpeechHook = candidate;
                 nativeCommentSpeechHookFailure = null;
@@ -1053,6 +1077,11 @@ public final class DouAiModule extends XposedModule {
         snapshot.putBoolean("auto_comment_enabled",
                 localOptions.enabled("native_auto_comment"));
         snapshot.putBoolean("auto_reply_enabled", localOptions.enabled("native_auto_reply"));
+        snapshot.putBoolean("comment_reply_hook_installed", commentReplyHook != null);
+        snapshot.putBoolean("comment_reply_enabled", localOptions.enabled(LocalOptions.COMMENT_REPLY_ENABLED)
+                && localOptions.enabled("native_auto_reply"));
+        if (commentReplyHook != null) snapshot.putString("comment_reply_status", commentReplyHook.diagnostic());
+        if (commentReplyHookFailure != null) snapshot.putString("comment_reply_hook_failure", commentReplyHookFailure);
         snapshot.putBoolean("short_progress_legacy_installed", feedUiHideHook != null
                 && feedUiHideHook.isShortProgressLegacyInstalled());
         snapshot.putBoolean("short_progress_pro_installed", feedUiHideHook != null

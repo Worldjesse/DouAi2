@@ -48,6 +48,78 @@ public final class AutomationRateLimiterTest {
         assertFalse(limiter.canSend("comment", 100, "201", options("comment", 2, 0)));
     }
 
+    @Test public void commentRepliesAndMessagesShareDurableDailyQuotaAndAccountIsolation() {
+        clock = new MutableClock("2026-10-13T12:00:00Z");
+        limiter = new AutomationRateLimiter(preferences, clock, SharedPreferences.Editor::commit);
+        LocalOptions shared = options("reply", 2, 0);
+        assertNotNull(limiter.tryReserve("comment_reply", 100, "200", shared));
+        AutomationRateLimiter.Reservation message = limiter.tryReserve("reply", 100, "201", shared);
+        assertNotNull(message);
+        AutomationRateLimiter restarted = new AutomationRateLimiter(preferences, clock, SharedPreferences.Editor::commit);
+        assertFalse(restarted.canSend("comment_reply", 100, "202", shared));
+        assertFalse(restarted.canSend("reply", 100, "202", shared));
+        assertNotNull(restarted.tryReserve("comment_reply", 101, "200", shared));
+        assertNotNull(restarted.tryReserve("comment", 100, "200", options("comment", 1, 0)));
+        restarted.release(message);
+        assertNotNull(restarted.tryReserve("comment_reply", 100, "202", shared));
+    }
+
+    @Test public void commentReplyDefaultsAndLegacyIndependentSettingsFollowParentReplyConfiguration() {
+        Map<String, Object> ignoredLegacySettings = new HashMap<>();
+        ignoredLegacySettings.put("comment_reply_daily_limit", 1);
+        ignoredLegacySettings.put("comment_reply_user_cooldown_minutes", 100);
+        LocalOptions defaults = new LocalOptions(ignoredLegacySettings);
+        for (int index = 0; index < 21; index++) {
+            assertNotNull(limiter.tryReserve("comment_reply", 100, "same-user", defaults));
+        }
+        assertTrue(limiter.canSend("reply", 100, "same-user", defaults));
+        assertTrue(limiter.canSend("comment_reply", 100, "same-user", defaults));
+        assertFalse(limiter.canSend("comment_reply", 100, "other", options("reply", 21, 0)));
+        assertFalse(limiter.canSend("reply", 100, "other", options("reply", 21, 0)));
+    }
+
+    @Test public void sameUserCooldownAppliesAcrossCommentRepliesAndMessagesBothWays() {
+        LocalOptions shared = options("reply", 0, 5);
+        assertNotNull(limiter.tryReserve("reply", 100, "200", shared));
+        assertFalse(limiter.canSend("comment_reply", 100, "200", shared));
+        assertNotNull(limiter.tryReserve("comment_reply", 100, "201", shared));
+        assertFalse(limiter.canSend("reply", 100, "201", shared));
+        assertFalse(limiter.canSend("comment_reply", 100, "", shared));
+        assertTrue(limiter.canSend("comment", 100, "201", options("comment", 0, 5)));
+        clock.advance(5 * 60_000);
+        assertTrue(limiter.canSend("comment_reply", 100, "200", shared));
+        assertTrue(limiter.canSend("reply", 100, "201", shared));
+    }
+
+    @Test public void legacyCommentReplyReservationsCountTowardParentDailyAndCooldownLimits() throws Exception {
+        preferences.edit().putString("send.legacy-comment-reply", new org.json.JSONObject()
+                .put("kind", "comment_reply").put("account", 100).put("user", "200")
+                .put("at", clock.millis()).toString()).commit();
+        AutomationRateLimiter restarted = new AutomationRateLimiter(preferences, clock, SharedPreferences.Editor::commit);
+        assertFalse(restarted.canSend("reply", 100, "201", options("reply", 1, 0)));
+        assertFalse(restarted.canSend("comment_reply", 100, "201", options("reply", 1, 0)));
+        assertFalse(restarted.canSend("reply", 100, "200", options("reply", 0, 5)));
+        assertFalse(restarted.canSend("comment_reply", 100, "200", options("reply", 0, 5)));
+        assertTrue(restarted.canSend("comment", 100, "200", options("comment", 1, 5)));
+    }
+
+    @Test public void concurrentMessagesAndCommentRepliesCannotExceedTheirSharedQuota() throws Exception {
+        AutomationRateLimiter other = new AutomationRateLimiter(preferences, clock, SharedPreferences.Editor::commit);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        LocalOptions shared = options("reply", 1, 0);
+        try {
+            Future<AutomationRateLimiter.Reservation> message = executor.submit(() -> {
+                start.await(); return limiter.tryReserve("reply", 100, "200", shared);
+            });
+            Future<AutomationRateLimiter.Reservation> comment = executor.submit(() -> {
+                start.await(); return other.tryReserve("comment_reply", 100, "201", shared);
+            });
+            start.countDown();
+            assertEquals(1, (message.get() == null ? 0 : 1) + (comment.get() == null ? 0 : 1));
+        } finally { executor.shutdownNow(); }
+    }
+
     @Test public void dailyLimitIsSeparateForAccountsAndKindsAndSurvivesRecreation() {
         LocalOptions options = options("comment", 1, 0);
         assertNotNull(limiter.tryReserve("comment", 100, "200", options));
