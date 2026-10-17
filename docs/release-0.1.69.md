@@ -1,5 +1,7 @@
 # 0.1.69：补齐黑边占位视图重建后的绑定
 
+后续回退记录：按用户要求，当前源码已撤销本版的黑边创建回调、诊断与专用测试，以及 0.1.73 的 holder 恢复增量，恢复原有单一黑边更新回调。0.1.65 至 0.1.68 的下载选择功能和 0.1.70 至 0.1.72 的其他功能继续保留。本文其余内容为当时发布与验证的历史记录。
+
 版本：`0.1.69 / 70`，基于 0.1.68。使用既有正式签名，补齐视频页面重建后黑边占位视图未及时纳入管理的问题。R8 构建、全量回归、签名与归档校验已完成。
 
 相对于已发布的 0.1.64，本版包含 0.1.65 至 0.1.68 的累计更新：官方下载分类、跨页多选、实况识别和原生编码保存，以及第三方下载分类、多选与独立默认行为。详细历史记录见 [0.1.65](release-0.1.65.md)、[0.1.66](release-0.1.66.md)、[0.1.67](release-0.1.67.md) 和 [0.1.68](release-0.1.68.md)。
@@ -26,7 +28,7 @@
 | --- | --- | --- |
 | E-001 | `artifacts/black-edge-069-log-evidence.txt`；原 ZIP `LSPosed_20261016_235553.zip`，SHA-256 `CF51ABAE2779B29262A5506E5BA60B67B2059AA0A3EB48A9DD3D89C29AFE6EF3` | OnePlus Ace 6，PLQ110，Android 16/API 36，ROM `PLQ110_16.0.7.201(CN01)`。2026-10-16 最新相关进程加载 DouAi 0.1.64/API 102；黑边日志仅有注册 `targets=1` 和 `LLLFF()` 唯一命中，没有实际启用值、占位高度或切换前后布局记录。不能确认当时宿主精确版本。 |
 | E-002 | `artifacts/black-edge-0.1.69-video/observations.md`、对应抽帧和像素观察；原片 SHA-256 `02FA53DE68FBA617A4A9ACC0240DCB159F230A06D4E4B39FD20E2A1BB2D7036E` | 582×1280 录屏的底栏背景约位于 `y=1202…1279`；可见残留和恢复，但没有独立确认消息/我的页面切换。坐标是录屏像素，不是设备 dp。 |
-| E-003 | [BlackSpaceHostContractTest](../app/src/test/java/com/douai/module/feature/BlackSpaceHostContractTest.java) 与本地原始宿主 DEX | 本地 40.6.0 声明精确 `LLLFF()`、`onViewCreated(View, Bundle)`；后者实际向 `i: View`、`j: BottomSpace` 写入新引用。此 ABI 证据不等于已经确认用户设备正在运行相同版本。 |
+| E-003 | 当时的 `BlackSpaceHostContractTest` 与本地原始宿主 DEX（专用测试已随回退移除） | 本地 40.6.0 声明精确 `LLLFF()`、`onViewCreated(View, Bundle)`；后者实际向 `i: View`、`j: BottomSpace` 写入新引用。此 ABI 证据不等于已经确认用户设备正在运行相同版本。 |
 | E-004 | [HostBehaviorViewTest](../app/src/test/java/com/douai/module/feature/HostBehaviorViewTest.java) 的 `blackSpacesBindRecreatedPanelRootBeforeItsFirstSpaceUpdate` 回归 | 本轮已见证该用例在修复前失败、修复后通过：页面重建并换入新 `i/j` 后，在再次执行 `LLLFF()` 前就应应用已开启的黑边配置。本版最终全量回归包含此用例。 |
 
 ## Finding：结论
