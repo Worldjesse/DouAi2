@@ -66,6 +66,30 @@ public final class ChatMediaLoaderTest {
         assertThrows(UnsupportedOperationException.class, () -> document.images.add(image(Color.RED)));
     }
 
+    @Test public void attachmentEntryPointAllowsTextAtFullVisualBudgetAndBoundsImageInput() throws Exception {
+        File text = writeFile("message.txt", "selected file text".getBytes(StandardCharsets.UTF_8));
+        ChatMediaLoader.Document document = ChatMediaLoader.loadAttachment(context, Uri.fromFile(text),
+                ChatMediaLoader.Kind.DOCUMENT, 0);
+        assertEquals("message.txt", document.name);
+        assertEquals("selected file text", document.text);
+        assertTrue(document.images.isEmpty());
+
+        File image = writeFile("selected.png", Base64.getDecoder().decode(image(Color.BLUE).base64Data));
+        ChatMediaLoader.Document picture = ChatMediaLoader.loadAttachment(context, Uri.fromFile(image),
+                ChatMediaLoader.Kind.IMAGE, 1);
+        assertEquals("selected.png", picture.name);
+        assertTrue(picture.text.isEmpty());
+        assertEquals(1, picture.images.size());
+        assertThrows(IllegalArgumentException.class, () -> ChatMediaLoader.loadAttachment(context,
+                Uri.fromFile(image), ChatMediaLoader.Kind.IMAGE, 0));
+        assertThrows(IllegalArgumentException.class, () -> ChatMediaLoader.loadAttachment(context,
+                Uri.fromFile(image), ChatMediaLoader.Kind.VIDEO, 0));
+        assertThrows(IllegalArgumentException.class, () -> ChatMediaLoader.loadAttachment(context,
+                Uri.fromFile(text), ChatMediaLoader.Kind.DOCUMENT, 5));
+        assertThrows(IllegalArgumentException.class, () -> ChatMediaLoader.loadAttachment(context,
+                Uri.parse("https://example.test/image.png"), ChatMediaLoader.Kind.IMAGE, 1));
+    }
+
     @Test public void actualDocxReadsBodyRunsParagraphsTabsAndBreaksOnly() throws Exception {
         String body = "<w:p><w:r><w:t xml:space=\"preserve\">First </w:t></w:r>"
                 + "<w:r><w:t>\u4f5c\u54c1</w:t><w:tab/><w:t>column</w:t><w:br/><w:t>next</w:t></w:r></w:p>"
@@ -156,6 +180,21 @@ public final class ChatMediaLoaderTest {
         assertThrows(UnsupportedOperationException.class, () -> frames.clear());
     }
 
+    @Test public void videoAttachmentKeepsDurationOrderedSamplesAndRecognitionLimitsWithFrames() throws Exception {
+        File video = writeFile("clip.mp4", new byte[]{1, 2, 3});
+        registerVideo(video, 8000, new long[]{2_000_000, 6_000_000}, new int[]{Color.RED, Color.BLUE});
+        ChatMediaLoader.Document document = ChatMediaLoader.loadVideoDocumentFile(video,
+                "clip.mp4", 2, null);
+        assertEquals("clip.mp4", document.name);
+        assertEquals(2, document.images.size());
+        assertTrue(document.text.contains("8.000"));
+        assertTrue(document.text.contains("2.000 秒、6.000 秒"));
+        assertTrue(document.text.contains("关键帧"));
+        assertTrue(document.text.contains("不包含音频或语音"));
+        assertTrue(document.text.contains("未提供其余视频片段"));
+        assertThrows(UnsupportedOperationException.class, () -> document.images.clear());
+    }
+
     @Test public void subsecondVideoSamplesOneMiddleFrameAndAvoidsDuplicateFrames() throws Exception {
         File video = writeFile("short.mp4", new byte[]{1});
         registerVideo(video, 750, new long[]{375_000}, new int[]{Color.MAGENTA});
@@ -238,6 +277,22 @@ public final class ChatMediaLoaderTest {
         assertEquals(640, decoded.getHeight());
         assertColorClose(Color.RED, decoded.getPixel(640, 320));
         decoded.recycle();
+    }
+
+    @Test @Config(shadows = {FixturePdfRenderer.class, FixturePdfPage.class})
+    public void pdfAttachmentUsesRemainingVisualBudgetAndRetainsTotalPageCount() throws Exception {
+        FixturePdfRenderer.reset();
+        File pdf = writeFile("long.pdf", pdf(6));
+        ChatMediaLoader.Document document = ChatMediaLoader.loadAttachment(context, Uri.fromFile(pdf),
+                ChatMediaLoader.Kind.DOCUMENT, 2);
+        assertEquals(2, document.images.size());
+        assertTrue(document.text.contains("前 2 页"));
+        assertTrue(document.text.contains("共 6 页"));
+        assertEquals(List.of(0, 1), FixturePdfRenderer.renderedPages);
+        assertTrue(FixturePdfRenderer.closed);
+        assertFalse(new File(FixturePdfRenderer.openedPath).exists());
+        assertThrows(IllegalArgumentException.class, () -> ChatMediaLoader.loadAttachment(context,
+                Uri.fromFile(pdf), ChatMediaLoader.Kind.DOCUMENT, 0));
     }
 
     @Test @Config(shadows = {FixturePdfRenderer.class, FixturePdfPage.class})

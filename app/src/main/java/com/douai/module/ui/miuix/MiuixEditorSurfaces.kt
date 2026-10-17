@@ -101,7 +101,8 @@ class MiuixChatEditorSurface(activity: Activity, private val model: View, close:
             val user = bubble.findViewWithTag<TextView>("ai.chat.user")
             val text = user ?: bubble.findViewWithTag("ai.chat.answer")
             ChatMessage(
-                text, user != null, text.text.toString(), text.currentTextColor,
+                text, user != null, (bubble.getChildAt(0) as? TextView)?.text?.toString().orEmpty(),
+                text.text.toString(), text.currentTextColor,
                 (bubble.findViewWithTag<LinearLayout>("ai.chat.message.images")?.let { images ->
                     (0 until images.childCount).mapNotNull { child ->
                         (images.getChildAt(child) as? ImageView)?.bitmap()
@@ -119,6 +120,9 @@ class MiuixChatEditorSurface(activity: Activity, private val model: View, close:
         val attachments = model.findViewWithTag<HorizontalScrollView>("ai.chat.attachments")
             .getChildAt(0) as LinearLayout
         return ChatState(
+            model.findViewWithTag<TextView>("ai.chat.title").text.toString(),
+            model.findViewWithTag<ImageView>("ai.chat.contact_avatar")?.let { ContactAvatar(it.bitmap()) },
+            model.findViewWithTag<View>("ai.chat.contact_edit")?.takeIf { it.visibility == View.VISIBLE },
             input.text.toString(),
             model.findViewWithTag<TextView>("ai.chat.model").text.toString(),
             model.findViewWithTag<TextView>("ai.chat.state").text.toString(),
@@ -146,10 +150,24 @@ class MiuixChatEditorSurface(activity: Activity, private val model: View, close:
             val compact = maxHeight < 400.dp
             Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = if (compact) 4.dp else 10.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("测试对话", fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.weight(1f).padding(start = 4.dp))
-                    NativeAction(model.findViewWithTag("ai.chat.memory"), android.R.drawable.ic_menu_info_details,
-                        "查看一级提示词", "ai.chat.memory")
+                    snapshot.avatar?.let { avatar ->
+                        if (avatar.bitmap != null) Image(avatar.bitmap.asImageBitmap(),
+                            contentDescription = snapshot.title + "头像",
+                            modifier = Modifier.size(32.dp).clip(RoundedCornerShape(8.dp))
+                                .testTag("ai.chat.contact_avatar"))
+                        else Image(painterResource(android.R.drawable.sym_def_app_icon),
+                            contentDescription = snapshot.title + "头像",
+                            modifier = Modifier.size(32.dp).testTag("ai.chat.contact_avatar"))
+                    }
+                    Text(snapshot.title, fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).padding(start = 4.dp).testTag("ai.chat.title"))
+                    snapshot.contactEdit?.let { action -> NativeAction(action, android.R.drawable.ic_menu_edit,
+                        "修改联系人", "ai.chat.contact_edit") }
+                    model.findViewWithTag<View>("ai.chat.memory").takeIf { it.visibility == View.VISIBLE }?.let { action ->
+                        NativeAction(action, android.R.drawable.ic_menu_info_details,
+                            "查看一级提示词", "ai.chat.memory")
+                    }
                     NativeAction(model.findViewWithTag("ai.chat.clear"), android.R.drawable.ic_menu_delete,
                         "清空对话", "ai.chat.clear")
                     IconButton(onClick = { model.findViewWithTag<View>("ai.chat.close").performClick() },
@@ -178,9 +196,10 @@ class MiuixChatEditorSurface(activity: Activity, private val model: View, close:
                                         else MiuixTheme.colorScheme.surface, RoundedCornerShape(8.dp))
                                     .padding(12.dp),
                             ) {
-                                Text(if (message.user) "我" else "AI", fontSize = 12.sp,
+                                Text(message.role, fontSize = 12.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                                    modifier = Modifier.testTag("ai.chat.role"))
                                 SelectionContainer {
                                     Text(message.text, color = hostThemeColor(message.color), modifier = Modifier.padding(top = 4.dp)
                                         .testTag(if (message.user) "ai.chat.user" else "ai.chat.answer"))
@@ -250,10 +269,12 @@ class MiuixChatEditorSurface(activity: Activity, private val model: View, close:
         }
     }
 
-    private data class ChatState(val draft: String, val model: String, val status: String,
+    private data class ChatState(val title: String, val avatar: ContactAvatar?, val contactEdit: View?,
+                                 val draft: String, val model: String, val status: String,
                                  val sendDescription: String, val sendEnabled: Boolean, val attachEnabled: Boolean,
                                  val messages: List<ChatMessage>, val images: List<DraftImage>)
-    private data class ChatMessage(val identity: View, val user: Boolean, val text: String, val color: Int,
+    private data class ContactAvatar(val bitmap: Bitmap?)
+    private data class ChatMessage(val identity: View, val user: Boolean, val role: String, val text: String, val color: Int,
                                    val images: List<Bitmap>, val documents: List<String>, val retry: View?)
     private data class DraftImage(val bitmap: Bitmap?, val name: String?, val remove: View)
     private fun ImageView.bitmap() = (drawable as? BitmapDrawable)?.bitmap

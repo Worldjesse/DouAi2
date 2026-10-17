@@ -44,6 +44,8 @@ public final class ChatMediaLoader {
 
     private ChatMediaLoader() { }
 
+    public enum Kind { IMAGE, VIDEO, DOCUMENT }
+
     public static final class Document {
         public final String name;
         public final String text;
@@ -56,12 +58,38 @@ public final class ChatMediaLoader {
         }
     }
 
+    /** A single composer entry point. The budget includes images, PDF pages and video frames. */
+    public static Document loadAttachment(Context context, Uri uri, Kind kind, int maxImages) throws Exception {
+        validateLocalUri(uri);
+        validateImageBudget(maxImages);
+        if (kind == null) throw new IllegalArgumentException("附件类型为空");
+        checkCancelled();
+        switch (kind) {
+            case IMAGE:
+                requireImageBudget(maxImages);
+                return new Document(documentName(context, uri), "",
+                        Collections.singletonList(ChatImageLoader.load(context, uri)));
+            case VIDEO:
+                requireImageBudget(maxImages);
+                return loadVideoDocument(context, uri, maxImages);
+            case DOCUMENT:
+                return loadDocument(context, uri, maxImages);
+            default: throw new IllegalArgumentException("不支持的附件类型");
+        }
+    }
+
     /** Samples visual frames only; no audio or speech is sent to the model. */
     public static List<ChatImage> loadVideo(Context context, Uri uri, int maxFrames) throws Exception {
+        return loadVideoDocument(context, uri, maxFrames).images;
+    }
+
+    /** Retains sampling provenance with the frames so later conversation rounds know their limits. */
+    public static Document loadVideoDocument(Context context, Uri uri, int maxFrames) throws Exception {
         validateLocalUri(uri);
         validateFrames(maxFrames);
+        String name = documentName(context, uri);
         File local = copyToCache(context, uri, ".video", MAX_VIDEO_BYTES);
-        try { return loadVideoFile(local, maxFrames); }
+        try { return loadVideoDocumentFile(local, name, maxFrames, null); }
         finally { deleteTemporary(local); }
     }
 
@@ -70,6 +98,11 @@ public final class ChatMediaLoader {
     }
 
     static List<ChatImage> loadVideoFile(File file, int maxFrames, MediaReadCancellation cancellation) throws Exception {
+        return loadVideoDocumentFile(file, "视频", maxFrames, cancellation).images;
+    }
+
+    static Document loadVideoDocumentFile(File file, String name, int maxFrames,
+                                          MediaReadCancellation cancellation) throws Exception {
         validateFrames(maxFrames);
         if (!file.isFile() || file.length() == 0 || file.length() > MAX_VIDEO_BYTES) {
             throw new IllegalArgumentException("视频为空或超过 64 MB");
@@ -92,7 +125,8 @@ public final class ChatMediaLoader {
             } catch (RuntimeException failure) { throw new IllegalArgumentException("无法读取视频画面尺寸"); }
             int[] size = boundedDimensions(width, height);
             List<ChatImage> images = new ArrayList<>();
-            for (long time : sampleTimes(duration, maxFrames)) {
+            long[] times = sampleTimes(duration, maxFrames);
+            for (long time : times) {
                 checkCancelled(cancellation);
                 Bitmap frame = retriever.getScaledFrameAtTime(time, MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
                         size[0], size[1]);
@@ -101,18 +135,24 @@ public final class ChatMediaLoader {
                 finally { frame.recycle(); }
             }
             checkCancelled(cancellation);
-            return Collections.unmodifiableList(images);
+            return new Document(safeName(name), videoDescription(duration, times), images);
         } finally { retriever.release(); }
     }
 
     public static Document loadDocument(Context context, Uri uri) throws Exception {
+        return loadDocument(context, uri, ChatCompletionClient.MAX_IMAGES_PER_MESSAGE);
+    }
+
+    public static Document loadDocument(Context context, Uri uri, int maxImages) throws Exception {
         validateLocalUri(uri);
+        validateImageBudget(maxImages);
         String name = documentName(context, uri);
         String mime = context.getContentResolver().getType(uri);
         String lower = name.toLowerCase(Locale.ROOT);
         if ("application/pdf".equals(mime) || lower.endsWith(".pdf")) {
+            requireImageBudget(maxImages);
             File local = copyToCache(context, uri, ".pdf", MAX_DOCUMENT_BYTES);
-            try { return readPdf(local, name); }
+            try { return readPdf(local, name, maxImages); }
             finally { deleteTemporary(local); }
         }
         boolean docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document".equals(mime)
@@ -245,14 +285,14 @@ public final class ChatMediaLoader {
         return text;
     }
 
-    private static Document readPdf(File file, String name) throws Exception {
+    private static Document readPdf(File file, String name, int maxImages) throws Exception {
         List<ChatImage> images = new ArrayList<>();
         int pages;
         try (ParcelFileDescriptor descriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY);
              PdfRenderer renderer = new PdfRenderer(descriptor)) {
             pages = renderer.getPageCount();
             if (pages == 0) throw new IllegalArgumentException("PDF 没有可读取的页面");
-            for (int index = 0; index < Math.min(pages, ChatCompletionClient.MAX_IMAGES_PER_MESSAGE); index++) {
+            for (int index = 0; index < Math.min(pages, maxImages); index++) {
                 checkCancelled();
                 try (PdfRenderer.Page page = renderer.openPage(index)) {
                     int[] size = boundedDimensions(page.getWidth(), page.getHeight());
@@ -267,6 +307,23 @@ public final class ChatMediaLoader {
         }
         String text = "PDF 页面图片：已读取前 " + images.size() + " 页，共 " + pages + " 页。";
         return new Document(name, text, images);
+    }
+
+    private static String videoDescription(long durationMillis, long[] timesMicros) {
+        StringBuilder text = new StringBuilder("视频时长：")
+                .append(seconds(durationMillis * 1000)).append(" 秒。\n")
+                .append("后附 ").append(timesMicros.length).append(" 张图片按视频时间顺序抽样，目标时间依次为：");
+        for (int index = 0; index < timesMicros.length; index++) {
+            if (index > 0) text.append("、");
+            text.append(seconds(timesMicros[index])).append(" 秒");
+        }
+        return text.append("。实际读取的是各目标时间附近的关键帧，可能重复。")
+                .append("仅提供这些抽样画面，不包含音频或语音；未提供其余视频片段。不得将抽样画面当作完整视频内容。")
+                .toString();
+    }
+
+    private static String seconds(long micros) {
+        return String.format(Locale.ROOT, "%.3f", micros / 1_000_000.0);
     }
 
     static long[] sampleTimes(long durationMillis, int frames) {
@@ -309,6 +366,16 @@ public final class ChatMediaLoader {
         if (maxFrames < 1 || maxFrames > ChatCompletionClient.MAX_IMAGES_PER_MESSAGE) {
             throw new IllegalArgumentException("视频画面数量应为 1 至 4");
         }
+    }
+
+    private static void validateImageBudget(int maxImages) {
+        if (maxImages < 0 || maxImages > ChatCompletionClient.MAX_IMAGES_PER_MESSAGE) {
+            throw new IllegalArgumentException("附件画面数量应为 0 至 4");
+        }
+    }
+
+    private static void requireImageBudget(int maxImages) {
+        if (maxImages == 0) throw new IllegalArgumentException("每条消息最多包含 4 张图片、PDF 页面或视频帧");
     }
 
     static void validateLocalUri(Uri uri) {

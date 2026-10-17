@@ -13,6 +13,7 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -118,11 +119,16 @@ class MiuixEditorsInteractionTest {
         }
         compose.onNodeWithTag("settings.input.配置名称").assertIsDisplayed()
             .performTextReplacement("更新配置名称")
+        compose.onNodeWithTag("ai.message_contact_enabled").performClick()
+        compose.onNodeWithTag("settings.input.联系人名字（留空使用配置名称）")
+            .performTextReplacement("消息小助手")
         compose.onNodeWithTag("miuix.dialog.button.-1").performClick()
         compose.runOnIdle {
             assertFalse(modelEditor!!.dialog().isShowing)
             assertEquals("更新配置名称", AiModelSettings.read(store).selected().name)
             assertEquals("saved-model", AiModelSettings.read(store).selected().modelName)
+            assertTrue(AiModelSettings.read(store).selected().messageContactEnabled)
+            assertEquals("消息小助手", AiModelSettings.read(store).selected().messageContactDisplayName())
             assertEquals(1, refreshes)
         }
     }
@@ -164,6 +170,36 @@ class MiuixEditorsInteractionTest {
         compose.onNodeWithText("下一条草稿").assertIsDisplayed()
         compose.onNodeWithTag("ai.chat.retry").assertDoesNotExist()
         assertEquals(listOf("第一次请求", "第一次请求"), session.prompts)
+    }
+
+    @Test @Config(sdk = [28], qualifiers = "w296dp-h560dp-mdpi")
+    fun contactConversationShowsCustomIdentityAndEditableProfileInMiuix() {
+        var edited = false
+        compose.runOnUiThread {
+            val config = AiModelConfig.fromJson(JSONObject().put("id", "miuix-contact")
+                .put("name", "配置名称").put("apiEndpoint", "https://example.com/v1")
+                .put("modelName", "test-model").put("messageContactEnabled", true)
+                .put("messageContactName", "小助手").put("messageContactAvatar", image().dataUrl()))
+            chat = AiTestChatDialog(compose.activity, config, { session }, worker, worker,
+                true, { null }, true)
+            chat!!.setContactEditAction { edited = true }
+            chat!!.show()
+            worker.runNext()
+        }
+        compose.onNodeWithTag("ai.chat.title").assertIsDisplayed()
+        compose.onNodeWithText("测试对话").assertDoesNotExist()
+        compose.onNodeWithTag("ai.chat.contact_avatar").assertIsDisplayed()
+        compose.onNodeWithTag("ai.chat.contact_edit").assertIsDisplayed()
+        compose.onNodeWithTag("ai.chat.input").performTextReplacement("你好")
+        compose.onNodeWithTag("ai.chat.send").performClick()
+        completeRequest()
+        compose.onAllNodesWithText("小助手").assertCountEquals(2)
+        compose.onNodeWithText("模型回复").assertIsDisplayed()
+        compose.onNodeWithTag("ai.chat.contact_edit").performClick()
+        compose.runOnIdle { assertTrue(edited) }
+        val title = compose.onNodeWithTag("ai.chat.title").getUnclippedBoundsInRoot()
+        assertTrue("Contact title must remain legible on narrow screens", (title.right - title.left).value >= 60f)
+        savePreview("miuix.chat", "contact-chat")
     }
 
     @Test fun stopBeforeExecutionAllowsRetryAndClearDiscardsQueuedReplies() {
@@ -295,7 +331,7 @@ class MiuixEditorsInteractionTest {
         assertTrue(directory.isDirectory || directory.mkdirs())
         compose.onNodeWithTag(tag).assertIsDisplayed()
         compose.runOnUiThread {
-            val window = (if (name == "chat") chat!! else prompt!!).window!!
+            val window = (if (name == "prompt") prompt!! else chat!!).window!!
             val decor = window.decorView
             val bounds = window.attributes
             decor.measure(View.MeasureSpec.makeMeasureSpec(bounds.width, View.MeasureSpec.EXACTLY),

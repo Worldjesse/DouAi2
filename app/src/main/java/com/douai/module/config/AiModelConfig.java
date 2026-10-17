@@ -4,11 +4,13 @@ import org.json.JSONObject;
 
 import java.net.URI;
 import java.util.Collections;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 /** A self-contained model profile. Optional parameters are omitted unless enabled. */
 public final class AiModelConfig {
+    public static final int MAX_CONTACT_AVATAR_BYTES = 16 * 1024;
     public static final String CHAT = "chat_completions";
     public static final String RESPONSES = "responses";
     public static final String ANTHROPIC = "anthropic";
@@ -37,6 +39,10 @@ public final class AiModelConfig {
     public final double topP;
     public final String customHeaders;
     public final String customParameters;
+    public final boolean messageContactEnabled;
+    public final String messageContactName;
+    /** Bounded inline JPEG/PNG, retained when the contact is disabled. */
+    public final String messageContactAvatar;
 
     private AiModelConfig(JSONObject json) {
         id = json.optString("id", "").trim();
@@ -59,6 +65,9 @@ public final class AiModelConfig {
         topP = json.optDouble("topP", 1.0);
         customHeaders = json.optString("customHeaders", "{}").trim();
         customParameters = json.optString("customParameters", "{}").trim();
+        messageContactEnabled = json.optBoolean("messageContactEnabled", false);
+        messageContactName = json.optString("messageContactName", "").trim();
+        messageContactAvatar = json.optString("messageContactAvatar", "").trim();
     }
 
     public static AiModelConfig fromJson(JSONObject json) {
@@ -76,13 +85,19 @@ public final class AiModelConfig {
                     .put("temperatureEnabled", temperatureEnabled).put("temperature", temperature)
                     .put("maxTokensEnabled", maxTokensEnabled).put("maxTokens", maxTokens)
                     .put("topPEnabled", topPEnabled).put("topP", topP)
-                    .put("customHeaders", customHeaders).put("customParameters", customParameters);
+                    .put("customHeaders", customHeaders).put("customParameters", customParameters)
+                    .put("messageContactEnabled", messageContactEnabled)
+                    .put("messageContactName", messageContactName).put("messageContactAvatar", messageContactAvatar);
         } catch (Exception failure) { throw new IllegalStateException("模型配置无法序列化", failure); }
     }
 
     public void validate(boolean requireModel) {
         if (id.isEmpty() || id.length() > 128) throw new IllegalArgumentException("模型配置标识无效");
         if (name.isEmpty() || name.length() > 80) throw new IllegalArgumentException("配置名称需要 1 至 80 个字符");
+        if (messageContactName.length() > 80 || messageContactName.codePoints().anyMatch(Character::isISOControl)) {
+            throw new IllegalArgumentException("联系人名字最多 80 个字符，不能包含换行或控制字符");
+        }
+        decodeContactAvatar(messageContactAvatar);
         boolean recognized = false;
         for (String value : PROTOCOLS) recognized |= value.equals(protocol);
         if (!recognized) throw new IllegalArgumentException("接口协议无效");
@@ -109,6 +124,31 @@ public final class AiModelConfig {
         }
         headers();
         parameters();
+    }
+
+    public String messageContactDisplayName() {
+        return messageContactName.isEmpty() ? name : messageContactName;
+    }
+
+    /** Decode only bounded inline image data; never resolve remote or content URIs. */
+    public static byte[] decodeContactAvatar(String value) {
+        if (value == null || value.isEmpty()) return new byte[0];
+        final String jpeg = "data:image/jpeg;base64,", png = "data:image/png;base64,";
+        String prefix = value.startsWith(jpeg) ? jpeg : value.startsWith(png) ? png : "";
+        if (prefix.isEmpty() || value.length() > ((MAX_CONTACT_AVATAR_BYTES + 2) / 3) * 4 + prefix.length()) {
+            throw new IllegalArgumentException("联系人头像需要 16 KiB 以内的内嵌 JPEG 或 PNG 图片");
+        }
+        try {
+            byte[] bytes = Base64.getDecoder().decode(value.substring(prefix.length()));
+            boolean signature = prefix.equals(jpeg) ? bytes.length >= 3
+                    && (bytes[0] & 255) == 255 && (bytes[1] & 255) == 216 && (bytes[2] & 255) == 255
+                    : bytes.length >= 8 && bytes[0] == (byte) 137 && bytes[1] == 80 && bytes[2] == 78
+                    && bytes[3] == 71 && bytes[4] == 13 && bytes[5] == 10 && bytes[6] == 26 && bytes[7] == 10;
+            if (!signature || bytes.length > MAX_CONTACT_AVATAR_BYTES) throw new IllegalArgumentException();
+            return bytes;
+        } catch (IllegalArgumentException failure) {
+            throw new IllegalArgumentException("联系人头像内容无效或超过 16 KiB");
+        }
     }
 
     public static URI validateAddress(String value, boolean allowHttp) {

@@ -343,6 +343,63 @@ public final class ChatCompletionClientTest {
         assertEquals("AQID", inline.getString("data"));
     }
 
+    @Test public void fileAndVideoProvenanceStayWithVisualsInEveryProtocolHistory() throws Exception {
+        for (String protocol : AiModelConfig.PROTOCOLS) {
+            try (MockWebServer server = new MockWebServer()) {
+                String response = AiModelConfig.CHAT.equals(protocol) ? "{\"choices\":[{\"message\":{\"content\":\"answer\"}}]}"
+                        : AiModelConfig.RESPONSES.equals(protocol) ? "{\"output_text\":\"answer\"}"
+                        : AiModelConfig.ANTHROPIC.equals(protocol) ? "{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}"
+                        : "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"answer\"}]}}]}";
+                server.enqueue(json(response));
+                server.enqueue(json(response));
+                server.enqueue(json(response));
+                server.start();
+                AiModelSettings profile = settings(config(server, protocol, true).put("contextRounds", 1));
+                ChatCompletionClient client = new ChatCompletionClient();
+                String document = "[文件：plan.md]\nSelected document text\n\n[文件：clip.mp4]\n"
+                        + "视频时长：8.000 秒；目标时间为 2.000 秒、6.000 秒，不包含音频或语音。";
+                client.reply("message-chat", "Analyze these", Arrays.asList(
+                        new ChatImage("image/png", new byte[]{1}), new ChatImage("image/png", new byte[]{2})),
+                        profile, "", true, document);
+                String key = AiModelConfig.RESPONSES.equals(protocol) ? "input"
+                        : AiModelConfig.GEMINI.equals(protocol) ? "contents" : "messages";
+                int userIndex = AiModelConfig.CHAT.equals(protocol) ? 1 : 0;
+                JSONObject firstUser = new JSONObject(server.takeRequest(2, TimeUnit.SECONDS).getBody().readUtf8())
+                        .getJSONArray(key).getJSONObject(userIndex);
+                JSONArray parts = firstUser.getJSONArray(AiModelConfig.GEMINI.equals(protocol) ? "parts" : "content");
+                assertEquals(3, parts.length());
+                String text = parts.getJSONObject(0).getString("text");
+                assertTrue(text.contains(document));
+                client.reply("message-chat", "What does the file say?", profile);
+                JSONArray followup = new JSONObject(server.takeRequest(2, TimeUnit.SECONDS).getBody().readUtf8()).getJSONArray(key);
+                assertEquals(firstUser.toString(), followup.getJSONObject(userIndex).toString());
+                client.reply("message-chat", "Next question", profile);
+                JSONArray evicted = new JSONObject(server.takeRequest(2, TimeUnit.SECONDS).getBody().readUtf8()).getJSONArray(key);
+                assertFalse(evicted.toString().contains("plan.md"));
+                assertFalse(evicted.toString().contains("clip.mp4"));
+                assertEquals(userIndex + 3, evicted.length());
+            }
+        }
+    }
+
+    @Test public void documentOnlyMessageIsAllowedAndBlankOrOversizedFileTextNeverReachesProvider() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(chatReply("file answer"));
+            server.start();
+            AiModelSettings profile = settings(config(server, AiModelConfig.CHAT, true));
+            ChatCompletionClient client = new ChatCompletionClient();
+            assertEquals("file answer", client.reply("message-chat", "", Collections.emptyList(), profile,
+                    "", true, "[文件：notes.txt]\nRead this attachment"));
+            String text = requestMessages(server).getJSONObject(1).getString("content");
+            assertTrue(text.contains("Read this attachment"));
+            assertThrows(IllegalArgumentException.class, () -> client.reply("message-chat", "", Collections.emptyList(),
+                    profile, "", true, " \n\t"));
+            assertThrows(IllegalArgumentException.class, () -> client.reply("message-chat", "", Collections.emptyList(),
+                    profile, "", true, "a".repeat(32769)));
+            assertEquals(1, server.getRequestCount());
+        }
+    }
+
     @Test public void imageOnlyMessageIsAllowedAndInvalidAttachmentsNeverReachProvider() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(chatReply("picture"));

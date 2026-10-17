@@ -33,6 +33,11 @@ public final class TestChatMemory {
         this(new File(context.getFilesDir(), "douai_test_chat"), config);
     }
 
+    /** Message-page conversations have their own history; test requests never enter it. */
+    public static TestChatMemory messageConversation(Context context, AiModelConfig config) {
+        return new TestChatMemory(new File(context.getFilesDir(), "douai_message_chat"), config);
+    }
+
     TestChatMemory(File directory, AiModelConfig config) {
         rounds = Math.max(0, Math.min(50, config.contextRounds));
         file = new File(directory, key(config) + ".bin");

@@ -21,6 +21,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.douai.module.config.HostSettingsStore;
+import com.douai.module.feature.AiMessageEntryHook;
 
 import java.lang.ref.WeakReference;
 import java.util.function.Consumer;
@@ -33,6 +34,7 @@ public final class HostUiController implements Application.ActivityLifecycleCall
     private final Application application;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final HostSettingsStore settingsStore;
+    private final AiMessageEntryHook aiMessageEntry;
     private final AdaptationAcknowledgment acknowledgment;
     private final HostAppRestarter appRestarter;
     private final Consumer<String> log;
@@ -73,6 +75,8 @@ public final class HostUiController implements Application.ActivityLifecycleCall
         this.appRestarter = appRestarter;
         this.acknowledgment = acknowledgment;
         settingsStore = new HostSettingsStore(application);
+        aiMessageEntry = AiMessageEntryHook.install(application, settingsStore,
+                (activity, config) -> AiConversationDialog.show(activity, settingsStore, config), this.log);
         application.registerActivityLifecycleCallbacks(this);
     }
 
@@ -488,6 +492,7 @@ public final class HostUiController implements Application.ActivityLifecycleCall
     public void onActivityResumed(Activity activity) {
         if (closed || activity == null || !application.getPackageName().equals(activity.getPackageName())) return;
         resumedActivity = new WeakReference<>(activity);
+        aiMessageEntry.onActivityResumed(activity);
         if (pendingRestartNotice != null) {
             Toast.makeText(activity, pendingRestartNotice, Toast.LENGTH_LONG).show();
             pendingRestartNotice = null;
@@ -521,6 +526,7 @@ public final class HostUiController implements Application.ActivityLifecycleCall
     @Override
     public void close() {
         closed = true;
+        aiMessageEntry.close();
         application.unregisterActivityLifecycleCallbacks(this);
         mainHandler.removeCallbacksAndMessages(null);
         for (SettingsLayoutMonitor monitor : settingsLayoutMonitors.values()) monitor.remove();

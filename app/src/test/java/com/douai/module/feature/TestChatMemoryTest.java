@@ -43,6 +43,23 @@ public final class TestChatMemoryTest {
         assertFalse(directory.listFiles()[0].getName().contains("固定偏好"));
     }
 
+    @Test public void messageConversationIsSeparateFromTestsAndSurvivesContactRename() throws Exception {
+        android.content.Context context = org.robolectric.RuntimeEnvironment.getApplication();
+        AiModelConfig profile = AiModelConfig.fromJson(config("https://example.test", 3, "偏好").toJson()
+                .put("id", java.util.UUID.randomUUID().toString()));
+        TestChatMemory tests = new TestChatMemory(context, profile);
+        TestChatMemory messages = TestChatMemory.messageConversation(context, profile);
+        assertTrue(tests.append(tests.epoch(), turn("测试问题", "测试回答")));
+        assertTrue(messages.read().isEmpty());
+        assertTrue(messages.append(messages.epoch(), turn("聊天问题", "聊天回答")));
+        AiModelConfig renamed = AiModelConfig.fromJson(profile.toJson().put("messageContactName", "新名字"));
+        TestChatMemory reopened = TestChatMemory.messageConversation(context, renamed);
+        assertEquals("聊天问题", reopened.read().get(0).prompt);
+        reopened.clear();
+        assertEquals("测试问题", tests.read().get(0).prompt);
+        tests.clear();
+    }
+
     @Test public void clearAcrossInstancesRejectsLateSaveAndZeroRoundsEraseExistingHistory() throws Exception {
         File directory = temporary.newFolder();
         AiModelConfig config = config("https://example.test", 2, "偏好");

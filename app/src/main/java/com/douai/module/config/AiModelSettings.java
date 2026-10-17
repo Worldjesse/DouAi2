@@ -81,6 +81,9 @@ public final class AiModelSettings {
     }
 
     public AiModelSettings delete(String id) {
+        boolean exists = false;
+        for (AiModelConfig config : configs) exists |= config.id.equals(id);
+        if (!exists) return this;
         List<AiModelConfig> next = new ArrayList<>();
         for (AiModelConfig config : configs) if (!config.id.equals(id)) next.add(config);
         return new AiModelSettings(next, activeId.equals(id) ? "" : activeId);

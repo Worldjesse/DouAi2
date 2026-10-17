@@ -1,8 +1,11 @@
 package com.douai.module.ui;
 
 import android.app.AlertDialog;
+import android.app.Activity;
 import android.app.Dialog;
 import android.content.Context;
+import android.content.ContextWrapper;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.text.InputType;
@@ -13,6 +16,7 @@ import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ImageView;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -42,12 +46,18 @@ final class AiModelEditor implements AutoCloseable {
     private final Context context;
     private final SettingsStore repository;
     private final boolean useMiuix;
+    private final boolean activateOnSave;
+    private final Runnable onDelete;
     private final Runnable onChanged;
     private final ExecutorService requests;
     private final List<Dialog> children = new ArrayList<>();
     private AlertDialog dialog;
     private ChatCompletionClient.ModelCatalogRequest modelRequest;
     private Future<?> modelFetch;
+    private Future<?> avatarLoad;
+    private HostImagePicker avatarPicker;
+    private Bitmap avatarPreview;
+    private boolean loadingAvatar;
     private boolean closed;
     private Runnable bindButtons;
 
@@ -58,9 +68,37 @@ final class AiModelEditor implements AutoCloseable {
 
     AiModelEditor(Context context, SettingsStore repository, AiModelConfig original,
                   boolean useMiuix, Runnable onChanged, ExecutorService requests) {
+        this(context, repository, original, useMiuix, onChanged, requests, true);
+    }
+
+    AiModelEditor(Context context, SettingsStore repository, AiModelConfig original,
+                  boolean useMiuix, Runnable onChanged, boolean activateOnSave) {
+        this(context, repository, original, useMiuix, onChanged,
+                Executors.newSingleThreadExecutor(), activateOnSave, null);
+    }
+
+    AiModelEditor(Context context, SettingsStore repository, AiModelConfig original, boolean useMiuix,
+                  Runnable onChanged, boolean activateOnSave, Runnable onDelete) {
+        this(context, repository, original, useMiuix, onChanged,
+                Executors.newSingleThreadExecutor(), activateOnSave, onDelete);
+    }
+
+    private AiModelEditor(Context context, SettingsStore repository, AiModelConfig original,
+                  boolean useMiuix, Runnable onChanged, ExecutorService requests, boolean activateOnSave) {
+        this(context, repository, original, useMiuix, onChanged, requests, activateOnSave, null);
+    }
+
+    private AiModelEditor(Context context, SettingsStore repository, AiModelConfig original,
+                  boolean useMiuix, Runnable onChanged, ExecutorService requests, boolean activateOnSave,
+                  Runnable onDelete) {
         this.context = ModuleTheme.themedContext(context);
         this.repository = repository;
         this.useMiuix = useMiuix;
+        this.activateOnSave = activateOnSave;
+        this.onDelete = onDelete == null ? () -> {
+            saveAiSettings(aiSettings().delete(original.id));
+            onChanged.run();
+        } : onDelete;
         this.onChanged = onChanged;
         this.requests = requests;
         build(original);
@@ -83,10 +121,16 @@ final class AiModelEditor implements AutoCloseable {
         if (closed) return;
         closed = true;
         cancelCatalog();
+        if (avatarPicker != null) avatarPicker.close();
+        avatarPicker = null;
+        if (avatarLoad != null) avatarLoad.cancel(true);
+        avatarLoad = null;
         for (Dialog child : new ArrayList<>(children)) child.dismiss();
         children.clear();
         requests.shutdownNow();
         if (dialog.isShowing()) dialog.dismiss();
+        if (avatarPreview != null) avatarPreview.recycle();
+        avatarPreview = null;
     }
 
     private void cancelCatalog() {
@@ -112,6 +156,65 @@ final class AiModelEditor implements AutoCloseable {
     private void build(AiModelConfig original) {
         LinearLayout form = form();
         EditText name = formInput(form, "配置名称", original.name, false);
+        CheckBox messageContact = checkField(form, "加入抖音消息界面", original.messageContactEnabled);
+        messageContact.setTag("ai.message_contact_enabled");
+        EditText contactName = formInput(form, "联系人名字（留空使用配置名称）", original.messageContactName, false);
+        contactName.setSingleLine(true);
+        contactName.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(80)});
+        String[] contactAvatar = {original.messageContactAvatar};
+        ImageView avatar = new ImageView(context);
+        avatar.setTag("ai.message_contact_avatar_preview");
+        avatar.setContentDescription("联系人头像预览");
+        avatar.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        form.addView(avatar, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        updateAvatarPreview(avatar, contactAvatar[0]);
+        Button chooseAvatar = formButton();
+        chooseAvatar.setText("选择联系人头像");
+        chooseAvatar.setTag("ai.message_contact_avatar");
+        form.addView(MiuixFormControls.viewFor(chooseAvatar), matchWrap());
+        Button resetAvatar = formButton();
+        resetAvatar.setText("恢复默认头像");
+        resetAvatar.setTag("ai.message_contact_avatar_reset");
+        form.addView(MiuixFormControls.viewFor(resetAvatar), matchWrap());
+        resetAvatar.setOnClickListener(ignored -> {
+            if (loadingAvatar) { toast("正在处理头像，请稍候"); return; }
+            contactAvatar[0] = "";
+            updateAvatarPreview(avatar, "");
+        });
+        chooseAvatar.setOnClickListener(ignored -> {
+            if (closed || loadingAvatar || avatarPicker != null) return;
+            avatarPicker = HostImagePicker.launch(ownerActivity(), uri -> {
+                avatarPicker = null;
+                if (closed || uri == null) return;
+                loadingAvatar = true;
+                chooseAvatar.setEnabled(false);
+                chooseAvatar.setText("正在处理头像…");
+                avatarLoad = requests.submit(() -> {
+                    try {
+                        String selected = AiContactAvatar.fromSelection(context, uri);
+                        form.post(() -> {
+                            if (closed) return;
+                            contactAvatar[0] = selected;
+                            updateAvatarPreview(avatar, selected);
+                            finishAvatarLoad(chooseAvatar);
+                        });
+                    } catch (Exception failure) {
+                        form.post(() -> {
+                            if (closed) return;
+                            finishAvatarLoad(chooseAvatar);
+                            toast(safeError(failure));
+                        });
+                    } catch (OutOfMemoryError failure) {
+                        form.post(() -> {
+                            if (closed) return;
+                            finishAvatarLoad(chooseAvatar);
+                            toast("头像图片过大，请选择较小图片");
+                        });
+                    }
+                });
+            });
+            if (avatarPicker == null) toast("当前界面无法打开图片选择器");
+        });
         Spinner provider = !useMiuix ? new Spinner(context) : MiuixFormControls.spinner(context);
         List<String> providers = new ArrayList<>();
         for (AiProviderPresets.Preset preset : AiProviderPresets.ALL) providers.add(preset.name);
@@ -180,10 +283,14 @@ final class AiModelEditor implements AutoCloseable {
         status.setTag("ai.status");
         status.setVisibility(View.GONE);
         form.addView(status, matchWrap());
-        Callable<AiModelConfig> readDraft = () -> buildAiConfig(original.id, name, provider, protocol, endpoint,
-                key, modelName, modelsEndpoint, systemPrompt[0], contextRounds, timeout, allowHttp,
-                temperatureEnabled, temperature, maxTokensEnabled, maxTokens,
-                topPEnabled, topP, headers, parameters);
+        Callable<AiModelConfig> readDraft = () -> {
+            if (loadingAvatar) throw new IllegalStateException("正在处理头像，请稍候再保存");
+            return buildAiConfig(original.id, name, provider, protocol, endpoint,
+                    key, modelName, modelsEndpoint, systemPrompt[0], contextRounds, timeout, allowHttp,
+                    temperatureEnabled, temperature, maxTokensEnabled, maxTokens,
+                    topPEnabled, topP, headers, parameters, messageContact.isChecked(),
+                    contactName.getText().toString(), contactAvatar[0]);
+        };
 
         int[] lastProviderSelection = {providerIndex};
         provider.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
@@ -202,23 +309,22 @@ final class AiModelEditor implements AutoCloseable {
 
         dialog = new MiuixDialogBuilder(context, useMiuix).setTitle("模型配置")
                 .setView(scrolling(form)).setNegativeButton("取消", null)
-                .setPositiveButton("保存并启用", null).setNeutralButton("删除", null).create();
+                .setPositiveButton(activateOnSave ? "保存并启用" : "保存", null).setNeutralButton("删除", null).create();
         dialog.setOnDismissListener(ignored -> close());
         bindButtons = () -> {
             boolean exists = false;
             for (AiModelConfig configured : aiSettings().configs) exists |= configured.id.equals(original.id);
             dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setVisibility(exists ? View.VISIBLE : View.GONE);
             dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(ignored -> {
-                try { saveAiSettings(aiSettings().delete(original.id)); }
+                try { onDelete.run(); }
                 catch (RuntimeException failure) { toast(safeError(failure)); return; }
                 close();
-                onChanged.run();
             });
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
                 try {
                     AiModelConfig draft = readDraft.call();
                     draft.validate(true);
-                    saveAiSettings(aiSettings().upsert(draft, true));
+                    saveAiSettings(aiSettings().upsert(draft, activateOnSave));
                     close();
                     onChanged.run();
                 } catch (Exception failure) { toast(safeError(failure)); }
@@ -280,6 +386,33 @@ final class AiModelEditor implements AutoCloseable {
         });
     }
 
+    private void finishAvatarLoad(Button chooseAvatar) {
+        loadingAvatar = false;
+        avatarLoad = null;
+        chooseAvatar.setEnabled(true);
+        chooseAvatar.setText("选择联系人头像");
+    }
+
+    private void updateAvatarPreview(ImageView view, String value) {
+        Bitmap old = avatarPreview;
+        avatarPreview = AiContactAvatar.load(value);
+        if (avatarPreview == null) view.setImageResource(android.R.drawable.sym_def_app_icon);
+        else view.setImageBitmap(avatarPreview);
+        if (old != null) old.recycle();
+    }
+
+    private Activity ownerActivity() {
+        if (dialog != null && dialog.getOwnerActivity() != null) return dialog.getOwnerActivity();
+        Context candidate = context;
+        while (candidate instanceof ContextWrapper) {
+            if (candidate instanceof Activity) return (Activity) candidate;
+            Context base = ((ContextWrapper) candidate).getBaseContext();
+            if (base == candidate) break;
+            candidate = base;
+        }
+        return null;
+    }
+
     private void addField(LinearLayout parent, String label, View input) {
         TextView heading = text(label, 14, TEXT, false);
         LinearLayout.LayoutParams params = matchWrap();
@@ -312,7 +445,8 @@ final class AiModelEditor implements AutoCloseable {
                                        EditText timeout, CheckBox allowHttp, CheckBox temperatureEnabled,
                                        EditText temperature, CheckBox maxTokensEnabled, EditText maxTokens,
                                        CheckBox topPEnabled, EditText topP, EditText headers,
-                                       EditText parameters) throws Exception {
+                                       EditText parameters, boolean messageContactEnabled,
+                                       String messageContactName, String messageContactAvatar) throws Exception {
         AiProviderPresets.Preset preset = AiProviderPresets.ALL.get(provider.getSelectedItemPosition());
         return AiModelConfig.fromJson(new JSONObject().put("id", id).put("name", name.getText().toString())
                 .put("provider", preset.id).put("protocol", AiModelConfig.PROTOCOLS[protocol.getSelectedItemPosition()])
@@ -328,7 +462,9 @@ final class AiModelEditor implements AutoCloseable {
                 .put("maxTokens", Integer.parseInt(maxTokens.getText().toString().trim()))
                 .put("topPEnabled", topPEnabled.isChecked()).put("topP", Double.parseDouble(topP.getText().toString().trim()))
                 .put("customHeaders", headers.getText().toString().trim().isEmpty() ? "{}" : headers.getText().toString())
-                .put("customParameters", parameters.getText().toString().trim().isEmpty() ? "{}" : parameters.getText().toString()));
+                .put("customParameters", parameters.getText().toString().trim().isEmpty() ? "{}" : parameters.getText().toString())
+                .put("messageContactEnabled", messageContactEnabled).put("messageContactName", messageContactName)
+                .put("messageContactAvatar", messageContactAvatar));
     }
 
     private EditText formInput(LinearLayout parent, String label, String value, boolean secret) {

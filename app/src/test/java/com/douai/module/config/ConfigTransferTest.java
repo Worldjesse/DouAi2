@@ -18,6 +18,24 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class ConfigTransferTest {
+    @Test public void contactProfileRoundTripsWithAvatarInRedactedBackup() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        AiModelConfig contact = AiModelConfig.fromJson(new JSONObject().put("id", "ai-contact")
+                .put("name", "Configured model").put("apiEndpoint", "https://api.test/v1")
+                .put("modelName", "model").put("apiKey", "fixture-secret")
+                .put("messageContactEnabled", true).put("messageContactName", "小助手")
+                .put("messageContactAvatar", AiModelContactConfigTest.AVATAR));
+        source.values.put(AiModelSettings.KEY, new AiModelSettings(java.util.List.of(contact), contact.id).serialize());
+        String encoded = ConfigTransfer.export(source, false);
+        assertFalse(encoded.contains("fixture-secret"));
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, encoded));
+        AiModelConfig restored = AiModelSettings.parse((String) target.values.get(AiModelSettings.KEY)).selected();
+        assertTrue(restored.messageContactEnabled);
+        assertEquals("小助手", restored.messageContactDisplayName());
+        assertEquals(AiModelContactConfigTest.AVATAR, restored.messageContactAvatar);
+        assertEquals("", restored.apiKey);
+    }
+
     @Test public void fullBackupRoundTripsTypesAndAllConfigurationFamilies() throws Exception {
         MemoryStore source = new MemoryStore();
         source.values.put("download_enabled", true);

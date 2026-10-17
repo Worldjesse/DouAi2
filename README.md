@@ -2,13 +2,19 @@
 
 抖音增强模块，面向抖音 `com.ss.android.ugc.aweme` 40.6.0，使用 libxposed API 102。
 
-作者：**yudigaga**。当前正式版：**0.1.75** / versionCode **76**。
+作者：**yudigaga**。远端正式版：**0.1.75** / versionCode **76**；当前本地构建：**0.1.76** / versionCode **77**。
 
 - [源码仓库](https://github.com/yudigaga/DouAi)
 - [正式版下载](https://github.com/yudigaga/DouAi/releases)
 - [LSPosed 模块仓库](https://github.com/Xposed-Modules-Repo/io.github.yudigaga.douai)
 
 正式包名：`io.github.yudigaga.douai`。
+
+## 0.1.76 本地更新
+
+AI 模型编辑页新增“加入抖音消息界面”开关，可将多个已配置模型作为联系人显示在消息页，并分别修改名字和头像。点击联系人可直接对话、发送附件、停止请求、重试和清空记录；消息对话与测试对话分别保存。文件支持 UTF-8 文本、DOCX、PDF，图片和视频抽帧需要模型支持视觉输入；视频不含音频。
+
+[使用与本地验证](docs/release-0.1.76.md)。本版仅本地交付，消息页入口和真实服务识别效果尚待真机验收。
 
 ## 0.1.75 更新
 

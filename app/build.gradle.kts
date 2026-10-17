@@ -25,8 +25,8 @@ android {
         applicationId = "io.github.yudigaga.douai"
         minSdk = 28
         targetSdk = 35
-        versionCode = 76
-        versionName = "0.1.75"
+        versionCode = 77
+        versionName = "0.1.76"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -99,6 +99,7 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("androidx.constraintlayout:constraintlayout:2.2.1")
     testImplementation("androidx.compose.ui:ui-test-junit4-android:1.12.0")
     debugImplementation("androidx.compose.ui:ui-test-manifest:1.12.0")
     testImplementation("io.github.libxposed:api:102.0.0")

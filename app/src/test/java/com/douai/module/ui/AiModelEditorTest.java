@@ -6,6 +6,7 @@ import android.app.Dialog;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
+import android.widget.CheckBox;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.FeatureSettings;
@@ -72,6 +73,47 @@ public final class AiModelEditorTest {
         assertEquals(1, refreshes[0]);
     }
 
+    @Test public void deletingFromTheContactEditorRemovesOnlyThatModelAndDoesNotReactivateIt() throws Exception {
+        AiModelConfig contact = AiModelConfig.fromJson(profile().toJson()
+                .put("id", "contact").put("messageContactEnabled", true).put("messageContactName", "消息助手"));
+        AiModelConfig automation = AiModelConfig.fromJson(profile().toJson().put("id", "automation"));
+        new AiModelSettings(java.util.Arrays.asList(contact, automation), automation.id).save(store);
+        editor = AiConversationDialog.contactEditor(activity, store, contact);
+        show(editor);
+        editor.dialog().getButton(AlertDialog.BUTTON_NEUTRAL).performClick();
+        AiModelSettings remaining = AiModelSettings.read(store);
+        assertEquals(1, remaining.configs.size());
+        assertEquals("automation", remaining.activeId);
+        assertFalse(editor.dialog().isShowing());
+    }
+
+    @Test public void staleContactDeleteCannotRemoveATemplateEditedElsewhere() throws Exception {
+        AiModelConfig contact = AiModelConfig.fromJson(profile().toJson()
+                .put("id", "contact").put("messageContactEnabled", true));
+        new AiModelSettings(Collections.singletonList(contact), contact.id).save(store);
+        editor = AiConversationDialog.contactEditor(activity, store, contact);
+        show(editor);
+        AiModelConfig edited = AiModelConfig.fromJson(contact.toJson().put("name", "新模板名称"));
+        new AiModelSettings(Collections.singletonList(edited), edited.id).save(store);
+        editor.dialog().getButton(AlertDialog.BUTTON_NEUTRAL).performClick();
+        assertTrue(editor.dialog().isShowing());
+        assertEquals("新模板名称", AiModelSettings.read(store).selected().name);
+    }
+
+
+    @Test public void editingAContactDoesNotChangeTheActiveAutomationModel() throws Exception {
+        AiModelConfig original = profile();
+        AiModelConfig automation = AiModelConfig.fromJson(original.toJson().put("id", "automation"));
+        new AiModelSettings(java.util.Arrays.asList(original, automation), automation.id).save(store);
+        editor = new AiModelEditor(activity, store, original, false, () -> { }, false);
+        show(editor);
+        input(editor.dialog(), "联系人名字（留空使用配置名称）").setText("改名后的助手");
+        assertEquals("保存", editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+        editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertEquals("automation", AiModelSettings.read(store).activeId);
+        assertEquals("改名后的助手", AiModelSettings.read(store).configs.get(0).messageContactName);
+    }
+
     @Test public void closingEditorClosesPromptAndCancelsBlockedCatalog() throws Exception {
         ExecutorService worker = Executors.newSingleThreadExecutor();
         try (MockWebServer server = new MockWebServer()) {
@@ -96,6 +138,31 @@ public final class AiModelEditorTest {
             assertFalse(prompt.isShowing());
             assertSame(prompt, ShadowDialog.getLatestDialog());
         } finally { worker.shutdownNow(); }
+    }
+
+    @Test public void contactToggleAndNameSaveWhileDisabledContactRetainsAvatar() throws Exception {
+        String avatar = com.douai.module.config.AiModelContactConfigTest.AVATAR;
+        AiModelConfig original = AiModelConfig.fromJson(profile().toJson().put("messageContactAvatar", avatar));
+        editor = new AiModelEditor(activity, store, original, false, () -> { });
+        show(editor);
+        View root = editor.dialog().getWindow().getDecorView();
+        ((CheckBox) root.findViewWithTag("ai.message_contact_enabled")).setChecked(true);
+        input(editor.dialog(), "联系人名字（留空使用配置名称）").setText("专属 AI");
+        editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        AiModelConfig saved = AiModelSettings.read(store).selected();
+        assertTrue(saved.messageContactEnabled);
+        assertEquals("专属 AI", saved.messageContactDisplayName());
+        assertEquals(avatar, saved.messageContactAvatar);
+
+        editor = new AiModelEditor(activity, store, saved, false, () -> { });
+        show(editor);
+        root = editor.dialog().getWindow().getDecorView();
+        ((CheckBox) root.findViewWithTag("ai.message_contact_enabled")).setChecked(false);
+        editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        saved = AiModelSettings.read(store).selected();
+        assertFalse(saved.messageContactEnabled);
+        assertEquals("专属 AI", saved.messageContactDisplayName());
+        assertEquals(avatar, saved.messageContactAvatar);
     }
 
     private void show(AiModelEditor value) {

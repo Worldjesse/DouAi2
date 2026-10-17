@@ -211,7 +211,7 @@ public final class ChatCompletionClient {
                                      String document, IntConsumer requestSent) throws Exception {
         if (Thread.currentThread().isInterrupted()) throw cancelled();
         config.validate(true);
-        if (prompt.trim().isEmpty() && images.isEmpty() && document.isEmpty()) throw new IllegalArgumentException("消息不能为空");
+        if (prompt.trim().isEmpty() && images.isEmpty() && document.trim().isEmpty()) throw new IllegalArgumentException("消息不能为空");
         if (prompt.length() > 4000) throw new IllegalArgumentException("消息最多 4000 个字符");
         if (document.length() > 32768) throw new IllegalArgumentException("附件文本最多 32768 个字符");
         String url = requestEndpoint(config, config.modelName);

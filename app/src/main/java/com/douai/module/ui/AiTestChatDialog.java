@@ -109,6 +109,10 @@ final class AiTestChatDialog extends Dialog {
     private final List<ChatImage> draftImages = new ArrayList<>();
     private final List<Document> draftDocuments = new ArrayList<>();
     private final boolean useMiuix;
+    private final String assistantName;
+    private ImageButton contactEdit;
+    private ImageView contactAvatar;
+    private Bitmap contactAvatarBitmap;
     private Dialog attachmentMenu;
     private Dialog memoryDialog;
     private final ArrayDeque<List<ChatImage>> visibleImages = new ArrayDeque<>();
@@ -135,29 +139,34 @@ final class AiTestChatDialog extends Dialog {
     }
 
     AiTestChatDialog(Context context, AiModelConfig config, boolean useMiuix) {
+        this(context, config, useMiuix, false);
+    }
+
+    AiTestChatDialog(Context context, AiModelConfig config, boolean useMiuix, boolean messageContact) {
         this(context, config, () -> {
             AiModelSettings snapshot = new AiModelSettings(Collections.singletonList(config), config.id);
             return new Session() {
                 private volatile ChatCompletionClient client;
                 private synchronized ChatCompletionClient client() {
-                    if (client == null) client = new ChatCompletionClient(new TestChatMemory(context, config),
-                            diagnostic -> android.util.Log.i("DouAi.ModelTest", diagnostic));
+                    if (client == null) client = new ChatCompletionClient(messageContact
+                            ? TestChatMemory.messageConversation(context, config) : new TestChatMemory(context, config),
+                            diagnostic -> android.util.Log.i(messageContact ? "DouAi.AiContact" : "DouAi.ModelTest", diagnostic));
                     return client;
                 }
                 @Override public String reply(String message, List<ChatImage> images) throws Exception {
-                    return client().reply("model-test", message, images, snapshot);
+                    return client().reply(messageContact ? "message-contact" : "model-test", message, images, snapshot);
                 }
                 @Override public void cancel() {
                     ChatCompletionClient active = client;
                     if (active != null) active.cancelCurrentRequest();
                 }
                 @Override public String reply(String message, List<ChatImage> images, String document) throws Exception {
-                    return client().reply("model-test", message, images, snapshot, "", true, document);
+                    return client().reply(messageContact ? "message-contact" : "model-test", message, images, snapshot, "", true, document);
                 }
                 @Override public void clear() { client().clearHistory(); }
                 @Override public List<TestChatMemory.Turn> savedTurns() { return client().savedTurns(); }
             };
-        }, Executors.newSingleThreadExecutor(), HISTORY_IO, useMiuix);
+        }, Executors.newSingleThreadExecutor(), HISTORY_IO, useMiuix, ChatImageLoader::thumbnail, messageContact);
     }
 
     AiTestChatDialog(Context context, AiModelConfig config, SessionFactory sessions,
@@ -183,6 +192,12 @@ final class AiTestChatDialog extends Dialog {
     AiTestChatDialog(Context baseContext, AiModelConfig config, SessionFactory sessions,
                      ExecutorService worker, ExecutorService historyWorker, boolean useMiuix,
                      ThumbnailLoader thumbnailLoader) {
+        this(baseContext, config, sessions, worker, historyWorker, useMiuix, thumbnailLoader, false);
+    }
+
+    AiTestChatDialog(Context baseContext, AiModelConfig config, SessionFactory sessions,
+                     ExecutorService worker, ExecutorService historyWorker, boolean useMiuix,
+                     ThumbnailLoader thumbnailLoader, boolean messageContact) {
         super(ModuleTheme.themedContext(baseContext), ModuleTheme.dialogTheme(baseContext));
         Context context = getContext();
         config.validate(true);
@@ -191,9 +206,10 @@ final class AiTestChatDialog extends Dialog {
         this.historyWorker = historyWorker;
         this.thumbnailLoader = thumbnailLoader;
         this.useMiuix = useMiuix;
+        assistantName = messageContact ? config.messageContactDisplayName() : "AI";
         session = sessions.create();
         requestWindowFeature(Window.FEATURE_NO_TITLE);
-        setTitle("测试对话");
+        setTitle(messageContact ? assistantName : "测试对话");
 
         LinearLayout root = new LinearLayout(context);
         root.setTag("ai.chat");
@@ -204,10 +220,33 @@ final class AiTestChatDialog extends Dialog {
 
         LinearLayout header = new LinearLayout(context);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = label("测试对话", 18, TEXT);
+        if (messageContact) {
+            ImageView avatar = new ImageView(context);
+            contactAvatar = avatar;
+            avatar.setTag("ai.chat.contact_avatar");
+            avatar.setContentDescription(assistantName + "头像");
+            Bitmap bitmap = AiContactAvatar.load(config.messageContactAvatar);
+            contactAvatarBitmap = bitmap;
+            if (bitmap == null) avatar.setImageResource(android.R.drawable.sym_def_app_icon);
+            else avatar.setImageBitmap(bitmap);
+            avatar.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            LinearLayout.LayoutParams avatarParams = new LinearLayout.LayoutParams(dp(36), dp(36));
+            avatarParams.rightMargin = dp(8);
+            header.addView(avatar, avatarParams);
+        }
+        TextView title = label(messageContact ? assistantName : "测试对话", 18, TEXT);
+        title.setTag("ai.chat.title");
+        title.setMaxLines(1);
+        title.setEllipsize(TextUtils.TruncateAt.END);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         header.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        if (messageContact) {
+            contactEdit = icon("修改联系人", "ai.chat.contact_edit", android.R.drawable.ic_menu_edit);
+            contactEdit.setVisibility(View.GONE);
+            header.addView(contactEdit, square());
+        }
         ImageButton memory = icon("查看一级提示词", "ai.chat.memory", android.R.drawable.ic_menu_info_details);
+        if (messageContact) memory.setVisibility(View.GONE);
         memory.setOnClickListener(ignored -> {
             TextView background = label(config.systemPrompt.isEmpty() ? "未设置" : config.systemPrompt, 14, TEXT);
             background.setTextIsSelectable(true);
@@ -336,6 +375,13 @@ final class AiTestChatDialog extends Dialog {
         if (window != null) sizeWindow(window.getDecorView().getRootWindowInsets());
     }
 
+    void setContactEditAction(Runnable action) {
+        if (contactEdit == null) return;
+        contactEdit.setVisibility(action == null ? View.GONE : View.VISIBLE);
+        contactEdit.setOnClickListener(action == null ? null : ignored -> action.run());
+        if (miuixSurface != null) miuixSurface.refresh();
+    }
+
     private void sizeWindow(WindowInsets insets) {
         Window window = getWindow();
         if (window == null) return;
@@ -388,7 +434,7 @@ final class AiTestChatDialog extends Dialog {
             visibleImageBytes += imageBytes;
             ChatMessage user = addMessage("我", prompt, true, images);
             for (Document document : documents) user.documentLabels.add(document.name);
-            answer = addMessage("AI", "正在回复…", false, Collections.emptyList());
+            answer = addMessage(assistantName, "正在回复…", false, Collections.emptyList());
         }
         answer.text = "正在回复…";
         answer.retry = false;
@@ -414,7 +460,7 @@ final class AiTestChatDialog extends Dialog {
                     turn.started = true;
                 }
                 if (clearBarrier != null) clearBarrier.get();
-                reply = active.reply(prompt, images, documentText(documents));
+                reply = active.reply(prompt, images, documentText(documents, images));
             }
             catch (InterruptedException cancelled) {
                 Thread.currentThread().interrupt();
@@ -510,6 +556,9 @@ final class AiTestChatDialog extends Dialog {
     private void dispose() {
         if (disposed) return;
         disposed = true;
+        if (contactAvatar != null) contactAvatar.setImageDrawable(null);
+        if (contactAvatarBitmap != null) contactAvatarBitmap.recycle();
+        contactAvatarBitmap = null;
         cancelRequest();
         cancelImageLoad();
         cancelRestore();
@@ -590,20 +639,15 @@ final class AiTestChatDialog extends Dialog {
         state.setText("正在读取附件…");
         updateSend();
         int ticket = ++imageGeneration;
+        int imageBudget = ChatCompletionClient.MAX_IMAGES_PER_MESSAGE - draftImages.size();
         imageLoad = worker.submit(() -> {
             LoadedMedia media = null;
             Exception error = null;
             try {
-                if (kind == AttachmentKind.IMAGE) {
-                    media = new LoadedMedia("图片", "", Collections.singletonList(ChatImageLoader.load(getContext(), uri)));
-                } else if (kind == AttachmentKind.VIDEO) {
-                    int frames = Math.max(1, ChatCompletionClient.MAX_IMAGES_PER_MESSAGE - draftImages.size());
-                    media = new LoadedMedia("视频", "视频仅提供抽样画面，不包含音频。",
-                            ChatMediaLoader.loadVideo(getContext(), uri, frames));
-                } else {
-                    ChatMediaLoader.Document document = ChatMediaLoader.loadDocument(getContext(), uri);
-                    media = new LoadedMedia(document.name, document.text, document.images);
-                }
+                ChatMediaLoader.Kind type = kind == AttachmentKind.IMAGE ? ChatMediaLoader.Kind.IMAGE
+                        : kind == AttachmentKind.VIDEO ? ChatMediaLoader.Kind.VIDEO : ChatMediaLoader.Kind.DOCUMENT;
+                ChatMediaLoader.Document document = ChatMediaLoader.loadAttachment(getContext(), uri, type, imageBudget);
+                media = new LoadedMedia(document.name, document.text, document.images);
             }
             catch (Exception failure) { error = failure; }
             catch (OutOfMemoryError failure) { error = new IllegalArgumentException("附件过大，无法读取"); }
@@ -635,19 +679,33 @@ final class AiTestChatDialog extends Dialog {
         Document document = new Document(name, text);
         List<Document> next = new ArrayList<>(draftDocuments);
         next.add(document);
-        if (documentText(next).length() > 32768) throw new IllegalArgumentException("附件文本总计不能超过 32768 个字符");
+        if (documentText(next, draftImages).length() > 32768) throw new IllegalArgumentException("附件文本总计不能超过 32768 个字符");
         draftDocuments.add(document);
         renderAttachments();
         updateSend();
     }
 
     private void addMedia(LoadedMedia media) {
-        if (draftImages.size() + media.images.size() > ChatCompletionClient.MAX_IMAGES_PER_MESSAGE)
+        addAttachment(media.name, media.text, media.images);
+    }
+
+    void addAttachment(String name, String text, List<ChatImage> images) {
+        if (disposed || busy) return;
+        if (draftImages.size() + images.size() > ChatCompletionClient.MAX_IMAGES_PER_MESSAGE)
             throw new IllegalArgumentException("每条消息最多包含 4 张图片或视频帧");
-        if (!media.text.isEmpty() && draftDocuments.size() >= 4)
+        if (!text.isEmpty() && draftDocuments.size() >= 4)
             throw new IllegalArgumentException("每条消息最多添加 4 个文件或视频说明");
-        if (!media.text.isEmpty()) addDocument(media.name, media.text);
-        draftImages.addAll(media.images);
+        if (!text.isEmpty()) {
+            Document document = new Document(name, text, images);
+            List<Document> next = new ArrayList<>(draftDocuments);
+            next.add(document);
+            List<ChatImage> combined = new ArrayList<>(draftImages);
+            combined.addAll(images);
+            if (documentText(next, combined).length() > 32768)
+                throw new IllegalArgumentException("附件文本总计不能超过 32768 个字符");
+            draftDocuments.add(document);
+        }
+        draftImages.addAll(images);
         renderAttachments();
         updateSend();
     }
@@ -659,7 +717,13 @@ final class AiTestChatDialog extends Dialog {
             item.setGravity(Gravity.CENTER_VERTICAL);
             item.addView(preview(image), new LinearLayout.LayoutParams(dp(64), dp(56)));
             ImageButton remove = icon("移除图片", "ai.chat.remove_image", android.R.drawable.ic_menu_close_clear_cancel);
-            remove.setOnClickListener(ignored -> { draftImages.remove(image); renderAttachments(); updateSend(); });
+            remove.setOnClickListener(ignored -> {
+                Document group = null;
+                for (Document document : draftDocuments) if (document.images.contains(image)) { group = document; break; }
+                if (group != null) { draftImages.removeAll(group.images); draftDocuments.remove(group); }
+                else draftImages.remove(image);
+                renderAttachments(); updateSend();
+            });
             item.addView(remove, square());
             attachments.addView(item);
         }
@@ -673,7 +737,10 @@ final class AiTestChatDialog extends Dialog {
             name.setMaxWidth(dp(160));
             item.addView(name);
             ImageButton remove = icon("移除文件", "ai.chat.remove_document", android.R.drawable.ic_menu_close_clear_cancel);
-            remove.setOnClickListener(ignored -> { draftDocuments.remove(document); renderAttachments(); updateSend(); });
+            remove.setOnClickListener(ignored -> {
+                draftDocuments.remove(document); draftImages.removeAll(document.images);
+                renderAttachments(); updateSend();
+            });
             item.addView(remove, square());
             attachments.addView(item);
         }
@@ -902,7 +969,7 @@ final class AiTestChatDialog extends Dialog {
                     if (!turn.document.isEmpty()) {
                         user.documentLabels.add("文本");
                     }
-                    addMessage("AI", turn.answer, false, Collections.emptyList());
+                    addMessage(assistantName, turn.answer, false, Collections.emptyList());
                 }
                 scrollToBottom();
                 updateSend();
@@ -920,11 +987,21 @@ final class AiTestChatDialog extends Dialog {
         for (Bitmap bitmap : images.values()) if (bitmap != null) bitmap.recycle();
     }
 
-    private static String documentText(List<Document> documents) {
+    private static String documentText(List<Document> documents, List<ChatImage> images) {
         StringBuilder text = new StringBuilder();
         for (Document document : documents) {
             if (text.length() > 0) text.append("\n\n");
-            text.append("[文件：").append(document.name).append("]\n").append(document.text);
+            text.append("[文件：").append(document.name).append("]\n");
+            if (!document.images.isEmpty()) {
+                List<String> positions = new ArrayList<>();
+                for (ChatImage image : document.images) {
+                    int position = images.indexOf(image);
+                    if (position >= 0) positions.add(String.valueOf(position + 1));
+                }
+                text.append("对应本条消息的图片序号（从 1 开始）：")
+                        .append(TextUtils.join("、", positions)).append("。\n");
+            }
+            text.append(document.text);
         }
         return text.toString();
     }
@@ -932,9 +1009,14 @@ final class AiTestChatDialog extends Dialog {
     private static final class Document {
         final String name;
         final String text;
+        final List<ChatImage> images;
         Document(String name, String text) {
+            this(name, text, Collections.emptyList());
+        }
+        Document(String name, String text, List<ChatImage> images) {
             this.name = name == null || name.isEmpty() ? "文件" : name;
             this.text = text == null ? "" : text;
+            this.images = new ArrayList<>(images);
         }
     }
 

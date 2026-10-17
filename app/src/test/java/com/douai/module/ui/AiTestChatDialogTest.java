@@ -295,6 +295,66 @@ public final class AiTestChatDialogTest {
         assertNull(findView("ai.chat.remove_document"));
     }
 
+    @Test public void removingVisualFileAlsoRemovesItsPagesAndSamplingDescription() {
+        ChatImage page = new ChatImage("image/png", new byte[]{1, 2, 3});
+        dialog.addAttachment("视频.mp4", "仅提供抽样画面，不包含音频。", Collections.singletonList(page));
+        assertTrue(send.isEnabled());
+        findView("ai.chat.remove_document").performClick();
+        assertFalse(send.isEnabled());
+        assertNull(findView("ai.chat.remove_image"));
+
+        dialog.addAttachment("报告.pdf", "第 1 页", Collections.singletonList(page));
+        findView("ai.chat.remove_image").performClick();
+        assertFalse(send.isEnabled());
+        assertNull(findView("ai.chat.remove_document"));
+    }
+
+    @Test public void visualFileDescriptionTracksItsImagePositionsAfterRemovingEarlierAttachments() {
+        ChatImage photo = image();
+        ChatImage frame = image();
+        dialog.addImage(photo);
+        dialog.addAttachment("视频.mp4", "抽样画面，不包含音频。", Collections.singletonList(frame));
+        findView("ai.chat.remove_image").performClick();
+        send.performClick();
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(Collections.singletonList(frame), sessions.get(0).images.get(0));
+        assertTrue(sessions.get(0).documents.get(0).contains("从 1 开始）：1。"));
+        assertTrue(sessions.get(0).documents.get(0).contains("抽样画面，不包含音频。"));
+    }
+
+    @Test public void messageContactUsesItsOwnIdentityAndExistingAttachmentComposer() throws Exception {
+        dialog.dismiss();
+        worker = new ManualExecutor();
+        historyWorker = new ManualExecutor();
+        AiModelConfig config = AiModelConfig.fromJson(new JSONObject()
+                .put("id", "contact-dialog").put("name", "模型配置")
+                .put("messageContactEnabled", true).put("messageContactName", "小助手")
+                .put("apiEndpoint", "https://example.com/v1").put("modelName", "test-model"));
+        dialog = new AiTestChatDialog(activity, config, () -> {
+            FakeSession session = new FakeSession();
+            sessions.add(session);
+            return session;
+        }, worker, historyWorker, false, image -> null, true);
+        dialog.show();
+        root = dialog.getWindow().getDecorView().findViewWithTag("ai.chat");
+        input = root.findViewWithTag("ai.chat.input");
+        send = root.findViewWithTag("ai.chat.send");
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals("小助手", text("ai.chat.title").getText().toString());
+        assertNotNull(root.findViewWithTag("ai.chat.contact_avatar"));
+        assertNotNull(root.findViewWithTag("ai.chat.attach"));
+        final boolean[] edited = {false};
+        dialog.setContactEditAction(() -> edited[0] = true);
+        root.findViewWithTag("ai.chat.contact_edit").performClick();
+        assertTrue(edited[0]);
+        submit("你好");
+        worker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals("模型回复", text("ai.chat.answer").getText().toString());
+    }
+
     @Test
     public void imageLimitRemovalAndClearUpdateSendAvailability() {
         for (int i = 0; i < 5; i++) dialog.addImage(image());
