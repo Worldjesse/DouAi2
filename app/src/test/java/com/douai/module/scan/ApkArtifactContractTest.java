@@ -93,6 +93,16 @@ public final class ApkArtifactContractTest {
 
     @Test public void releaseHostReflectionNamesAndScannerOpcodeTextSurviveR8() throws Exception {
         DexFacts release = dexFacts("DOUAI_VERIFY_RELEASE_APK");
+        assertNotNull("Native AI chat bridge was removed by R8",
+                release.classes.get("Lcom/douai/module/ui/HostNativeChatViews;"));
+        assertNotNull("Native album bridge was removed by R8",
+                release.classes.get("Lcom/douai/module/ui/HostMediaPicker;"));
+        assertNotNull("Global incoming-message mapper was removed by R8",
+                release.classes.get("Lcom/douai/module/feature/IncomingMessageSnapshot;"));
+        for (String type : release.classes.keySet()) {
+            assertFalse("A host test fixture was packaged: " + type,
+                    type.startsWith("Lcom/ss/android/ugc/aweme/") || type.startsWith("LX/"));
+        }
         for (String value : new String[]{"androidx.activity.result.ActivityResultCallback",
                 "androidx.activity.result.ActivityResultRegistry",
                 "androidx.activity.result.ActivityResultLauncher",
@@ -100,6 +110,10 @@ public final class ApkArtifactContractTest {
                 "androidx.activity.result.contract.ActivityResultContract",
                 "androidx.activity.result.contract.ActivityResultContracts$OpenDocument",
                 "androidx.activity.result.contract.ActivityResultContracts$StartActivityForResult",
+                "com.ss.android.ugc.aweme.im.business.mediaselectpage.choose.MediaChooseActivity",
+                "com.ss.android.ugc.aweme.im.business.mediaselectpage.choose.model.MediaChooseResult",
+                "com.ss.android.ugc.aweme.im.service.model.MediaModel", "X.131D",
+                "extra_choose_parameters", "extra_choose_result", "getSelectedList", "getFilePath", "LJIILJJIL",
                 "getActivityResultRegistry", "onActivityResult", "getResultCode", "getData",
                 "register", "launch", "unregister", "com.google.gson.Gson",
                 "const-string", "invoke-static"}) {

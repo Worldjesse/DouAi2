@@ -10,6 +10,7 @@ import android.graphics.Typeface;
 import android.graphics.Insets;
 import android.graphics.Rect;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.ColorDrawable;
 import android.os.Handler;
 import android.os.Build;
 import android.os.Looper;
@@ -73,6 +74,10 @@ final class AiTestChatDialog extends Dialog {
 
     interface ThumbnailLoader { Bitmap load(ChatImage image); }
 
+    interface MediaLoader {
+        LoadedMedia load(Context context, android.net.Uri uri, AttachmentKind kind, int imageBudget) throws Exception;
+    }
+
     private static final int TEXT = Color.rgb(31, 39, 45);
     private static final int MUTED = Color.rgb(105, 115, 122);
     private static final int ACCENT = Color.rgb(0, 151, 136);
@@ -95,19 +100,21 @@ final class AiTestChatDialog extends Dialog {
     private final ExecutorService worker;
     private final ExecutorService historyWorker;
     private final ThumbnailLoader thumbnailLoader;
+    private final MediaLoader mediaLoader;
     private final Map<ChatImage, Bitmap> thumbnails = new IdentityHashMap<>();
     private final List<Future<?>> thumbnailLoads = new ArrayList<>();
     private final ListView messages;
     private final List<ChatMessage> transcript = new ArrayList<>();
     private final TranscriptRows messageRows = new TranscriptRows();
     private final EditText input;
-    private final ImageButton send;
+    private final ImageView send;
     private final ImageButton attach;
     private final TextView state;
     private final LinearLayout attachments;
     private final HorizontalScrollView attachmentScroll;
     private final List<ChatImage> draftImages = new ArrayList<>();
     private final List<Document> draftDocuments = new ArrayList<>();
+    private final List<PendingAttachment> draftPending = new ArrayList<>();
     private final boolean useMiuix;
     private final String assistantName;
     private ImageButton contactEdit;
@@ -115,14 +122,18 @@ final class AiTestChatDialog extends Dialog {
     private Bitmap contactAvatarBitmap;
     private Dialog attachmentMenu;
     private Dialog memoryDialog;
+    private Dialog localMenu;
+    private Runnable contactEditAction;
+    private HostSpeechInput speechInput;
+    private HostAccountAvatar accountAvatar;
+    private ImageView profileAvatar;
+    private HorizontalScrollView quickReplies;
     private final ArrayDeque<List<ChatImage>> visibleImages = new ArrayDeque<>();
     private int visibleImageBytes;
-    private Future<?> imageLoad;
     private Future<?> restoreLoad;
     private Future<?> historyClear;
     private HostImagePicker picker;
-    private int imageGeneration;
-    private boolean loadingImage;
+    private HostMediaPicker mediaPicker;
     private Session session;
     private Future<?> request;
     private RequestTurn pending;
@@ -133,6 +144,9 @@ final class AiTestChatDialog extends Dialog {
     private boolean busy;
     private boolean disposed;
     private MiuixChatEditorSurface miuixSurface;
+    private final HostNativeChatViews nativeViews;
+    private int[] nativePadding;
+    private boolean nativeFailure;
 
     AiTestChatDialog(Context context, AiModelConfig config) {
         this(context, config, true);
@@ -143,6 +157,11 @@ final class AiTestChatDialog extends Dialog {
     }
 
     AiTestChatDialog(Context context, AiModelConfig config, boolean useMiuix, boolean messageContact) {
+        this(context, config, useMiuix, messageContact, null);
+    }
+
+    AiTestChatDialog(Context context, AiModelConfig config, boolean useMiuix, boolean messageContact,
+                     HostNativeChatViews nativeViews) {
         this(context, config, () -> {
             AiModelSettings snapshot = new AiModelSettings(Collections.singletonList(config), config.id);
             return new Session() {
@@ -166,7 +185,8 @@ final class AiTestChatDialog extends Dialog {
                 @Override public void clear() { client().clearHistory(); }
                 @Override public List<TestChatMemory.Turn> savedTurns() { return client().savedTurns(); }
             };
-        }, Executors.newSingleThreadExecutor(), HISTORY_IO, useMiuix, ChatImageLoader::thumbnail, messageContact);
+        }, Executors.newSingleThreadExecutor(), HISTORY_IO, useMiuix, ChatImageLoader::thumbnail,
+                messageContact, nativeViews);
     }
 
     AiTestChatDialog(Context context, AiModelConfig config, SessionFactory sessions,
@@ -198,7 +218,24 @@ final class AiTestChatDialog extends Dialog {
     AiTestChatDialog(Context baseContext, AiModelConfig config, SessionFactory sessions,
                      ExecutorService worker, ExecutorService historyWorker, boolean useMiuix,
                      ThumbnailLoader thumbnailLoader, boolean messageContact) {
-        super(ModuleTheme.themedContext(baseContext), ModuleTheme.dialogTheme(baseContext));
+        this(baseContext, config, sessions, worker, historyWorker, useMiuix, thumbnailLoader,
+                messageContact, null);
+    }
+
+    AiTestChatDialog(Context baseContext, AiModelConfig config, SessionFactory sessions,
+                     ExecutorService worker, ExecutorService historyWorker, boolean useMiuix,
+                     ThumbnailLoader thumbnailLoader, boolean messageContact, HostNativeChatViews nativeViews) {
+        this(baseContext, config, sessions, worker, historyWorker, useMiuix, thumbnailLoader,
+                messageContact, nativeViews, AiTestChatDialog::readMedia);
+    }
+
+    AiTestChatDialog(Context baseContext, AiModelConfig config, SessionFactory sessions,
+                     ExecutorService worker, ExecutorService historyWorker, boolean useMiuix,
+                     ThumbnailLoader thumbnailLoader, boolean messageContact, HostNativeChatViews nativeViews,
+                     MediaLoader mediaLoader) {
+        super(nativeViews == null ? ModuleTheme.themedContext(baseContext) : baseContext,
+                nativeViews == null ? ModuleTheme.dialogTheme(baseContext) : android.R.style.Theme_DeviceDefault_NoActionBar);
+        this.mediaLoader = mediaLoader;
         Context context = getContext();
         config.validate(true);
         this.sessions = sessions;
@@ -206,6 +243,7 @@ final class AiTestChatDialog extends Dialog {
         this.historyWorker = historyWorker;
         this.thumbnailLoader = thumbnailLoader;
         this.useMiuix = useMiuix;
+        this.nativeViews = nativeViews;
         assistantName = messageContact ? config.messageContactDisplayName() : "AI";
         session = sessions.create();
         requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -287,6 +325,22 @@ final class AiTestChatDialog extends Dialog {
         messages.setClipToPadding(false);
         messages.setPadding(dp(8), dp(4), dp(8), dp(4));
         messages.setBackground(background(CANVAS, dp(12), LINE));
+        if (nativeViews != null) {
+            try {
+                HostNativeChatViews.ProfileHeader profile = nativeViews.createProfileHeader(messages);
+                profileAvatar = profile.avatar;
+                profile.avatar.setTag("ai.chat.profile_avatar");
+                profile.avatar.setContentDescription(assistantName + "头像");
+                if (contactAvatarBitmap == null) profile.avatar.setImageResource(android.R.drawable.sym_def_app_icon);
+                else profile.avatar.setImageBitmap(contactAvatarBitmap);
+                profile.name.setText(assistantName);
+                profile.name.setTag("ai.chat.profile_name");
+                profile.view.setTag("ai.chat.profile");
+                messages.addHeaderView(profile.view, null, false);
+            } catch (ReflectiveOperationException failure) {
+                throw new IllegalStateException("原生联系人资料区域不可用", failure);
+            }
+        }
         messages.setAdapter(messageRows);
         LinearLayout.LayoutParams transcriptParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1);
@@ -311,29 +365,35 @@ final class AiTestChatDialog extends Dialog {
         attach = icon("添加附件", "ai.chat.attach", android.R.drawable.ic_menu_gallery);
         attach.setOnClickListener(ignored -> chooseAttachment());
         composer.addView(attach, square());
-        input = new EditText(context);
+        input = nativeViews == null ? new EditText(context) : nativeViews.input;
         input.setTag("ai.chat.input");
         input.setContentDescription("消息");
         input.setHint("输入消息");
-        input.setTextColor(TEXT);
-        input.setTextSize(15);
+        if (nativeViews == null) {
+            input.setTextColor(TEXT);
+            input.setTextSize(15);
+        }
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
                 | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         input.setMinLines(1);
-        input.setPadding(dp(12), dp(10), dp(12), dp(10));
-        input.setBackground(background(CANVAS, dp(14), LINE));
+        if (nativeViews == null) {
+            input.setPadding(dp(12), dp(10), dp(12), dp(10));
+            input.setBackground(background(CANVAS, dp(14), LINE));
+        }
         android.util.DisplayMetrics metrics = context.getResources().getDisplayMetrics();
         input.setMaxLines(metrics.heightPixels / metrics.density < 480 ? 2 : 4);
         input.setFilters(new InputFilter[]{new InputFilter.LengthFilter(4000)});
         input.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI);
-        composer.addView(input, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        send = icon("发送", "ai.chat.send", android.R.drawable.ic_menu_send);
+        if (nativeViews == null) composer.addView(input,
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        send = nativeViews == null ? icon("发送", "ai.chat.send", android.R.drawable.ic_menu_send) : nativeViews.send;
+        send.setTag("ai.chat.send");
         send.setOnClickListener(ignored -> {
             if (busy) stopRequest();
             else sendMessage(input.getText().toString().trim(), new ArrayList<>(draftImages),
                     new ArrayList<>(draftDocuments), null);
         });
-        composer.addView(send, square());
+        if (nativeViews == null) composer.addView(send, square());
         LinearLayout.LayoutParams composerParams = wrap();
         composerParams.topMargin = dp(8);
         root.addView(composer, composerParams);
@@ -343,29 +403,133 @@ final class AiTestChatDialog extends Dialog {
             @Override public void afterTextChanged(Editable s) { }
         });
         restoreConversation();
-        ModuleTheme.bind(root);
         Activity activity = ownerActivity();
-        if (useMiuix && activity != null && !activity.isFinishing() && !activity.isDestroyed()) {
+        if (nativeViews != null) {
+            bindNativeConversation();
+            setContentView(nativeViews.root);
+        } else if (useMiuix && activity != null && !activity.isFinishing() && !activity.isDestroyed()) {
+            ModuleTheme.bind(root);
             setOwnerActivity(activity);
             miuixSurface = new MiuixChatEditorSurface(activity, root, this::dismiss);
             setContentView(miuixSurface.getView());
-        } else setContentView(root);
+        } else {
+            ModuleTheme.bind(root);
+            setContentView(root);
+        }
         Window window = getWindow();
         if (window != null) {
             window.setBackgroundDrawableResource(android.R.color.transparent);
-            window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            if (nativeViews == null) window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
             WindowManager.LayoutParams attributes = window.getAttributes();
-            attributes.dimAmount = 0.42f;
+            attributes.dimAmount = nativeViews == null ? 0.42f : 0;
             window.setAttributes(attributes);
             window.setGravity(Gravity.CENTER);
             window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
                     | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+            if (nativeViews != null && Build.VERSION.SDK_INT >= 30) {
+                window.setDecorFitsSystemWindows(false);
+                window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+                        | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+            }
+            if (nativeViews != null && nativeViews.root.getBackground() instanceof ColorDrawable) {
+                int color = ((ColorDrawable) nativeViews.root.getBackground()).getColor();
+                boolean light = Color.red(color) * 0.2126 + Color.green(color) * 0.7152
+                        + Color.blue(color) * 0.0722 > 128;
+                window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+                window.setStatusBarColor(Build.VERSION.SDK_INT >= 30 ? Color.TRANSPARENT : color);
+                window.setNavigationBarColor(Build.VERSION.SDK_INT >= 30 ? Color.TRANSPARENT : color);
+                if (Build.VERSION.SDK_INT >= 30 && window.getInsetsController() != null) {
+                    int appearance = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                            | android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                    window.getInsetsController().setSystemBarsAppearance(light ? appearance : 0, appearance);
+                } else {
+                    window.getDecorView().setSystemUiVisibility(light ? View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                            | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR : 0);
+                }
+            }
             window.getDecorView().setOnApplyWindowInsetsListener((view, insets) -> {
                 sizeWindow(insets);
                 return insets;
             });
         }
         updateSend();
+    }
+
+    /** Host factories create views only; the existing AI session owns every send and history update. */
+    private void bindNativeConversation() {
+        nativePadding = new int[]{nativeViews.root.getPaddingLeft(), nativeViews.root.getPaddingTop(),
+                nativeViews.root.getPaddingRight(), nativeViews.root.getPaddingBottom()};
+        nativeViews.root.setTag("ai.chat");
+        nativeViews.title.setText(assistantName);
+        nativeViews.title.setTag("ai.chat.title");
+        nativeViews.back.setContentDescription("返回消息");
+        nativeViews.back.setTag("ai.chat.close");
+        nativeViews.back.setOnClickListener(ignored -> dismiss());
+        if (nativeViews.avatar != null) {
+            nativeViews.avatar.setTag("ai.chat.contact_avatar");
+            nativeViews.avatar.setContentDescription(assistantName + "头像");
+            if (contactAvatarBitmap == null) nativeViews.avatar.setImageResource(android.R.drawable.sym_def_app_icon);
+            else nativeViews.avatar.setImageBitmap(contactAvatarBitmap);
+            nativeViews.avatar.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        }
+        accountAvatar = HostAccountAvatar.read(nativeViews.root.getContext());
+        nativeViews.more.setTag("ai.chat.more");
+        nativeViews.more.setOnClickListener(ignored -> showConversationActions());
+        nativeViews.tools.setTag("ai.chat.tools");
+        nativeViews.tools.setOnClickListener(ignored -> showLocalTools());
+        nativeViews.plus.setTag("ai.chat.attach");
+        nativeViews.plus.setOnClickListener(ignored -> chooseAttachment());
+        nativeViews.emoji.setTag("ai.chat.emoji");
+        nativeViews.emoji.setOnClickListener(ignored -> showEmojiChoices());
+        nativeViews.voice.setTag("ai.chat.voice");
+        nativeViews.voice.setOnClickListener(ignored -> startSpeechInput());
+        LinearLayout content = new LinearLayout(nativeViews.root.getContext());
+        content.setOrientation(LinearLayout.VERTICAL);
+        messages.setBackgroundColor(Color.TRANSPARENT);
+        messages.setPadding(dp(12), 0, dp(12), dp(8));
+        move(state, content, wrap());
+        move(messages, content, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        move(attachmentScroll, content, wrap());
+        quickReplies = new HorizontalScrollView(nativeViews.root.getContext());
+        quickReplies.setTag("ai.chat.quick_replies");
+        quickReplies.setHorizontalScrollBarEnabled(false);
+        quickReplies.setClipToPadding(false);
+        quickReplies.setPadding(dp(8), 0, dp(8), dp(8));
+        LinearLayout quickRow = new LinearLayout(nativeViews.root.getContext());
+        quickRow.setGravity(Gravity.CENTER_VERTICAL);
+        String[] quickLabels = {"🌞 早上好", "😘 比心", "😴 困", "👍 赞", "🤦 捂脸"};
+        String[] quickText = {"早上好 ☀️", "比心 ❤️", "😴", "👍", "🤦"};
+        for (int index = 0; index < quickLabels.length; index++) {
+            int selected = index;
+            try {
+                View action = nativeViews.createQuickAction(quickRow, quickLabels[index]);
+                action.setTag("ai.chat.quick." + index);
+                action.setContentDescription(quickLabels[index]);
+                action.setOnClickListener(ignored -> insertDraft(quickText[selected]));
+                ViewGroup.LayoutParams nativeParams = action.getLayoutParams();
+                LinearLayout.LayoutParams params = nativeParams instanceof ViewGroup.MarginLayoutParams
+                        ? new LinearLayout.LayoutParams((ViewGroup.MarginLayoutParams) nativeParams)
+                        : nativeParams != null ? new LinearLayout.LayoutParams(nativeParams)
+                        : new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(32));
+                params.setMarginEnd(dp(8));
+                quickRow.addView(action, params);
+            } catch (ReflectiveOperationException failure) {
+                throw new IllegalStateException("原生快捷回复不可用", failure);
+            }
+        }
+        quickReplies.addView(quickRow);
+        content.addView(quickReplies, wrap());
+        nativeViews.messageContainer.addView(content, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        nativeViews.root.setFitsSystemWindows(Build.VERSION.SDK_INT < 30);
+        // Theme only module-owned status/attachment content. Host controls retain their native palette.
+        ModuleTheme.bind(state);
+        ModuleTheme.bind(attachmentScroll);
+    }
+
+    private static void move(View view, ViewGroup parent, ViewGroup.LayoutParams params) {
+        if (view.getParent() instanceof ViewGroup) ((ViewGroup) view.getParent()).removeView(view);
+        parent.addView(view, params);
     }
 
     @Override protected void onStart() {
@@ -376,6 +540,8 @@ final class AiTestChatDialog extends Dialog {
     }
 
     void setContactEditAction(Runnable action) {
+        contactEditAction = action;
+        if (nativeViews != null) return;
         if (contactEdit == null) return;
         contactEdit.setVisibility(action == null ? View.GONE : View.VISIBLE);
         contactEdit.setOnClickListener(action == null ? null : ignored -> action.run());
@@ -393,6 +559,18 @@ final class AiTestChatDialog extends Dialog {
             Rect bounds = owner.getWindowManager().getCurrentWindowMetrics().getBounds();
             hostWidth = bounds.width();
             hostHeight = bounds.height();
+        }
+        if (nativeViews != null) {
+            if (insets != null && Build.VERSION.SDK_INT >= 30) {
+                Insets safe = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout()
+                        | WindowInsets.Type.ime());
+                nativeViews.root.setPadding(nativePadding[0] + safe.left, nativePadding[1] + safe.top,
+                        nativePadding[2] + safe.right, nativePadding[3] + safe.bottom);
+            }
+            window.setGravity(Gravity.FILL);
+            WindowManager.LayoutParams attributes = window.getAttributes();
+            if (attributes.width != hostWidth || attributes.height != hostHeight) window.setLayout(hostWidth, hostHeight);
+            return;
         }
         int horizontal = 0;
         int vertical = 0;
@@ -416,39 +594,36 @@ final class AiTestChatDialog extends Dialog {
     }
 
     private void sendMessage(String prompt, List<ChatImage> images, List<Document> documents, ChatMessage retryAnswer) {
-        if (disposed || busy || loadingImage
-                || (prompt.isEmpty() && images.isEmpty() && documents.isEmpty())) return;
+        List<PendingAttachment> selected = new ArrayList<>(retryAnswer == null ? draftPending : retryAnswer.retryPending);
+        if (disposed || busy
+                || (prompt.isEmpty() && images.isEmpty() && documents.isEmpty() && selected.isEmpty())) return;
         cancelRestore();
         ChatMessage answer = retryAnswer;
         if (answer == null) {
-            int imageBytes = imageBytes(images);
-            while (!visibleImages.isEmpty() && (visibleImages.size() >= MAX_VISIBLE_TURNS
-                    || visibleImageBytes + imageBytes > MAX_VISIBLE_IMAGE_BYTES)) {
-                List<ChatImage> removed = visibleImages.removeFirst();
-                visibleImageBytes -= imageBytes(removed);
-                for (ChatImage image : removed) thumbnails.remove(image);
-                transcript.remove(0);
-                transcript.remove(0);
-            }
-            visibleImages.addLast(images);
-            visibleImageBytes += imageBytes;
             ChatMessage user = addMessage("我", prompt, true, images);
             for (Document document : documents) user.documentLabels.add(document.name);
+            for (PendingAttachment attachment : selected) user.documentLabels.add(attachment.name);
+            visibleImages.addLast(user.images);
+            visibleImageBytes += imageBytes(user.images);
+            trimVisibleHistory();
             answer = addMessage(assistantName, "正在回复…", false, Collections.emptyList());
+            answer.sourceUser = user;
         }
-        answer.text = "正在回复…";
+        answer.text = selected.isEmpty() ? "正在回复…" : "正在读取附件…";
         answer.retry = false;
         messageRows.notifyDataSetChanged();
         if (prompt.equals(input.getText().toString().trim())) input.setText("");
-        if (draftImages.equals(images)) { draftImages.clear(); renderAttachments(); }
-        if (draftDocuments.equals(documents)) { draftDocuments.clear(); renderAttachments(); }
+        if (draftImages.equals(images)) draftImages.clear();
+        if (draftDocuments.equals(documents)) draftDocuments.clear();
+        draftPending.removeAll(selected);
+        renderAttachments();
         int ticket = ++generation;
         Session active = session;
         Future<?> clearBarrier = historyClear;
-        RequestTurn turn = new RequestTurn(ticket, prompt, images, documents, answer);
+        RequestTurn turn = new RequestTurn(ticket, prompt, images, documents, selected, answer);
         pending = turn;
         busy = true;
-        state.setText("正在回复…");
+        state.setText(answer.text);
         updateSend();
         scrollToBottom();
         request = worker.submit(() -> {
@@ -460,17 +635,110 @@ final class AiTestChatDialog extends Dialog {
                     turn.started = true;
                 }
                 if (clearBarrier != null) clearBarrier.get();
-                reply = active.reply(prompt, images, documentText(documents, images));
+                turn.checkStopped();
+                if (!selected.isEmpty()) {
+                    turn.reading = true;
+                    prepareMedia(turn);
+                    turn.reading = false;
+                    main.post(() -> showPreparedMedia(turn));
+                }
+                turn.checkStopped();
+                reply = active.reply(prompt, turn.preparedImages, documentText(turn.preparedDocuments, turn.preparedImages));
             }
             catch (InterruptedException cancelled) {
                 Thread.currentThread().interrupt();
                 error = cancelled;
             }
             catch (Exception failure) { error = failure; }
+            catch (OutOfMemoryError failure) { error = new IllegalArgumentException("附件过大，无法读取"); }
             String result = reply;
             Exception failure = error;
             main.post(() -> finishRequest(turn, result, failure));
         });
+    }
+
+    private void prepareMedia(RequestTurn turn) throws Exception {
+        List<LoadedMedia> loaded = new ArrayList<>();
+        boolean[] reserveSlots = new boolean[turn.attachments.size()];
+        for (int index = 0; index < reserveSlots.length; index++) {
+            turn.checkStopped();
+            reserveSlots[index] = turn.attachments.get(index).mayNeedImages(getContext());
+        }
+        for (int index = 0; index < turn.attachments.size(); index++) {
+            turn.checkStopped();
+            PendingAttachment attachment = turn.attachments.get(index);
+            int remaining = ChatCompletionClient.MAX_IMAGES_PER_MESSAGE - turn.preparedImages.size();
+            int reserve = 0;
+            for (int next = index + 1; next < turn.attachments.size(); next++) {
+                if (reserveSlots[next]) reserve++;
+            }
+            int budget = Math.max(0, remaining - reserve);
+            if (attachment.needsImages() && budget == 0)
+                throw new IllegalArgumentException("每条消息最多包含 4 张图片或视频抽样画面，请减少附件");
+            LoadedMedia media = attachment.prepared;
+            // A restored draft can gain another image after a provider failure.
+            // Re-read only when the cached sampling no longer fits its new budget.
+            if (media != null && media.images.size() > budget) media = null;
+            if (media == null) {
+                long started = android.os.SystemClock.elapsedRealtime();
+                boolean completed = false;
+                android.util.Log.i("DouAi.ChatAttachment", "read_started kind=" + attachment.kind + " imageBudget=" + budget);
+                try {
+                    media = mediaLoader.load(getContext(), attachment.uri, attachment.kind, budget);
+                    completed = media != null;
+                } finally {
+                    android.util.Log.i("DouAi.ChatAttachment", "read_finished kind=" + attachment.kind
+                            + " completed=" + completed + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started));
+                }
+            }
+            turn.checkStopped();
+            if (media == null) throw new IllegalArgumentException("附件读取结果为空");
+            if (media.images.size() > budget)
+                throw new IllegalArgumentException("每条消息最多包含 4 张图片或视频抽样画面，请减少附件");
+            turn.preparedImages.addAll(media.images);
+            if (media.text != null && !media.text.isEmpty()) {
+                if (turn.preparedDocuments.size() >= 4)
+                    throw new IllegalArgumentException("每条消息最多添加 4 个文件或视频说明");
+                turn.preparedDocuments.add(new Document(media.name, media.text, media.images));
+            }
+            if (documentText(turn.preparedDocuments, turn.preparedImages).length() > 32768)
+                throw new IllegalArgumentException("附件文本总计不能超过 32768 个字符");
+            loaded.add(media);
+        }
+        // Cache only a complete preparation. Provider retries can reuse it without another video read.
+        for (int index = 0; index < loaded.size(); index++) turn.attachments.get(index).prepared = loaded.get(index);
+    }
+
+    private void showPreparedMedia(RequestTurn turn) {
+        if (disposed || turn.ticket != generation) return;
+        ChatMessage user = turn.answer.sourceUser;
+        if (user != null && transcript.contains(user)) {
+            visibleImageBytes -= imageBytes(user.images);
+            user.images.clear();
+            user.images.addAll(turn.preparedImages);
+            visibleImageBytes += imageBytes(user.images);
+            user.documentLabels.clear();
+            for (Document document : turn.preparedDocuments) user.documentLabels.add(document.name);
+            // Image selections have no text document, so their preview is the sent attachment.
+            trimVisibleHistory();
+        }
+        if (busy && pending == turn && !turn.stopRequested) {
+            turn.answer.text = "正在回复…";
+            state.setText("正在回复…");
+        }
+        messageRows.notifyDataSetChanged();
+        updateSend();
+    }
+
+    private void trimVisibleHistory() {
+        while (visibleImages.size() > 1 && (visibleImages.size() > MAX_VISIBLE_TURNS
+                || visibleImageBytes > MAX_VISIBLE_IMAGE_BYTES)) {
+            List<ChatImage> removed = visibleImages.removeFirst();
+            visibleImageBytes -= imageBytes(removed);
+            transcript.remove(0);
+            transcript.remove(0);
+        }
+        evictUnusedThumbnails();
     }
 
     private void finishRequest(RequestTurn turn, String reply, Exception failure) {
@@ -485,11 +753,15 @@ final class AiTestChatDialog extends Dialog {
             answer.color = TEXT;
             state.setText("");
         } else {
-            answer.text = turn.stopRequested ? "已停止" : errorMessage(failure);
+            answer.text = turn.stopRequested ? "已停止" : turn.reading
+                    ? "附件读取失败：" + failureDetail(failure) : errorMessage(failure);
             answer.color = turn.stopRequested ? MUTED : ERROR;
-            state.setText(turn.stopRequested ? "已停止" : "发送失败");
+            state.setText(turn.stopRequested ? "已停止" : turn.reading ? "附件读取失败" : "发送失败");
             restoreDraft(turn.prompt, turn.images, turn.documents);
             addRetry(answer, turn.prompt, turn.images, turn.documents);
+            if (draftPending.isEmpty()) draftPending.addAll(turn.attachments);
+            answer.retryPending = new ArrayList<>(turn.attachments);
+            renderAttachments();
         }
         messageRows.notifyDataSetChanged();
         updateSend();
@@ -510,7 +782,7 @@ final class AiTestChatDialog extends Dialog {
     private void clearConversation() {
         if (disposed) return;
         cancelRequest();
-        cancelImageLoad();
+        closePickers();
         cancelRestore();
         cancelThumbnails();
         Session previous = session;
@@ -521,6 +793,7 @@ final class AiTestChatDialog extends Dialog {
         visibleImageBytes = 0;
         draftImages.clear();
         draftDocuments.clear();
+        draftPending.clear();
         renderAttachments();
         int ticket = ++clearGeneration;
         state.setText("");
@@ -557,14 +830,22 @@ final class AiTestChatDialog extends Dialog {
         if (disposed) return;
         disposed = true;
         if (contactAvatar != null) contactAvatar.setImageDrawable(null);
+        if (nativeViews != null && nativeViews.avatar != null) nativeViews.avatar.setImageDrawable(null);
+        if (profileAvatar != null) profileAvatar.setImageDrawable(null);
+        if (nativeViews != null) {
+            clearMessageAvatars(nativeViews.root);
+            messages.setAdapter(null);
+        }
         if (contactAvatarBitmap != null) contactAvatarBitmap.recycle();
         contactAvatarBitmap = null;
         cancelRequest();
-        cancelImageLoad();
+        closePickers();
         cancelRestore();
         cancelThumbnails();
         if (attachmentMenu != null) attachmentMenu.dismiss();
         if (memoryDialog != null) memoryDialog.dismiss();
+        if (localMenu != null) localMenu.dismiss();
+        if (speechInput != null) speechInput.close();
         worker.shutdownNow();
         if (miuixSurface != null) {
             miuixSurface.close();
@@ -597,20 +878,83 @@ final class AiTestChatDialog extends Dialog {
 
     private void updateSend() {
         state.setVisibility(TextUtils.isEmpty(state.getText()) ? View.GONE : View.VISIBLE);
-        send.setImageResource(busy ? android.R.drawable.ic_menu_close_clear_cancel : android.R.drawable.ic_menu_send);
+        boolean hasContent = !input.getText().toString().trim().isEmpty() || !draftImages.isEmpty()
+                || !draftDocuments.isEmpty() || !draftPending.isEmpty();
+        if (nativeViews == null) send.setImageResource(busy ? android.R.drawable.ic_menu_close_clear_cancel : android.R.drawable.ic_menu_send);
+        else nativeViews.updateComposer(busy, hasContent);
         send.setContentDescription(busy ? "停止请求" : "发送");
         send.setTooltipText(busy ? "停止请求" : "发送");
-        send.setEnabled(!disposed && !loadingImage && (busy ? !pending.stopRequested
-                : !input.getText().toString().trim().isEmpty() || !draftImages.isEmpty() || !draftDocuments.isEmpty()));
+        send.setEnabled(!disposed && (busy ? !pending.stopRequested
+                : hasContent));
         send.setAlpha(send.isEnabled() ? 1f : 0.4f);
-        attach.setEnabled(!disposed && !busy && !loadingImage
+        attach.setEnabled(!disposed && !busy && draftPending.size() < 4
                 && (draftImages.size() < ChatCompletionClient.MAX_IMAGES_PER_MESSAGE || draftDocuments.size() < 4));
         attach.setAlpha(attach.isEnabled() ? 1f : 0.4f);
+        if (nativeViews != null) {
+            nativeViews.plus.setEnabled(attach.isEnabled());
+            nativeViews.voice.setEnabled(!disposed && !busy && speechInput == null);
+            nativeViews.emoji.setEnabled(!disposed);
+            if (quickReplies != null) quickReplies.setVisibility(!busy && !hasContent ? View.VISIBLE : View.GONE);
+        }
         if (miuixSurface != null) miuixSurface.refresh();
     }
 
+    private void showConversationActions() {
+        if (disposed) return;
+        boolean editable = contactEditAction != null;
+        if (localMenu != null) localMenu.dismiss();
+        localMenu = new MiuixDialogBuilder(getContext(), useMiuix).setTitle(assistantName)
+                .setItems(editable ? new String[]{"修改联系人", "清空聊天记录"} : new String[]{"清空聊天记录"},
+                        (child, which) -> {
+                            if (editable && which == 0) contactEditAction.run();
+                            else clearConversation();
+                        }).setNegativeButton("取消", null).create();
+        localMenu.show();
+    }
+
+    private void showLocalTools() {
+        if (disposed) return;
+        if (localMenu != null) localMenu.dismiss();
+        localMenu = new MiuixDialogBuilder(getContext(), useMiuix).setTitle("聊天工具")
+                .setItems(new String[]{"添加附件", "联系人设置"}, (child, which) -> {
+                    if (which == 0) chooseAttachment();
+                    else showConversationActions();
+                }).setNegativeButton("取消", null).create();
+        localMenu.show();
+    }
+
+    private void showEmojiChoices() {
+        if (disposed) return;
+        String[] emoji = {"😀", "😊", "😂", "❤️", "👍", "🙏", "😴", "🤦"};
+        if (localMenu != null) localMenu.dismiss();
+        localMenu = new MiuixDialogBuilder(getContext(), useMiuix).setTitle("表情")
+                .setItems(emoji, (child, which) -> insertDraft(emoji[which]))
+                .setNegativeButton("取消", null).create();
+        localMenu.show();
+    }
+
+    private void insertDraft(String value) {
+        int start = Math.max(0, input.getSelectionStart());
+        int end = Math.max(start, input.getSelectionEnd());
+        input.getText().replace(start, end, value);
+        input.requestFocus();
+    }
+
+    private void startSpeechInput() {
+        if (disposed || busy || speechInput != null) return;
+        speechInput = HostSpeechInput.launch(ownerActivity(), text -> {
+            speechInput = null;
+            if (disposed) return;
+            if (text != null && !text.isEmpty()) insertDraft(text);
+            updateSend();
+        });
+        if (speechInput == null) android.widget.Toast.makeText(getContext(), "当前设备没有可用的系统语音输入",
+                android.widget.Toast.LENGTH_SHORT).show();
+        updateSend();
+    }
+
     private void chooseAttachment() {
-        if (disposed || busy || loadingImage) return;
+        if (disposed || busy) return;
         attachmentMenu = new MiuixDialogBuilder(getContext(), useMiuix).setTitle("添加附件")
                 .setItems(new String[]{"图片", "视频", "文件"}, (dialog, which) -> {
                     attachmentMenu = null;
@@ -620,8 +964,24 @@ final class AiTestChatDialog extends Dialog {
     }
 
     private void selectAttachment(AttachmentKind kind) {
-        if (disposed || busy || loadingImage) return;
+        if (disposed || busy) return;
         if (picker != null) picker.close();
+        if (mediaPicker != null) mediaPicker.close();
+        Activity activity = ownerActivity();
+        if (kind != AttachmentKind.FILE && activity != null
+                && "com.ss.android.ugc.aweme".equals(activity.getPackageName())) {
+            mediaPicker = HostMediaPicker.launch(activity, kind == AttachmentKind.VIDEO, selected -> {
+                mediaPicker = null;
+                if (disposed || selected == null) return;
+                for (HostMediaPicker.Selection media : selected) {
+                    stageMedia(media.uri, media.video ? AttachmentKind.VIDEO : AttachmentKind.IMAGE, media.name);
+                }
+                updateSend();
+            });
+            if (mediaPicker == null) state.setText("无法打开抖音相册，请确认当前抖音版本受支持");
+            updateSend();
+            return;
+        }
         String[] mime = kind == AttachmentKind.IMAGE ? new String[]{"image/*"}
                 : kind == AttachmentKind.VIDEO ? new String[]{"video/*"}
                 : new String[]{"text/*", "application/json", "application/pdf",
@@ -635,36 +995,30 @@ final class AiTestChatDialog extends Dialog {
     }
 
     private void loadMedia(android.net.Uri uri, AttachmentKind kind) {
-        loadingImage = true;
-        state.setText("正在读取附件…");
+        stageMedia(uri, kind, null);
+    }
+
+    private void stageMedia(android.net.Uri uri, AttachmentKind kind, String name) {
+        if (disposed || busy || uri == null) return;
+        for (PendingAttachment attachment : draftPending) if (attachment.uri.equals(uri)) return;
+        if (draftPending.size() >= 4) {
+            state.setText("每条消息最多选择 4 个附件");
+            updateSend();
+            return;
+        }
+        // No resolver query, file read, thumbnail decode or video frame extraction on selection.
+        draftPending.add(new PendingAttachment(uri, kind, name));
+        state.setText("");
+        renderAttachments();
         updateSend();
-        int ticket = ++imageGeneration;
-        int imageBudget = ChatCompletionClient.MAX_IMAGES_PER_MESSAGE - draftImages.size();
-        imageLoad = worker.submit(() -> {
-            LoadedMedia media = null;
-            Exception error = null;
-            try {
-                ChatMediaLoader.Kind type = kind == AttachmentKind.IMAGE ? ChatMediaLoader.Kind.IMAGE
-                        : kind == AttachmentKind.VIDEO ? ChatMediaLoader.Kind.VIDEO : ChatMediaLoader.Kind.DOCUMENT;
-                ChatMediaLoader.Document document = ChatMediaLoader.loadAttachment(getContext(), uri, type, imageBudget);
-                media = new LoadedMedia(document.name, document.text, document.images);
-            }
-            catch (Exception failure) { error = failure; }
-            catch (OutOfMemoryError failure) { error = new IllegalArgumentException("附件过大，无法读取"); }
-            LoadedMedia result = media;
-            Exception failure = error;
-            main.post(() -> {
-                if (disposed || ticket != imageGeneration) return;
-                loadingImage = false;
-                imageLoad = null;
-                if (failure == null) {
-                    try { addMedia(result); }
-                    catch (IllegalArgumentException rejected) { state.setText(rejected.getMessage()); updateSend(); return; }
-                    state.setText("");
-                } else state.setText(errorMessage(failure));
-                updateSend();
-            });
-        });
+    }
+
+    private static LoadedMedia readMedia(Context context, android.net.Uri uri, AttachmentKind kind,
+                                         int imageBudget) throws Exception {
+        ChatMediaLoader.Kind type = kind == AttachmentKind.IMAGE ? ChatMediaLoader.Kind.IMAGE
+                : kind == AttachmentKind.VIDEO ? ChatMediaLoader.Kind.VIDEO : ChatMediaLoader.Kind.DOCUMENT;
+        ChatMediaLoader.Document document = ChatMediaLoader.loadAttachment(context, uri, type, imageBudget);
+        return new LoadedMedia(document.name, document.text, document.images);
     }
 
     void addImage(ChatImage image) {
@@ -683,10 +1037,6 @@ final class AiTestChatDialog extends Dialog {
         draftDocuments.add(document);
         renderAttachments();
         updateSend();
-    }
-
-    private void addMedia(LoadedMedia media) {
-        addAttachment(media.name, media.text, media.images);
     }
 
     void addAttachment(String name, String text, List<ChatImage> images) {
@@ -712,6 +1062,36 @@ final class AiTestChatDialog extends Dialog {
 
     private void renderAttachments() {
         attachments.removeAllViews();
+        for (PendingAttachment attachment : draftPending) {
+            LinearLayout item = new LinearLayout(getContext());
+            item.setTag("ai.chat.pending_card");
+            item.setGravity(Gravity.CENTER_VERTICAL);
+            item.setPadding(dp(12), dp(4), dp(4), dp(4));
+            item.setBackground(background(SURFACE, dp(12), LINE));
+            TextView type = label(attachment.kind == AttachmentKind.VIDEO ? "视频" :
+                    attachment.kind == AttachmentKind.IMAGE ? "图片" : "文件", 12, MUTED);
+            item.addView(type);
+            TextView name = label(attachment.name, 13, TEXT);
+            name.setTag("ai.chat.pending_name");
+            name.setSingleLine(true);
+            name.setEllipsize(TextUtils.TruncateAt.END);
+            name.setMaxWidth(dp(180));
+            name.setPadding(dp(8), 0, dp(4), 0);
+            item.addView(name);
+            TextView remove = label("×", 18, MUTED);
+            remove.setTag("ai.chat.remove_pending");
+            remove.setGravity(Gravity.CENTER);
+            remove.setContentDescription("移除" + attachment.name);
+            remove.setOnClickListener(ignored -> {
+                draftPending.remove(attachment);
+                renderAttachments();
+                updateSend();
+            });
+            item.addView(remove, new LinearLayout.LayoutParams(dp(40), dp(40)));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(52));
+            params.setMarginEnd(dp(8));
+            attachments.addView(item, params);
+        }
         for (ChatImage image : draftImages) {
             LinearLayout item = new LinearLayout(getContext());
             item.setGravity(Gravity.CENTER_VERTICAL);
@@ -744,7 +1124,9 @@ final class AiTestChatDialog extends Dialog {
             item.addView(remove, square());
             attachments.addView(item);
         }
-        attachmentScroll.setVisibility(draftImages.isEmpty() && draftDocuments.isEmpty() ? View.GONE : View.VISIBLE);
+        attachmentScroll.setVisibility(draftPending.isEmpty() && draftImages.isEmpty()
+                && draftDocuments.isEmpty() ? View.GONE : View.VISIBLE);
+        evictUnusedThumbnails();
     }
 
     private ImageView preview(ChatImage image) {
@@ -785,6 +1167,16 @@ final class AiTestChatDialog extends Dialog {
         return false;
     }
 
+    private void evictUnusedThumbnails() {
+        java.util.Iterator<Map.Entry<ChatImage, Bitmap>> entries = thumbnails.entrySet().iterator();
+        while (entries.hasNext()) {
+            Map.Entry<ChatImage, Bitmap> entry = entries.next();
+            // Other visible rows may still be attached until ListView relayouts, so let GC
+            // release their bitmap rather than recycling a drawable still used by a row.
+            if (!retains(entry.getKey())) entries.remove();
+        }
+    }
+
     private Bitmap thumbnail(ChatImage image) {
         if (Thread.currentThread().isInterrupted()) return null;
         try { return thumbnailLoader.load(image); }
@@ -798,13 +1190,11 @@ final class AiTestChatDialog extends Dialog {
         thumbnails.clear();
     }
 
-    private void cancelImageLoad() {
-        ++imageGeneration;
-        if (imageLoad != null) imageLoad.cancel(true);
-        imageLoad = null;
-        loadingImage = false;
+    private void closePickers() {
         if (picker != null) picker.close();
         picker = null;
+        if (mediaPicker != null) mediaPicker.close();
+        mediaPicker = null;
     }
 
     private Activity ownerActivity() {
@@ -830,16 +1220,28 @@ final class AiTestChatDialog extends Dialog {
         final String prompt;
         final List<ChatImage> images;
         final List<Document> documents;
+        final List<PendingAttachment> attachments;
+        final List<ChatImage> preparedImages;
+        final List<Document> preparedDocuments;
         final ChatMessage answer;
         volatile boolean stopRequested;
         boolean started;
+        boolean reading;
 
-        RequestTurn(int ticket, String prompt, List<ChatImage> images, List<Document> documents, ChatMessage answer) {
+        RequestTurn(int ticket, String prompt, List<ChatImage> images, List<Document> documents,
+                    List<PendingAttachment> attachments, ChatMessage answer) {
             this.ticket = ticket;
             this.prompt = prompt;
             this.images = images;
             this.documents = documents;
+            this.attachments = attachments;
+            this.preparedImages = new ArrayList<>(images);
+            this.preparedDocuments = new ArrayList<>(documents);
             this.answer = answer;
+        }
+
+        void checkStopped() throws InterruptedException {
+            if (stopRequested || Thread.currentThread().isInterrupted()) throw new InterruptedException("已停止");
         }
     }
 
@@ -854,6 +1256,8 @@ final class AiTestChatDialog extends Dialog {
         String retryPrompt;
         List<ChatImage> retryImages = Collections.emptyList();
         List<Document> retryDocuments = Collections.emptyList();
+        List<PendingAttachment> retryPending = Collections.emptyList();
+        ChatMessage sourceUser;
 
         ChatMessage(String role, String text, boolean user, List<ChatImage> images) {
             this.role = role;
@@ -869,9 +1273,25 @@ final class AiTestChatDialog extends Dialog {
         @Override public long getItemId(int position) { return position; }
 
         @Override public View getView(int position, View recycled, ViewGroup parent) {
-            MessageRow row = recycled instanceof MessageRow ? (MessageRow) recycled : new MessageRow(getContext());
-            row.bind(getItem(position));
-            return row;
+            try {
+                MessageRow row = recycled instanceof MessageRow ? (MessageRow) recycled
+                        : recycled != null && recycled.getTag() instanceof MessageRow ? (MessageRow) recycled.getTag()
+                        : new MessageRow(getContext());
+                row.bind(getItem(position));
+                return row.shell;
+            } catch (RuntimeException | LinkageError failure) {
+                if (nativeViews == null) throw failure;
+                if (!nativeFailure) {
+                    nativeFailure = true;
+                    android.util.Log.w("DouAi.AiContact", "Native message unavailable", failure);
+                    main.post(() -> {
+                        android.widget.Toast.makeText(getContext(), "原生消息控件不可用，请查看模块适配信息",
+                                android.widget.Toast.LENGTH_LONG).show();
+                        dismiss();
+                    });
+                }
+                return label("原生消息控件不可用", 14, ERROR);
+            }
         }
     }
 
@@ -882,20 +1302,50 @@ final class AiTestChatDialog extends Dialog {
         private final TextView document;
         private final LinearLayout images;
         private final ImageButton retry;
+        private final HostNativeChatViews.TextBubble nativeBubble;
+        private final ImageView messageAvatar;
+        private final View shell;
+        private Boolean avatarUser;
 
         MessageRow(Context context) {
             super(context);
             setOrientation(HORIZONTAL);
+            if (nativeViews != null) {
+                try {
+                    ViewGroup nativeShell = nativeViews.createMessageShell(this);
+                    messageAvatar = nativeViews.createAvatar(this);
+                    messageAvatar.setTag("ai.chat.message_avatar");
+                    nativeShell.addView(this, new ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                    nativeShell.setTag(this);
+                    shell = nativeShell;
+                } catch (ReflectiveOperationException failure) {
+                    throw new IllegalStateException("原生消息行不可用", failure);
+                }
+            } else {
+                shell = this;
+                messageAvatar = null;
+            }
             bubble = new LinearLayout(context);
             bubble.setOrientation(VERTICAL);
-            bubble.setPadding(dp(12), dp(8), dp(12), dp(8));
+            if (nativeViews == null) bubble.setPadding(dp(12), dp(8), dp(12), dp(8));
             role = label("", 12, MUTED);
             role.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
             bubble.addView(role, wrap());
             body = label("", 15, TEXT);
             body.setTextIsSelectable(true);
             body.setPadding(0, dp(4), 0, 0);
-            bubble.addView(body, wrap());
+            if (nativeViews == null) {
+                nativeBubble = null;
+                bubble.addView(body, wrap());
+            } else {
+                try { nativeBubble = nativeViews.createTextBubble(bubble, false); }
+                catch (ReflectiveOperationException failure) {
+                    throw new IllegalStateException("原生消息控件不可用", failure);
+                }
+                bubble.addView(nativeBubble.view, new LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
             document = label("", 13, MUTED);
             document.setTag("ai.chat.document");
             bubble.addView(document, wrap());
@@ -912,9 +1362,23 @@ final class AiTestChatDialog extends Dialog {
             int color = message.user ? ACCENT : MUTED;
             role.setText(message.role);
             role.setTextColor(color);
+            if (nativeBubble != null) role.setVisibility(GONE);
             body.setTag(message.user ? "ai.chat.user" : "ai.chat.answer");
             body.setText(message.text);
             body.setTextColor(message.color);
+            if (nativeBubble != null) {
+                nativeBubble.view.setTag(message.user ? "ai.chat.user" : "ai.chat.answer");
+                int rowWidth = messages.getWidth() > 0 ? messages.getWidth()
+                        : getContext().getResources().getDisplayMetrics().widthPixels;
+                int avatarWidth = messageAvatar.getLayoutParams().width;
+                int available = rowWidth - messages.getPaddingLeft() - messages.getPaddingRight()
+                        - avatarWidth - dp(20);
+                nativeBubble.bind(message.text, message.color == TEXT ? nativeViews.messageTextColor(message.user)
+                                : ModuleTheme.color(getContext(), message.color),
+                        nativeViews.messageTextMaxWidth(Math.max(1, available)), message.user);
+                nativeBubble.view.setVisibility(TextUtils.isEmpty(message.text) ? GONE : VISIBLE);
+                document.setTextColor(nativeViews.input.getCurrentHintTextColor());
+            }
             document.setVisibility(message.documentLabels.isEmpty() ? GONE : VISIBLE);
             document.setText(message.documentLabels.isEmpty() ? ""
                     : "已保存的附件：" + TextUtils.join("、", message.documentLabels));
@@ -925,15 +1389,51 @@ final class AiTestChatDialog extends Dialog {
             retry.setVisibility(message.retry ? VISIBLE : GONE);
             retry.setOnClickListener(message.retry ? ignored -> sendMessage(message.retryPrompt,
                     message.retryImages, message.retryDocuments, message) : null);
-            bubble.setBackground(background(message.user ? Color.rgb(225, 243, 237) : SURFACE, dp(14),
+            if (nativeBubble == null) bubble.setBackground(background(
+                    message.user ? Color.rgb(225, 243, 237) : SURFACE, dp(14),
                     message.user ? Color.rgb(210, 235, 227) : LINE));
-            setGravity(message.user ? Gravity.END : Gravity.START);
+            setGravity((message.user ? Gravity.END : Gravity.START) | Gravity.TOP);
             removeView(bubble);
             LayoutParams params = new LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            if (message.user) params.leftMargin = dp(24);
-            else params.rightMargin = dp(24);
-            params.bottomMargin = dp(10);
-            addView(bubble, params);
+            if (messageAvatar == null) {
+                if (message.user) params.leftMargin = dp(24);
+                else params.rightMargin = dp(24);
+                params.bottomMargin = dp(10);
+                addView(bubble, params);
+            } else {
+                removeView(messageAvatar);
+                ViewGroup.LayoutParams nativeAvatar = messageAvatar.getLayoutParams();
+                LayoutParams avatarParams = new LayoutParams(nativeAvatar.width, nativeAvatar.height);
+                messageAvatar.setContentDescription(message.user ? "我的头像" : assistantName + "头像");
+                if (message.user) {
+                    if (avatarUser == null || !avatarUser) {
+                        messageAvatar.setImageResource(android.R.drawable.sym_def_app_icon);
+                        if (accountAvatar != null) accountAvatar.bind(messageAvatar);
+                    }
+                    avatarParams.setMarginStart(dp(8));
+                    addView(bubble, params);
+                    addView(messageAvatar, avatarParams);
+                } else {
+                    if (avatarUser == null || avatarUser) {
+                        if (contactAvatarBitmap == null) messageAvatar.setImageResource(android.R.drawable.sym_def_app_icon);
+                        else messageAvatar.setImageBitmap(contactAvatarBitmap);
+                    }
+                    avatarParams.setMarginEnd(dp(8));
+                    addView(messageAvatar, avatarParams);
+                    addView(bubble, params);
+                }
+                avatarUser = message.user;
+            }
+        }
+    }
+
+    private static void clearMessageAvatars(View view) {
+        if (view instanceof ImageView && "ai.chat.message_avatar".equals(view.getTag())) {
+            ((ImageView) view).setImageDrawable(null);
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int index = 0; index < group.getChildCount(); index++) clearMessageAvatars(group.getChildAt(index));
         }
     }
 
@@ -1020,17 +1520,59 @@ final class AiTestChatDialog extends Dialog {
         }
     }
 
-    private enum AttachmentKind { IMAGE, VIDEO, FILE }
+    enum AttachmentKind { IMAGE, VIDEO, FILE }
 
-    private static final class LoadedMedia {
+    static final class LoadedMedia {
         final String name;
         final String text;
         final List<ChatImage> images;
         LoadedMedia(String name, String text, List<ChatImage> images) {
             this.name = name;
             this.text = text;
-            this.images = images;
+            this.images = new ArrayList<>(images);
         }
+    }
+
+    private static final class PendingAttachment {
+        final android.net.Uri uri;
+        final AttachmentKind kind;
+        final String name;
+        volatile LoadedMedia prepared;
+
+        PendingAttachment(android.net.Uri uri, AttachmentKind kind, String name) {
+            this.uri = uri;
+            this.kind = kind;
+            String fallback = kind == AttachmentKind.VIDEO ? "已选择视频" : kind == AttachmentKind.IMAGE ? "已选择图片" : "已选择文件";
+            String localName = "file".equalsIgnoreCase(uri.getScheme()) ? uri.getLastPathSegment() : null;
+            this.name = !TextUtils.isEmpty(name) ? name.replace('\n', ' ').replace('\r', ' ')
+                    : !TextUtils.isEmpty(localName) ? localName : fallback;
+        }
+
+        boolean needsImages() {
+            return kind != AttachmentKind.FILE || name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf");
+        }
+
+        boolean mayNeedImages(Context context) {
+            if (kind != AttachmentKind.FILE) return true;
+            if (prepared != null) return !prepared.images.isEmpty();
+            String mime = null;
+            try { mime = context.getContentResolver().getType(uri); }
+            catch (RuntimeException unavailable) { /* Reserve one slot for an opaque document. */ }
+            if ("application/pdf".equalsIgnoreCase(mime)) return true;
+            if (mime != null && (mime.startsWith("text/") || "application/json".equalsIgnoreCase(mime)
+                    || "application/vnd.openxmlformats-officedocument.wordprocessingml.document".equalsIgnoreCase(mime))) return false;
+            String path = uri.getLastPathSegment();
+            String hint = (name + " " + (path == null ? "" : path)).toLowerCase(java.util.Locale.ROOT);
+            if (hint.endsWith(".txt") || hint.endsWith(".json") || hint.endsWith(".docx")) return false;
+            // Unknown provider names can hide a PDF. Never let an earlier video use
+            // the last image slot before that document is read on Send.
+            return true;
+        }
+    }
+
+    private static String failureDetail(Exception failure) {
+        String message = failure.getMessage();
+        return TextUtils.isEmpty(message) ? "无法读取所选附件，请重新选择" : message.substring(0, Math.min(220, message.length()));
     }
 
     private void scrollToBottom() {

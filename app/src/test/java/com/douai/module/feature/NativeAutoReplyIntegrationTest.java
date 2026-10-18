@@ -46,6 +46,105 @@ public final class NativeAutoReplyIntegrationTest {
     @Test public void interactionMasterChangeDoesNotCancelDelayedReply() throws Throwable { flow(false, false, true, true); }
     @Test public void disablingDefaultPrivateChatScopeCancelsPreparedReply() throws Throwable { flow(false, false, true, false, true); }
 
+    @Test public void globalFreshMessageRepliesWithoutDatabaseInsertionOrAChatActivity() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies()) {
+            assertFalse(fixture.dispatcher.isForeground(fixture.activity));
+            Message incoming = incomingMessage(200, "thread", 9101, System.currentTimeMillis());
+            Runnable reply = fixture.enqueueGlobal(incoming);
+            assertNotNull("A fresh global SDK receipt must schedule a reply without any database insert or opened chat", reply);
+            assertEquals(0, fixture.database.insertCalls);
+            fixture.runReply(reply); fixture.flush();
+            assertEquals(1, fixture.database.imSdkContext.sends);
+            assertEquals("thread", fixture.database.imSdkContext.last.conversation.id());
+        }
+    }
+
+    @Test public void coldDatabaseConversationResolvesAsynchronouslyWithoutOpeningAChat() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies()) {
+            Sdk sdk = fixture.database.imSdkContext;
+            sdk.localConversations.put("cold-thread", new Conversation("cold-thread"));
+            assertNull(sdk.conversations().find("cold-thread"));
+            assertFalse(fixture.dispatcher.isForeground(fixture.activity));
+            Runnable reply = fixture.enqueue(200, "cold-thread", false);
+            assertNotNull(reply);
+            fixture.runReply(reply); fixture.flush();
+            assertEquals("A locally stored cold conversation must not require opening its chat", 1, sdk.sends);
+            assertEquals(1, sdk.conversationLoads);
+            assertNull("Async success deliberately does not populate this fixture's hot cache", sdk.conversations().find("cold-thread"));
+            assertEquals("cold-thread", sdk.last.conversation.id());
+        }
+    }
+
+    @Test public void globalAndDatabaseReceiptsForTheSameServerIdReplyOnlyOnce() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies()) {
+            Message incoming = incomingMessage(200, "thread", 9102, System.currentTimeMillis());
+            Runnable reply = fixture.enqueueGlobal(incoming);
+            assertNotNull(reply);
+            assertNull(fixture.enqueueValues(incomingValues(incoming)));
+            fixture.runReply(reply); fixture.flush();
+            assertEquals(1, fixture.database.imSdkContext.sends);
+            assertEquals(1, fixture.history().size());
+        }
+    }
+
+    @Test public void globalHistoricalOwnAndAccountSwitchedMessagesNeverSend() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies()) {
+            Message deleted = incomingMessage(200, "thread", 9106, System.currentTimeMillis());
+            deleted.deleted = 1;
+            assertNull(fixture.enqueueGlobal(incomingMessage(200, "thread", 9103, System.currentTimeMillis() - 120_000),
+                    incomingMessage(100, "thread", 9104, System.currentTimeMillis()), deleted));
+            assertEquals(0, fixture.database.imSdkContext.sends);
+            Runnable pending = fixture.enqueueGlobal(incomingMessage(200, "thread", 9105, System.currentTimeMillis()));
+            assertNotNull(pending);
+            fixture.database.imSdkContext.account = 101;
+            fixture.runReply(pending); fixture.flush();
+            assertEquals(0, fixture.database.imSdkContext.sends);
+        }
+    }
+
+    @Test public void coldGlobalLookupCanRetryTheSameServerIdWhenItsConversationArrives() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies()) {
+            Message incoming = incomingMessage(200, "arriving-late", 9107, System.currentTimeMillis());
+            Runnable first = fixture.enqueueGlobal(incoming);
+            assertNotNull(first);
+            fixture.runReply(first); fixture.flush();
+            assertEquals(0, fixture.database.imSdkContext.sends);
+            fixture.database.imSdkContext.localConversations.put("arriving-late", new Conversation("arriving-late"));
+            Runnable retried = fixture.enqueueGlobal(incoming);
+            assertNotNull("A temporary cold-cache miss must release its seen reservation", retried);
+            fixture.runReply(retried); fixture.flush();
+            assertEquals(1, fixture.database.imSdkContext.sends);
+            assertEquals(2, fixture.database.imSdkContext.conversationLoads);
+        }
+    }
+
+    @Test public void coldResolutionRejectsADifferentConversationReturnedByTheSdk() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies()) {
+            fixture.database.imSdkContext.localConversations.put("cold-thread", new Conversation("other"));
+            Runnable reply = fixture.enqueue(200, "cold-thread", false);
+            assertNotNull(reply);
+            fixture.runReply(reply); fixture.flush();
+            assertEquals(1, fixture.database.imSdkContext.conversationLoads);
+            assertEquals(0, fixture.database.imSdkContext.sends);
+            assertNull(fixture.database.imSdkContext.last);
+        }
+    }
+
+    @Test public void globalGroupMentionModeUsesTheExactSdkMessageExtension() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies("reply_group_mode", "mentions")) {
+            Message other = incomingMessage(200, "group", 9108, System.currentTimeMillis());
+            other.ext.put("s:mentioned_users", "1000");
+            assertNull(fixture.enqueueGlobal(other));
+            Message mentioned = incomingMessage(200, "group", 9109, System.currentTimeMillis());
+            mentioned.ext.put("s:mentioned_users", "200,100");
+            Runnable reply = fixture.enqueueGlobal(mentioned);
+            assertNotNull("The global-message adapter must retain the verified group mention extension", reply);
+            fixture.runReply(reply); fixture.flush();
+            assertEquals(1, fixture.database.imSdkContext.sends);
+            assertEquals("group", fixture.database.imSdkContext.last.conversation.id());
+        }
+    }
+
     @Test public void dailyLimitStopsASecondReplyPreparedBeforeTheFirstSend() throws Throwable {
         try (LimitedReplies fixture = new LimitedReplies("reply_daily_limit", "1")) {
             fixture.receive(200, "thread");
@@ -130,8 +229,10 @@ public final class NativeAutoReplyIntegrationTest {
     }
 
     @Test public void voiceReplyUsesAudioOnlyInPrivateAndGroupChatsAndRecordsAfterRemoteAck() throws Throwable {
-        for (String conversation : Arrays.asList("thread", "group")) {
+        for (String conversation : Arrays.asList("thread", "group", "cold-thread")) {
             try (LimitedReplies fixture = new LimitedReplies("reply_voice", "true")) {
+                if ("cold-thread".equals(conversation))
+                    fixture.database.imSdkContext.localConversations.put(conversation, new Conversation(conversation));
                 NativeAudioMessageSenderTest.Uploader.count = 0;
                 NativeAudioMessageSenderTest.Uploader.kind = 17;
                 NativeAudioMessageSenderTest.LocalInsert.fail = false;
@@ -141,13 +242,22 @@ public final class NativeAutoReplyIntegrationTest {
                     assertEquals("reply", text); assertEquals(120_000, maximum); assertTrue(valid.getAsBoolean());
                     SpeechPreparation.Audio audio = NativeAudioMessageSenderTest.audio(); generated.set(audio); return audio;
                 };
-                fixture.receive(200, conversation);
+                if ("cold-thread".equals(conversation)) {
+                    Runnable queued = fixture.enqueue(200, conversation, false);
+                    assertNotNull(queued);
+                    fixture.runReply(queued);
+                    ShadowLooper.idleMainLooper();
+                } else fixture.receive(200, conversation);
                 fixture.flush();
                 assertEquals(0, fixture.database.imSdkContext.sends);
                 assertEquals(1, NativeAudioMessageSenderTest.Uploader.count);
                 Message message = (Message) NativeAudioMessageSenderTest.Uploader.last;
                 assertEquals(17, message.type);
                 assertEquals(conversation, message.conversation.id());
+                if ("cold-thread".equals(conversation)) {
+                    assertEquals(1, fixture.database.imSdkContext.conversationLoads);
+                    assertNull(fixture.database.imSdkContext.conversations().find(conversation));
+                }
                 assertEquals(100, message.sender);
                 assertEquals("group".equals(conversation) ? 2 : 1, message.conversationType);
                 assertEquals(501, message.orderIndex);
@@ -679,14 +789,25 @@ public final class NativeAutoReplyIntegrationTest {
         boolean failNext; boolean suppressCallbacks;
         final List<Runnable> pendingCallbacks = new ArrayList<>();
         Runnable beforeSender = () -> { };
+        final Map<String, Conversation> localConversations = new HashMap<>();
+        final Map<String, Conversation> cachedConversations = new HashMap<>();
+        int conversationLoads;
+        boolean fillConversationCache;
         public long uid() { return account; }
         public Bean bean() { return new Bean(); }
-        public Conversations conversations() { return new Conversations(enumerated::countDown); }
+        public Conversations conversations() { return new Conversations(this, enumerated::countDown); }
     }
     public static final class Database {
         public Sdk imSdkContext = new Sdk();
-        public long insert(String table, String nullColumn, ContentValues values) { return 1; }
+        int insertCalls;
+        public long insert(String table, String nullColumn, ContentValues values) { insertCalls++; return 1; }
     }
+    public static final class GlobalObserver {
+        public final Sdk imSdkContext;
+        GlobalObserver(Sdk sdk) { imSdkContext = sdk; }
+        public void onGetMessage(List<Message> messages, int source, FakeExtra extra) { }
+    }
+    public static final class FakeExtra { }
     public static final class Bean { public Builder builder() { return new Builder(); } }
     public static final class Builder {
         Message message = new Message();
@@ -701,13 +822,33 @@ public final class NativeAutoReplyIntegrationTest {
     }
     public static final class Message extends NativeAudioMessageSenderTest.Message {
         int type; String content; Conversation conversation;
-        long sender; int conversationType; long orderIndex;
+        long sender; int conversationType; long orderIndex; long createdAt; int deleted;
+        public final java.util.concurrent.ConcurrentHashMap<String, String> ext = new java.util.concurrent.ConcurrentHashMap<>();
+        public long getSender() { return sender; }
+        public long getCreatedAt() { return createdAt; }
+        public String getContent() { return content; }
+        public int getMsgType() { return type; }
+        public String getConversationId() { return conversation.id(); }
+        public int getConversationType() { return conversationType; }
+        public int getSvrStatus() { return 0; }
+        public int getDeleted() { return deleted; }
+        public boolean isSelf() { return sender == 100; }
+        public java.util.concurrent.ConcurrentHashMap<String, String> getExt() { return ext; }
     }
     public static final class Conversations {
+        private final Sdk sdk;
         private final Runnable enumerate;
-        Conversations(Runnable enumerate) { this.enumerate = enumerate; }
+        Conversations(Sdk sdk, Runnable enumerate) { this.sdk = sdk; this.enumerate = enumerate; }
         public Conversation find(String id) {
+            if (sdk.cachedConversations.containsKey(id)) return sdk.cachedConversations.get(id);
             return Arrays.asList("thread", "other", "third", "group").contains(id) ? new Conversation(id) : null;
+        }
+        public void getConversationAsync(String id, IRequestListener listener) {
+            sdk.conversationLoads++;
+            Conversation result = sdk.localConversations.get(id);
+            if (result == null) { listener.onFailure(new IllegalStateException("Conversation unavailable")); return; }
+            if (sdk.fillConversationCache) sdk.cachedConversations.put(id, result);
+            listener.onSuccess(result);
         }
         public List<Conversation> all() { enumerate.run(); return Collections.emptyList(); }
     }
@@ -791,8 +932,23 @@ public final class NativeAutoReplyIntegrationTest {
             incoming.put("created_time", System.currentTimeMillis());
             incoming.put("type", type);
             incoming.put("content", content);
-            framework.invoke(Database.class.getMethod("insert", String.class, String.class, ContentValues.class),
-                    database, "msg", null, incoming);
+            return enqueueValues(incoming);
+        }
+
+        Runnable enqueueValues(ContentValues incoming) throws Throwable {
+            framework.invoke(Database.class.getMethod("insert", String.class, String.class, ContentValues.class), database, "msg", null, incoming);
+            return takeReply();
+        }
+
+        Runnable enqueueGlobal(Message... messages) throws Throwable {
+            Method received = GlobalObserver.class.getMethod("onGetMessage", List.class, int.class, FakeExtra.class);
+            GlobalObserver observer = new GlobalObserver(database.imSdkContext);
+            if (framework.hooks.containsKey(received)) framework.invoke(received, observer, Arrays.asList(messages), 0, new FakeExtra());
+            else received.invoke(observer, Arrays.asList(messages), 0, new FakeExtra());
+            return takeReply();
+        }
+
+        private Runnable takeReply() {
             Runnable reply = scheduled.getQueue().peek();
             if (reply != null) {
                 scheduled.getQueue().remove(reply);
@@ -817,6 +973,11 @@ public final class NativeAutoReplyIntegrationTest {
             scheduled.submit(() -> { }).get(2, TimeUnit.SECONDS);
         }
 
+        void runReply(Runnable reply) throws Exception {
+            scheduled.execute(reply);
+            awaitWorker();
+        }
+
         void flush() {
             worker.runAll();
             ShadowLooper.idleMainLooper();
@@ -838,6 +999,22 @@ public final class NativeAutoReplyIntegrationTest {
         fixture.values.put(AiModelSettings.KEY, new AiModelSettings(
                 Collections.singletonList(AiModelConfig.fromJson(config)), "im-media").serialize());
         fixture.applyOptions();
+    }
+
+    private static Message incomingMessage(long sender, String conversation, long id, long createdAt) {
+        Message result = new Message();
+        result.sender = sender; result.conversation = new Conversation(conversation); result.id = id;
+        result.createdAt = createdAt; result.type = 7; result.conversationType = "group".equals(conversation) ? 2 : 1;
+        result.content = "{\"text\":\"global incoming\"}";
+        return result;
+    }
+
+    private static ContentValues incomingValues(Message message) {
+        ContentValues values = new ContentValues();
+        values.put("conversation_id", message.getConversationId()); values.put("conversation_type", message.getConversationType());
+        values.put("sender", message.getSender()); values.put("msg_server_id", Long.toString(message.getMsgId()));
+        values.put("created_time", message.getCreatedAt()); values.put("type", message.getMsgType()); values.put("content", message.getContent());
+        return values;
     }
 
     private static okhttp3.mockwebserver.MockResponse aiResponse(String text) throws Exception {
@@ -897,6 +1074,8 @@ public final class NativeAutoReplyIntegrationTest {
         add(rules, "adv_im_builder_conversation", Builder.class.getMethod("conversation", Conversation.class));
         add(rules, "adv_im_builder_build", Builder.class.getMethod("build"));
         add(rules, "adv_im_conversation", Conversations.class.getMethod("find", String.class));
+        add(rules, "adv_im_conversation_async", Conversations.class.getMethod("getConversationAsync", String.class, IRequestListener.class));
+        add(rules, "adv_im_global_received", GlobalObserver.class.getMethod("onGetMessage", List.class, int.class, FakeExtra.class));
         add(rules, "adv_im_all_conversations", Conversations.class.getMethod("all"));
         add(rules, "adv_im_conversation_id", Conversation.class.getMethod("id"));
         add(rules, "adv_im_conversation_members", Conversation.class.getMethod("members"));

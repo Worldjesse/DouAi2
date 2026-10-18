@@ -25,8 +25,8 @@ android {
         applicationId = "io.github.yudigaga.douai"
         minSdk = 28
         targetSdk = 35
-        versionCode = 77
-        versionName = "0.1.76"
+        versionCode = 80
+        versionName = "0.1.79"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -87,6 +87,12 @@ kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
+}
+
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    // Robolectric SDKs and full-size host APK DEX contracts share a worker JVM.
+    // Keep their bounded test heap separate from the module's runtime budget.
+    maxHeapSize = "1g"
 }
 
 dependencies {

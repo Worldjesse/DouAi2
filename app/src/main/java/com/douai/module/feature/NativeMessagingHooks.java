@@ -82,6 +82,8 @@ public final class NativeMessagingHooks implements AutoCloseable {
     private Method builderConversation;
     private Method builderBuild;
     private Method findConversation;
+    private Method findConversationAsync;
+    private IncomingMessageSnapshot incomingSnapshot;
     private Method allConversations;
     private Method conversationId;
     private Method conversationMembers;
@@ -310,6 +312,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
             builderConversation = HostTargets.method(report, "adv_im_builder_conversation", loader);
             builderBuild = HostTargets.method(report, "adv_im_builder_build", loader);
             findConversation = HostTargets.method(report, "adv_im_conversation", loader);
+            findConversationAsync = HostTargets.method(report, "adv_im_conversation_async", loader);
             allConversations = HostTargets.method(report, "adv_im_all_conversations", loader);
             conversationId = HostTargets.method(report, "adv_im_conversation_id", loader);
             conversationMembers = HostTargets.method(report, "adv_im_conversation_members", loader);
@@ -321,6 +324,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
             listenerClass = Class.forName("com.bytedance.im.core.client.callback.IRequestListener", false, loader);
             senderConstructor = send.getDeclaringClass().getConstructor(sdkUid.getDeclaringClass(), listenerClass);
             gsonClass = Class.forName("com.google.gson.Gson", false, loader);
+            incomingSnapshot = new IncomingMessageSnapshot(builderBuild.getReturnType());
             try { audioSender = new NativeAudioMessageSender(framework, report, loader); }
             catch (Exception failure) { safeLog("Native automatic audio sender unavailable: " + failure.getClass().getSimpleName()); }
             Method insert = HostTargets.method(report, "adv_im_db_insert", loader);
@@ -330,7 +334,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                         ? new ContentValues((ContentValues) chain.getArg(2)) : null;
                 Object result = chain.proceed();
                 try {
-                    if (incoming != null && result instanceof Number && ((Number) result).longValue() >= 0) onIncoming(incoming);
+                    if (incoming != null && result instanceof Number && ((Number) result).longValue() >= 0) onIncoming(incoming, "database");
                 } catch (Throwable failure) { receive.fail(failure); }
                 return result;
             });
@@ -339,12 +343,29 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 sdk = chain.getThisObject();
                 return chain.proceed();
             });
+            Method globalReceived = HostTargets.method(report, "adv_im_global_received", loader);
+            receive.add(framework, globalReceived, chain -> {
+                captureSdk(chain.getThisObject());
+                Object raw = chain.getArg(0);
+                List<?> messages = raw instanceof List<?> ? new ArrayList<>((List<?>) raw) : Collections.emptyList();
+                Object result = chain.proceed();
+                captureSdk(chain.getThisObject());
+                for (Object message : messages) {
+                    try {
+                        ContentValues values = incomingSnapshot.copy(message);
+                        if (values != null) onIncoming(values, "global");
+                    } catch (ReflectiveOperationException | RuntimeException invalid) {
+                        safeLog("Automatic reply receipt skipped source=global reason=invalid_message");
+                    }
+                }
+                return result;
+            });
             try {
                 imProfileCache = HostTargets.method(report, "relation_im_user_cache", loader);
                 imProfileGet = Class.forName("com.bytedance.im.core.model.cache.IMMemoryCache", false, loader)
                         .getMethod("get", Object.class);
             } catch (Exception ignored) { }
-            log.accept("Native IM receive and sender contracts registered");
+            log.accept("Native IM receive and sender contracts registered; global receipts and cold conversations enabled");
         } catch (Throwable failure) { receive.fail(failure); }
     }
 
@@ -368,10 +389,14 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 && ("native_auto_reply".equals(key) || current.enabled("automation_enabled"));
     }
 
-    private void onIncoming(ContentValues values) {
+    private void onIncoming(ContentValues values, String source) {
         LocalOptions current = options;
         if (!automatic("native_auto_reply", current)) return;
         long account = ownUid();
+        if (account <= 0) {
+            safeLog("Automatic reply receipt skipped source=" + source + " reason=account_unavailable");
+            return;
+        }
         if (contactAccount != account) { clearContacts(); contactAccount = account; }
         String currentConversation = values.getAsString("conversation_id");
         Map<String, ProfileListEntry> members = groupMembers.get(currentConversation);
@@ -386,20 +411,39 @@ public final class NativeMessagingHooks implements AutoCloseable {
             ProfileListEntry profile = memberProfile(senderUid.toString());
             if (!profile.name.isEmpty()) values.put("sender_name", profile.name);
         }
-        if (!NativeFollowLists.ensureAccount(Long.toString(account))) return;
+        if (!NativeFollowLists.ensureAccount(Long.toString(account))) {
+            safeLog("Automatic reply receipt skipped source=" + source + " reason=account_changed");
+            return;
+        }
         ReplyPolicy.Incoming incoming = ReplyPolicy.incoming(values, account, startedAt, current);
-        if (incoming == null) return;
+        if (incoming == null) {
+            safeLog("Automatic reply receipt skipped source=" + source + " reason=policy");
+            return;
+        }
         String recipient = Long.toString(incoming.sender);
-        if (!rateLimiter.canSend(AutomationHistoryStore.REPLY, account, recipient, current)) return;
+        if (!rateLimiter.canSend(AutomationHistoryStore.REPLY, account, recipient, current)) {
+            safeLog("Automatic reply receipt skipped source=" + source + " reason=allowance");
+            return;
+        }
         String conversation = incoming.conversation;
         String text = incoming.text;
         String identity = account + ":" + conversation + ":" + incoming.serverId;
-        synchronized (seen) { if (seen.put(identity, true) != null) return; }
+        synchronized (seen) {
+            if (seen.put(identity, true) != null) {
+                safeLog("Automatic reply receipt skipped source=" + source + " reason=duplicate");
+                return;
+            }
+        }
         long epoch = generation.get();
         int delay = Math.max(2, Math.min(3600, current.integer("reply_delay_seconds", 2)));
-        if (worker.getQueue().size() >= 100) return;
+        if (worker.getQueue().size() >= 100) {
+            synchronized (seen) { seen.remove(identity); }
+            safeLog("Automatic reply receipt skipped source=" + source + " reason=queue_full");
+            return;
+        }
         ReplyTask operation = new ReplyTask(account, epoch, identity, incoming, delay);
         pendingReplies.add(operation);
+        safeLog("Automatic reply receipt queued source=" + source + " kind=" + (incoming.group ? "group" : "private"));
         main.postDelayed(operation.watchdog, 1000);
         try {
             operation.attach(worker.schedule(() -> {
@@ -407,7 +451,13 @@ public final class NativeMessagingHooks implements AutoCloseable {
             try {
                 if (!replyStillAllowed(values, account, current)) return;
                 if (!rateLimiter.canSend(AutomationHistoryStore.REPLY, account, recipient, options)) return;
-                if (!conversationExists(conversation, incoming.group)) return;
+                operation.conversation = resolveReplyConversation(operation);
+                if (operation.conversation == null) {
+                    synchronized (seen) { seen.remove(identity); }
+                    safeLog("Automatic reply skipped reason=conversation_unavailable");
+                    return;
+                }
+                if (!operation.current()) return;
                 String modelName = "";
                 AiModelSettings models = "ai".equals(current.text("reply_mode", "fixed")) ? AiModelSettings.read(current) : null;
                 List<ChatImage> images = models == null ? Collections.emptyList()
@@ -431,7 +481,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 String name = incoming.group ? groups.getOrDefault(conversation, conversation)
                         : contacts.getOrDefault(Long.toString(incoming.sender), Long.toString(incoming.sender));
                 BooleanSupplier valid = () -> operation.current() && replyStillAllowed(values, account, current)
-                        && conversationExists(conversation, incoming.group)
+                        && conversationExists(conversation, incoming.group, operation.conversation)
                         && rateLimiter.canSend(AutomationHistoryStore.REPLY, account, recipient, options);
                 SpeechPreparation.Audio audio;
                 if (current.enabled("reply_voice")) {
@@ -474,9 +524,9 @@ public final class NativeMessagingHooks implements AutoCloseable {
                                     return reservation.get() != null;
                                 };
                                 if (audio == null) sendText(conversation, response, account, epoch,
-                                        incoming.group, acknowledged, reserve);
+                                        incoming.group, acknowledged, reserve, operation.conversation);
                                 else sendAudio(conversation, audio, account, epoch, incoming.group,
-                                        acknowledged, reserve, submitted);
+                                        acknowledged, reserve, submitted, operation.conversation);
                             } catch (IllegalAccessException | IllegalArgumentException failure) {
                                 AutomationRateLimiter.Reservation active = reservation.get();
                                 if (active != null) rateLimiter.release(active);
@@ -507,6 +557,8 @@ public final class NativeMessagingHooks implements AutoCloseable {
         final long epoch;
         final String identity;
         final ReplyPolicy.Incoming incoming;
+        final Object sdkContext;
+        volatile Object conversation;
         final long createdAt = System.currentTimeMillis();
         final MediaReadCancellation mediaCancellation = mediaReads.get();
         final Runnable watchdog = this::watch;
@@ -524,6 +576,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
             this.epoch = epoch;
             this.identity = identity;
             this.incoming = incoming;
+            sdkContext = sdk;
             deadline = SystemClock.elapsedRealtime() + delay * 1000L + REPLY_GENERATION_TIMEOUT_MILLIS;
         }
 
@@ -533,7 +586,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
         }
 
         boolean current() {
-            return !cancelled && generation.get() == epoch && ownUid() == account
+            return !cancelled && sdk == sdkContext && generation.get() == epoch && ownUid() == account
                     && automatic("native_auto_reply", options)
                     && NativeFollowLists.ensureAccount(Long.toString(account));
         }
@@ -610,10 +663,68 @@ public final class NativeMessagingHooks implements AutoCloseable {
     }
 
     private boolean conversationExists(String id, boolean group) {
+        return conversationExists(id, group, null);
+    }
+
+    private boolean conversationExists(String id, boolean group, Object resolved) {
         try {
-            Object conversation = findConversation.invoke(sdkConversations.invoke(sdk), id);
-            return conversation != null && Boolean.TRUE.equals(isSingle.invoke(conversation)) != group;
+            return conversationForSend(sdk, id, group, resolved) != null;
         } catch (ReflectiveOperationException | RuntimeException ignored) { return false; }
+    }
+
+    private boolean matchesConversation(Object conversation, String id, boolean group) throws ReflectiveOperationException {
+        return conversation != null && conversationId.getDeclaringClass().isInstance(conversation)
+                && id.equals(conversationId.invoke(conversation))
+                && Boolean.TRUE.equals(isSingle.invoke(conversation)) != group;
+    }
+
+    private Object conversationForSend(Object sdkContext, String id, boolean group, Object resolved)
+            throws ReflectiveOperationException {
+        Object cached = findConversation.invoke(sdkConversations.invoke(sdkContext), id);
+        // The fallback belongs to one reply task and was read by the SDK from local storage.
+        // Never manufacture a Conversation or retain a second permanent conversation cache.
+        Object candidate = cached != null ? cached : resolved;
+        return matchesConversation(candidate, id, group) ? candidate : null;
+    }
+
+    private Object resolveReplyConversation(ReplyTask operation) throws InterruptedException {
+        try {
+            String id = operation.incoming.conversation;
+            Object model = sdkConversations.invoke(operation.sdkContext);
+            Object cached = findConversation.invoke(model, id);
+            if (cached != null) return matchesConversation(cached, id, operation.incoming.group) ? cached : null;
+            if (!operation.current()) return null;
+            safeLog("Automatic reply conversation lookup started reason=cache_miss");
+            AtomicReference<Object> loaded = new AtomicReference<>();
+            java.util.concurrent.CountDownLatch completed = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.atomic.AtomicBoolean terminal = new java.util.concurrent.atomic.AtomicBoolean();
+            Object callback = Proxy.newProxyInstance(listenerClass.getClassLoader(), new Class<?>[]{listenerClass},
+                    (proxy, method, arguments) -> {
+                        if (method.getDeclaringClass() == Object.class) {
+                            if ("toString".equals(method.getName())) return "DouAiConversationLookup";
+                            if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
+                            if ("equals".equals(method.getName())) return arguments != null && proxy == arguments[0];
+                        }
+                        if (("onSuccess".equals(method.getName()) || "onFailure".equals(method.getName()))
+                                && terminal.compareAndSet(false, true)) {
+                            if ("onSuccess".equals(method.getName()) && arguments != null && arguments.length > 0)
+                                loaded.set(arguments[0]);
+                            completed.countDown();
+                        }
+                        return null;
+                    });
+            findConversationAsync.invoke(model, id, callback);
+            // This is the reply worker, never the SDK/UI receipt thread. A late callback
+            // only completes these local holders and cannot send or restore a cancelled task.
+            if (!completed.await(10, TimeUnit.SECONDS) || !operation.current()) return null;
+            Object value = loaded.get();
+            boolean ready = matchesConversation(value, id, operation.incoming.group);
+            safeLog("Automatic reply conversation lookup finished ready=" + ready);
+            return ready ? value : null;
+        } catch (ReflectiveOperationException | RuntimeException unavailable) {
+            safeLog("Automatic reply conversation lookup unavailable: " + unavailable.getClass().getSimpleName());
+            return null;
+        }
     }
 
     private boolean replyStillAllowed(ContentValues values, long account, LocalOptions current) {
@@ -623,15 +734,20 @@ public final class NativeMessagingHooks implements AutoCloseable {
 
     private void sendText(String id, String text, long account, long epoch, boolean group,
                           Consumer<Boolean> done, BooleanSupplier beforeNativeSend) throws Exception {
+        sendText(id, text, account, epoch, group, done, beforeNativeSend, null);
+    }
+
+    private void sendText(String id, String text, long account, long epoch, boolean group,
+                          Consumer<Boolean> done, BooleanSupplier beforeNativeSend, Object resolved) throws Exception {
         if (closed || !receive.isActive() || ownUid() != account || generation.get() != epoch
                 || sdk == null || text == null || text.trim().isEmpty()
                 || text.length() > 4000) { done.accept(false); return; }
-        Object conversations = sdkConversations.invoke(sdk);
-        Object conversation = findConversation.invoke(conversations, id);
-        if (conversation == null || Boolean.TRUE.equals(isSingle.invoke(conversation)) == group) {
+        Object activeSdk = sdk;
+        Object conversation = conversationForSend(activeSdk, id, group, resolved);
+        if (conversation == null) {
             done.accept(false); return;
         }
-        Object builder = builderFactory.invoke(sdkBean.invoke(sdk));
+        Object builder = builderFactory.invoke(sdkBean.invoke(activeSdk));
         Object content = createText.invoke(null, text);
         Object gson = gsonClass.getConstructor().newInstance();
         String json = (String) gsonClass.getMethod("toJson", Object.class).invoke(gson, content);
@@ -651,10 +767,10 @@ public final class NativeMessagingHooks implements AutoCloseable {
                     if ("onFailure".equals(method.getName()) && completed.compareAndSet(false, true)) done.accept(false);
                     return null;
                 });
-        Object handler = senderConstructor.newInstance(sdk, callback);
+        Object handler = senderConstructor.newInstance(activeSdk, callback);
         synchronized (sendLock) {
             if (generation.get() != epoch || ownUid() != account || !receive.isActive()
-                    || closed) { done.accept(false); return; }
+                    || closed || sdk != activeSdk) { done.accept(false); return; }
             if (!beforeNativeSend.getAsBoolean()) { done.accept(false); return; }
             send.invoke(handler, message, Collections.emptyMap());
         }
@@ -663,15 +779,22 @@ public final class NativeMessagingHooks implements AutoCloseable {
     private void sendAudio(String id, SpeechPreparation.Audio audio, long account, long epoch, boolean group,
                            Consumer<Boolean> done, BooleanSupplier beforeNativeSend,
                            java.util.concurrent.atomic.AtomicBoolean submitted) throws Exception {
+        sendAudio(id, audio, account, epoch, group, done, beforeNativeSend, submitted, null);
+    }
+
+    private void sendAudio(String id, SpeechPreparation.Audio audio, long account, long epoch, boolean group,
+                           Consumer<Boolean> done, BooleanSupplier beforeNativeSend,
+                           java.util.concurrent.atomic.AtomicBoolean submitted, Object resolved) throws Exception {
         NativeAudioMessageSender sender = audioSender;
         if (closed || !receive.isActive() || sender == null || ownUid() != account
                 || generation.get() != epoch || sdk == null) { done.accept(false); return; }
-        Object conversation = findConversation.invoke(sdkConversations.invoke(sdk), id);
-        if (conversation == null || Boolean.TRUE.equals(isSingle.invoke(conversation)) == group) {
+        Object activeSdk = sdk;
+        Object conversation = conversationForSend(activeSdk, id, group, resolved);
+        if (conversation == null) {
             done.accept(false); return;
         }
         NativeAudioMessageSender.Content content = sender.content(audio);
-        Object builder = builderFactory.invoke(sdkBean.invoke(sdk));
+        Object builder = builderFactory.invoke(sdkBean.invoke(activeSdk));
         Object gson = gsonClass.getConstructor().newInstance();
         String json = (String) gsonClass.getMethod("toJson", Object.class).invoke(gson, content.value);
         builderType.invoke(builder, content.type);
@@ -680,14 +803,14 @@ public final class NativeMessagingHooks implements AutoCloseable {
         Object message = builderBuild.invoke(builder);
         sender.attach(message, audio);
         synchronized (sendLock) {
-            if (generation.get() != epoch || ownUid() != account || !receive.isActive() || closed) {
+            if (generation.get() != epoch || ownUid() != account || !receive.isActive() || closed || sdk != activeSdk) {
                 done.accept(false); return;
             }
             if (!beforeNativeSend.getAsBoolean()) { done.accept(false); return; }
             submitted.set(true);
             sender.submit(message, content, audio, done,
                     () -> !closed && receive.isActive() && generation.get() == epoch && ownUid() == account
-                            && automatic("native_auto_reply", options) && conversationExists(id, group));
+                            && sdk == activeSdk && automatic("native_auto_reply", options) && conversationExists(id, group, resolved));
         }
     }
 

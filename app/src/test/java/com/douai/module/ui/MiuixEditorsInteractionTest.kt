@@ -93,7 +93,8 @@ class MiuixEditorsInteractionTest {
         }
     }
 
-    @Test fun modelEditorSavesThroughMiuixFieldsAndRefreshesOnlyAfterPersistence() {
+    @Test @Config(sdk = [28, 35])
+    fun modelEditorSavesThroughMiuixFieldsAndRefreshesOnlyAfterPersistence() {
         val values = mutableMapOf<String, String>()
         val store = object : SettingsStore {
             override fun load() = FeatureSettings.defaults()
@@ -117,11 +118,26 @@ class MiuixEditorsInteractionTest {
                 dialog.show()
             }
         }
+        compose.waitForIdle()
+        compose.runOnUiThread {
+            val avatar = modelEditor!!.dialog().window!!.decorView
+                .findViewWithTag<android.widget.ImageView>("ai.message_contact_avatar_preview")
+            val parent = avatar.parent as android.view.ViewGroup
+            assertTrue(avatar.isShown && avatar.width > 0)
+            assertTrue(kotlin.math.abs(avatar.left + avatar.width / 2f - parent.width / 2f) <= 1f)
+        }
+        saveModelEditorPreview("top")
         compose.onNodeWithTag("settings.input.配置名称").assertIsDisplayed()
             .performTextReplacement("更新配置名称")
-        compose.onNodeWithTag("ai.message_contact_enabled").performClick()
         compose.onNodeWithTag("settings.input.联系人名字（留空使用配置名称）")
             .performTextReplacement("消息小助手")
+        compose.runOnUiThread {
+            modelEditor!!.dialog().window!!.decorView.findViewWithTag<android.widget.ScrollView>("ai.model.scroll")
+                .fullScroll(android.view.View.FOCUS_DOWN)
+        }
+        compose.waitForIdle()
+        saveModelEditorPreview("bottom")
+        compose.onNodeWithTag("ai.message_contact_enabled").performClick()
         compose.onNodeWithTag("miuix.dialog.button.-1").performClick()
         compose.runOnIdle {
             assertFalse(modelEditor!!.dialog().isShowing)
@@ -343,6 +359,23 @@ class MiuixEditorsInteractionTest {
             bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
             assertTrue("Editor preview did not render its controls", pixels.toSet().size > 8)
             File(directory, "miuix-$name-${bitmap.width}x${bitmap.height}.png").outputStream().use {
+                assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it))
+            }
+            bitmap.recycle()
+        }
+    }
+
+    private fun saveModelEditorPreview(position: String) {
+        // Software Canvas cannot replay the API 33+ RuntimeShader used by Miuix.
+        // Keep interaction/layout assertions on both SDKs; export pixels on SDK 28.
+        if (android.os.Build.VERSION.SDK_INT >= 33) return
+        val directory = System.getenv("DOUAI_MODEL_SCREENSHOTS")?.let(::File) ?: return
+        assertTrue(directory.isDirectory || directory.mkdirs())
+        compose.runOnUiThread {
+            val decor = modelEditor!!.dialog().window!!.decorView
+            val bitmap = Bitmap.createBitmap(decor.width, decor.height, Bitmap.Config.ARGB_8888)
+            decor.draw(Canvas(bitmap))
+            File(directory, "model-editor-$position.png").outputStream().use {
                 assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it))
             }
             bitmap.recycle()

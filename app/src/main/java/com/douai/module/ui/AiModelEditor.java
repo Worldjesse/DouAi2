@@ -11,6 +11,7 @@ import android.graphics.Typeface;
 import android.text.InputType;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Gravity;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -155,27 +156,29 @@ final class AiModelEditor implements AutoCloseable {
 
     private void build(AiModelConfig original) {
         LinearLayout form = form();
-        EditText name = formInput(form, "配置名称", original.name, false);
-        CheckBox messageContact = checkField(form, "加入抖音消息界面", original.messageContactEnabled);
-        messageContact.setTag("ai.message_contact_enabled");
-        EditText contactName = formInput(form, "联系人名字（留空使用配置名称）", original.messageContactName, false);
-        contactName.setSingleLine(true);
-        contactName.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(80)});
         String[] contactAvatar = {original.messageContactAvatar};
         ImageView avatar = new ImageView(context);
         avatar.setTag("ai.message_contact_avatar_preview");
-        avatar.setContentDescription("联系人头像预览");
+        avatar.setContentDescription("联系人头像，点按更换");
         avatar.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        form.addView(avatar, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        android.graphics.drawable.GradientDrawable avatarShape = new android.graphics.drawable.GradientDrawable();
+        avatarShape.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+        avatarShape.setColor(Color.rgb(246, 248, 248));
+        avatar.setBackground(avatarShape);
+        avatar.setClipToOutline(true);
+        avatar.setFocusable(true);
+        LinearLayout.LayoutParams avatarParams = new LinearLayout.LayoutParams(dp(72), dp(72));
+        avatarParams.gravity = Gravity.CENTER_HORIZONTAL;
+        avatarParams.topMargin = dp(8);
+        avatarParams.bottomMargin = dp(12);
+        form.addView(avatar, avatarParams);
         updateAvatarPreview(avatar, contactAvatar[0]);
         Button chooseAvatar = formButton();
         chooseAvatar.setText("选择联系人头像");
         chooseAvatar.setTag("ai.message_contact_avatar");
-        form.addView(MiuixFormControls.viewFor(chooseAvatar), matchWrap());
         Button resetAvatar = formButton();
         resetAvatar.setText("恢复默认头像");
         resetAvatar.setTag("ai.message_contact_avatar_reset");
-        form.addView(MiuixFormControls.viewFor(resetAvatar), matchWrap());
         resetAvatar.setOnClickListener(ignored -> {
             if (loadingAvatar) { toast("正在处理头像，请稍候"); return; }
             contactAvatar[0] = "";
@@ -215,6 +218,25 @@ final class AiModelEditor implements AutoCloseable {
             });
             if (avatarPicker == null) toast("当前界面无法打开图片选择器");
         });
+        avatar.setOnClickListener(ignored -> {
+            if (loadingAvatar) { toast("正在处理头像，请稍候"); return; }
+            showChild(new MiuixDialogBuilder(context, useMiuix).setTitle("联系人头像")
+                    .setItems(new String[]{"选择图片", "恢复默认"}, (child, which) -> {
+                        if (which == 0) chooseAvatar.performClick();
+                        else resetAvatar.performClick();
+                    }).setNegativeButton("取消", null).create());
+        });
+        EditText name = formInput(form, "配置名称", original.name, false);
+        EditText contactName = formInput(form, "联系人名字（留空使用配置名称）", original.messageContactName, false);
+        contactName.setSingleLine(true);
+        contactName.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(80)});
+        // Created now for the draft reader; placed after all configuration fields below.
+        CheckBox messageContact = !useMiuix ? new CheckBox(context)
+                : MiuixFormControls.checkbox(context, "加入抖音消息界面", original.messageContactEnabled);
+        messageContact.setText("加入抖音消息界面");
+        messageContact.setTextColor(TEXT);
+        messageContact.setChecked(original.messageContactEnabled);
+        messageContact.setTag("ai.message_contact_enabled");
         Spinner provider = !useMiuix ? new Spinner(context) : MiuixFormControls.spinner(context);
         List<String> providers = new ArrayList<>();
         for (AiProviderPresets.Preset preset : AiProviderPresets.ALL) providers.add(preset.name);
@@ -384,6 +406,7 @@ final class AiModelEditor implements AutoCloseable {
                 showChild(new AiTestChatDialog(context, draft, useMiuix));
             } catch (Exception failure) { toast(safeError(failure)); }
         });
+        form.addView(MiuixFormControls.viewFor(messageContact), matchWrap());
     }
 
     private void finishAvatarLoad(Button chooseAvatar) {
@@ -494,6 +517,7 @@ final class AiModelEditor implements AutoCloseable {
 
     private ScrollView scrolling(View child) {
         ScrollView scroll = new ScrollView(context);
+        scroll.setTag("ai.model.scroll");
         scroll.addView(child);
         return scroll;
     }

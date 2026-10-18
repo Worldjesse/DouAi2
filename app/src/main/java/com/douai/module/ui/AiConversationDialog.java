@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.Application;
 import android.app.Dialog;
 import android.os.Bundle;
+import android.widget.Toast;
 
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
@@ -21,14 +22,30 @@ public final class AiConversationDialog {
         }
         if (config == null) return null;
         AiModelConfig snapshot = config;
-        AiTestChatDialog dialog = new AiTestChatDialog(activity, snapshot, true, true);
-        dialog.setOwnerActivity(activity);
-        dialog.setContactEditAction(() -> {
-            dialog.dismiss();
-            edit(activity, store, snapshot);
-        });
-        dialog.show();
-        return dialog;
+        HostNativeChatViews nativeViews;
+        try { nativeViews = HostNativeChatViews.create(activity); }
+        catch (ReflectiveOperationException | RuntimeException | LinkageError failure) {
+            android.util.Log.w("DouAi.AiContact", "Native chat views unavailable", failure);
+            Toast.makeText(activity, "当前抖音原生聊天界面未适配，请查看模块适配信息", Toast.LENGTH_LONG).show();
+            return null;
+        }
+        AiTestChatDialog dialog = null;
+        try {
+            dialog = new AiTestChatDialog(activity, snapshot, true, true, nativeViews);
+            dialog.setOwnerActivity(activity);
+            AiTestChatDialog opened = dialog;
+            dialog.setContactEditAction(() -> {
+                opened.dismiss();
+                edit(activity, store, snapshot);
+            });
+            dialog.show();
+            return dialog;
+        } catch (RuntimeException | LinkageError failure) {
+            if (dialog != null) dialog.dismiss();
+            android.util.Log.w("DouAi.AiContact", "Native chat could not open", failure);
+            Toast.makeText(activity, "原生聊天界面暂时无法打开，请重新进入消息页", Toast.LENGTH_LONG).show();
+            return null;
+        }
     }
 
     static AiModelEditor contactEditor(Activity activity, SettingsStore store, AiModelConfig config) {
@@ -49,7 +66,8 @@ public final class AiConversationDialog {
         Application application = activity.getApplication();
         Application.ActivityLifecycleCallbacks lifecycle = new Application.ActivityLifecycleCallbacks() {
             @Override public void onActivityPaused(Activity owner) {
-                if (owner == activity && !HostImagePicker.isPending(owner)) editor.close();
+                if (owner == activity && !HostImagePicker.isPending(owner)
+                        && !HostMediaPicker.isPending(owner)) editor.close();
             }
             @Override public void onActivityDestroyed(Activity owner) { if (owner == activity) editor.close(); }
             @Override public void onActivityCreated(Activity owner, Bundle state) { }

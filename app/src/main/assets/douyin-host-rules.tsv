@@ -108,6 +108,7 @@ adv_profile_own	local_spoof	method	Lcom/ss/android/ugc/aweme/profile/panda/core/
 adv_profile_root	local_spoof	method	Lcom/ss/android/ugc/aweme/profile/panda/PandaHeaderValueArea;		LJJII	()Landroid/view/View;								
 adv_im_db_update	message	method	Lcom/bytedance/im/core/internal/db/base/AbsDBProxy;		update	(Ljava/lang/String;Landroid/content/ContentValues;Ljava/lang/String;[Ljava/lang/String;)I								
 adv_im_db_insert	message	method	Lcom/bytedance/im/core/internal/db/base/AbsDBProxy;		insert	(Ljava/lang/String;Ljava/lang/String;Landroid/content/ContentValues;)J								
+adv_im_global_received	message	method	LX/1Qjr;		onGetMessage	(Ljava/util/List;ILcom/bytedance/im/core/model/ReceiveMsgExtra;)V								
 adv_im_uid	message	method	Lcom/bytedance/im/core/mi/IMSdkContext;		getUid	()J								
 adv_im_bean	message	method	Lcom/bytedance/im/core/mi/IMSdkContext;		getBeanCreateService	()Lcom/bytedance/im/core/client/mi/IBeanCreateModel;								
 adv_im_conversations	message	method	Lcom/bytedance/im/core/mi/IMSdkContext;		getConversationListModel	()Lcom/bytedance/im/core/model/ConversationListModel;								
@@ -117,6 +118,7 @@ adv_im_builder_content	message	method	Lcom/bytedance/im/core/model/Message$Build
 adv_im_builder_conversation	message	method	Lcom/bytedance/im/core/model/Message$Builder;		conversation	(Lcom/bytedance/im/core/model/Conversation;)Lcom/bytedance/im/core/model/Message$Builder;								
 adv_im_builder_build	message	method	Lcom/bytedance/im/core/model/Message$Builder;		build	()Lcom/bytedance/im/core/model/Message;								
 adv_im_conversation	message	method	Lcom/bytedance/im/core/model/ConversationListModel;		getConversation	(Ljava/lang/String;)Lcom/bytedance/im/core/model/Conversation;								
+adv_im_conversation_async	message	method	Lcom/bytedance/im/core/model/ConversationListModel;		getConversationAsync	(Ljava/lang/String;Lcom/bytedance/im/core/client/callback/IRequestListener;)V								
 adv_im_all_conversations	message	method	Lcom/bytedance/im/core/model/ConversationListModel;		getAllConversationSync	()Ljava/util/List;								
 adv_im_conversation_id	message	method	Lcom/bytedance/im/core/model/Conversation;		getConversationId	()Ljava/lang/String;								
 adv_im_conversation_members	message	method	Lcom/bytedance/im/core/model/Conversation;		getMemberIds	()Ljava/util/List;								

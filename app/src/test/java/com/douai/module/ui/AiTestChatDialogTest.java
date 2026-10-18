@@ -240,6 +240,220 @@ public final class AiTestChatDialogTest {
         assertEquals(0, sessions.get(0).images.get(1).size());
     }
 
+    @Test public void selectingVideoKeepsOnePendingCardWithoutReadingFramesBeforeSend() throws Exception {
+        FakeMediaLoader media = new FakeMediaLoader();
+        reopenWithMediaLoader(media);
+        selectVideo(android.net.Uri.parse("content://media/external/video/media/7"));
+
+        assertEquals("Selecting a video must not schedule decoder or file-reading work", 0, worker.tasks.size());
+        assertTrue(media.uris.isEmpty());
+        assertTrue("A selected video can be sent with an empty text draft", send.isEnabled());
+        View card = root.findViewWithTag("ai.chat.pending_card");
+        assertNotNull("The draft shows one pending video card", card);
+        assertNull("Unsent video frames must not be expanded into the draft", card.findViewWithTag("ai.chat.image"));
+        android.widget.HorizontalScrollView strip = root.findViewWithTag("ai.chat.attachments");
+        assertEquals(View.VISIBLE, strip.getVisibility());
+        assertEquals(1, ((LinearLayout) strip.getChildAt(0)).getChildCount());
+    }
+
+    @Test public void sendingVideoReadsOnlyAfterSendAndPreservesTheCapturedTextAndNextDraft() throws Exception {
+        FakeMediaLoader media = new FakeMediaLoader();
+        reopenWithMediaLoader(media);
+        android.net.Uri selected = android.net.Uri.parse("content://media/external/video/media/8");
+        selectVideo(selected);
+        submit("分析这个视频");
+        assertTrue("Enqueuing send still leaves media work on the worker", media.uris.isEmpty());
+        assertEquals("", input.getText().toString());
+        assertNull(root.findViewWithTag("ai.chat.pending_card"));
+        input.setText("下一条独立草稿");
+        worker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(Collections.singletonList(selected), media.uris);
+        assertEquals(Collections.singletonList(AiTestChatDialog.AttachmentKind.VIDEO), media.kinds);
+        assertEquals(Collections.singletonList(4), media.budgets);
+        assertFalse("Video reading belongs on the worker", media.readOnMain);
+        assertEquals(Collections.singletonList("分析这个视频"), sessions.get(0).prompts);
+        assertEquals(media.result.images, sessions.get(0).images.get(0));
+        assertTrue(sessions.get(0).documents.get(0).contains(media.result.text));
+        assertEquals("下一条独立草稿", input.getText().toString());
+        assertEquals(2, messageCount());
+        View sent = messages().getAdapter().getView(0, null, messages());
+        assertEquals("Prepared frames must update the sent message row",
+                media.result.images.size(), ((LinearLayout) sent.findViewWithTag("ai.chat.message.images")).getChildCount());
+        assertNull(root.findViewWithTag("ai.chat.pending_card"));
+    }
+
+    @Test public void sendingVideoWithoutWordsReadsAndSendsTheSelectedVideo() throws Exception {
+        FakeMediaLoader media = new FakeMediaLoader();
+        reopenWithMediaLoader(media);
+        selectVideo(android.net.Uri.parse("content://media/external/video/media/9"));
+        assertTrue(send.performClick());
+        worker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(1, media.uris.size());
+        assertEquals(Collections.singletonList(""), sessions.get(0).prompts);
+        assertEquals(media.result.images, sessions.get(0).images.get(0));
+        assertTrue(sessions.get(0).documents.get(0).contains(media.result.text));
+        assertEquals(2, messageCount());
+    }
+
+    @Test public void removingOrClearingPendingVideoNeverReadsItsContents() throws Exception {
+        FakeMediaLoader media = new FakeMediaLoader();
+        reopenWithMediaLoader(media);
+        selectVideo(android.net.Uri.parse("content://media/external/video/media/10"));
+        View remove = root.findViewWithTag("ai.chat.remove_pending");
+        assertNotNull(remove);
+        assertTrue(remove.performClick());
+        assertNull(root.findViewWithTag("ai.chat.pending_card"));
+        assertFalse(send.isEnabled());
+        assertEquals(0, worker.tasks.size());
+
+        selectVideo(android.net.Uri.parse("content://media/external/video/media/11"));
+        root.findViewWithTag("ai.chat.clear").performClick();
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        worker.runAllOnThread();
+        assertTrue(media.uris.isEmpty());
+        assertNull(root.findViewWithTag("ai.chat.pending_card"));
+        assertEquals(View.GONE, root.findViewWithTag("ai.chat.attachments").getVisibility());
+    }
+
+    @Test public void stoppingQueuedVideoSendSkipsReadingAndKeepsOnePendingCardForRetry() throws Exception {
+        FakeMediaLoader media = new FakeMediaLoader();
+        reopenWithMediaLoader(media);
+        selectVideo(android.net.Uri.parse("content://media/external/video/media/12"));
+        submit("先别读这个视频");
+        assertTrue(send.performClick());
+        worker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertTrue(media.uris.isEmpty());
+        assertTrue(sessions.get(0).prompts.isEmpty());
+        assertEquals("先别读这个视频", input.getText().toString());
+        assertNotNull(root.findViewWithTag("ai.chat.pending_card"));
+        assertEquals(2, messageCount());
+    }
+
+    @Test public void closingBeforeFailedMediaCompletionCannotRestoreThePendingVideo() throws Exception {
+        FakeMediaLoader media = new FakeMediaLoader();
+        media.failure = new java.io.IOException("Video read failed");
+        reopenWithMediaLoader(media);
+        selectVideo(android.net.Uri.parse("content://media/external/video/media/13"));
+        submit("关闭前的内容");
+        worker.runAllOnThread();
+        dialog.dismiss();
+        ShadowLooper.idleMainLooper();
+        assertEquals(1, media.uris.size());
+        assertTrue(sessions.get(0).prompts.isEmpty());
+        assertFalse(dialog.isShowing());
+        assertNull(root.findViewWithTag("ai.chat.pending_card"));
+        assertEquals("", input.getText().toString());
+        assertTrue(worker.isShutdown());
+    }
+
+    @Test public void failedVideoReadRestoresOneCardAndRetriesWithoutDuplicateMessageRows() throws Exception {
+        FakeMediaLoader media = new FakeMediaLoader();
+        media.failure = new java.io.IOException("Video read failed");
+        reopenWithMediaLoader(media);
+        selectVideo(android.net.Uri.parse("content://media/external/video/media/14"));
+        submit("重读视频");
+        worker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(1, media.uris.size());
+        assertTrue(sessions.get(0).prompts.isEmpty());
+        assertNotNull(root.findViewWithTag("ai.chat.pending_card"));
+        assertEquals(2, messageCount());
+        media.failure = null;
+        assertTrue(findView("ai.chat.retry").performClick());
+        worker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(2, media.uris.size());
+        assertEquals(Collections.singletonList("重读视频"), sessions.get(0).prompts);
+        assertEquals(2, messageCount());
+        assertNull(root.findViewWithTag("ai.chat.pending_card"));
+    }
+
+    @Test public void providerFailureRetriesPreparedVideoWithoutReadingItAgain() throws Exception {
+        FakeMediaLoader media = new FakeMediaLoader();
+        reopenWithMediaLoader(media);
+        sessions.get(0).failure = new java.net.SocketTimeoutException();
+        selectVideo(android.net.Uri.parse("content://media/external/video/media/15"));
+        submit("沿用已经解析的画面");
+        input.setText("保留下一条草稿");
+        worker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(1, media.uris.size());
+        assertNotNull(root.findViewWithTag("ai.chat.pending_card"));
+        assertNull(root.findViewWithTag("ai.chat.remove_image"));
+        assertEquals("保留下一条草稿", input.getText().toString());
+        sessions.get(0).failure = null;
+        assertTrue(findView("ai.chat.retry").performClick());
+        worker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals("Provider retry reuses prepared video frames", 1, media.uris.size());
+        assertEquals(Arrays.asList("沿用已经解析的画面", "沿用已经解析的画面"), sessions.get(0).prompts);
+        assertEquals(media.result.images, sessions.get(0).images.get(1));
+        assertTrue(sessions.get(0).documents.get(1).contains(media.result.text));
+        assertEquals(2, messageCount());
+        assertNull(root.findViewWithTag("ai.chat.pending_card"));
+        assertEquals("保留下一条草稿", input.getText().toString());
+    }
+
+    @Test public void videoReservesOneImageSlotForAnOpaquePdfSelectedAfterIt() throws Exception {
+        FakeMediaLoader media = new FakeMediaLoader();
+        media.budgetSizedResults = true;
+        reopenWithMediaLoader(media);
+        PdfMimeProvider provider = new PdfMimeProvider();
+        android.content.pm.ProviderInfo info = new android.content.pm.ProviderInfo();
+        info.authority = "opaque-pdf";
+        provider.attachInfo(activity, info);
+        org.robolectric.shadows.ShadowContentResolver.registerProviderInternal(info.authority, provider);
+        selectVideo(android.net.Uri.parse("content://media/external/video/media/16"));
+        selectMedia(android.net.Uri.parse("content://opaque-pdf/items/opaque-token"), AiTestChatDialog.AttachmentKind.FILE);
+        assertTrue(media.uris.isEmpty());
+        assertEquals("Selection must not query PDF metadata before Send", 0, provider.typeCalls);
+        submit("同时分析视频和 PDF");
+        worker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(Arrays.asList(3, 1), media.budgets);
+        assertEquals(Arrays.asList(AiTestChatDialog.AttachmentKind.VIDEO, AiTestChatDialog.AttachmentKind.FILE), media.kinds);
+        assertTrue(provider.typeCalls > 0);
+        assertFalse(provider.typeOnMain);
+        assertEquals(Collections.singletonList("同时分析视频和 PDF"), sessions.get(0).prompts);
+        assertEquals(4, sessions.get(0).images.get(0).size());
+        assertTrue(sessions.get(0).documents.get(0).contains("PDF 页面"));
+        assertNull(root.findViewWithTag("ai.chat.pending_card"));
+    }
+
+    @Test public void addingAnImageAfterProviderFailureReReadsVideoWithTheReducedBudget() throws Exception {
+        FakeMediaLoader media = new FakeMediaLoader();
+        media.budgetSizedResults = true;
+        reopenWithMediaLoader(media);
+        sessions.get(0).failure = new java.net.SocketTimeoutException();
+        selectVideo(android.net.Uri.parse("content://media/external/video/media/17"));
+        submit("视频画面与新图片一起分析");
+        worker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(Collections.singletonList(4), media.budgets);
+        assertEquals(4, sessions.get(0).images.get(0).size());
+
+        ChatImage photo = image();
+        dialog.addImage(photo);
+        sessions.get(0).failure = null;
+        assertTrue(send.performClick());
+        worker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(Arrays.asList(4, 3), media.budgets);
+        assertEquals(2, media.uris.size());
+        assertEquals(Arrays.asList("视频画面与新图片一起分析", "视频画面与新图片一起分析"), sessions.get(0).prompts);
+        assertEquals(4, sessions.get(0).images.get(1).size());
+        assertSame(photo, sessions.get(0).images.get(1).get(0));
+        View latest = messages().getAdapter().getView(messageCount() - 1, null, messages());
+        assertEquals("模型回复", ((TextView) latest.findViewWithTag("ai.chat.answer")).getText().toString());
+        assertNull(root.findViewWithTag("ai.chat.pending_card"));
+    }
+
     @Test
     public void failedImageTurnRestoresAttachmentsAndRetriesWithoutDuplicateBubbles() {
         ChatImage image = image();
@@ -575,6 +789,39 @@ public final class AiTestChatDialogTest {
         assertTrue(send.performClick());
     }
 
+    private void selectVideo(android.net.Uri uri) throws Exception {
+        selectMedia(uri, AiTestChatDialog.AttachmentKind.VIDEO);
+    }
+
+    private void selectMedia(android.net.Uri uri, AiTestChatDialog.AttachmentKind kind) throws Exception {
+        java.lang.reflect.Method selection = AiTestChatDialog.class.getDeclaredMethod("loadMedia",
+                android.net.Uri.class, AiTestChatDialog.AttachmentKind.class);
+        selection.setAccessible(true);
+        selection.invoke(dialog, uri, kind);
+    }
+
+    private void reopenWithMediaLoader(FakeMediaLoader media) throws Exception {
+        dialog.dismiss();
+        worker.shutdownNow();
+        historyWorker.shutdownNow();
+        worker = new ManualExecutor();
+        historyWorker = new ManualExecutor();
+        sessions = new ArrayList<>();
+        AiModelConfig config = AiModelConfig.fromJson(new JSONObject().put("id", "pending-video")
+                .put("name", "测试模型").put("apiEndpoint", "https://example.com/v1").put("modelName", "vision"));
+        dialog = new AiTestChatDialog(activity, config, () -> {
+            FakeSession session = new FakeSession();
+            sessions.add(session);
+            return session;
+        }, worker, historyWorker, false, image -> null, false, null, media);
+        dialog.show();
+        root = dialog.getWindow().getDecorView().findViewWithTag("ai.chat");
+        input = root.findViewWithTag("ai.chat.input");
+        send = root.findViewWithTag("ai.chat.send");
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+    }
+
     private void reopen(FakeSession saved, AiTestChatDialog.ThumbnailLoader thumbnails) throws Exception {
         dialog.dismiss();
         worker.shutdownNow();
@@ -675,6 +922,50 @@ public final class AiTestChatDialogTest {
         bitmap.compress(Bitmap.CompressFormat.PNG, 100, bytes);
         bitmap.recycle();
         return new ChatImage("image/png", bytes.toByteArray());
+    }
+
+    private static final class FakeMediaLoader implements AiTestChatDialog.MediaLoader {
+        final List<android.net.Uri> uris = new ArrayList<>();
+        final List<AiTestChatDialog.AttachmentKind> kinds = new ArrayList<>();
+        final List<Integer> budgets = new ArrayList<>();
+        final AiTestChatDialog.LoadedMedia result = new AiTestChatDialog.LoadedMedia("clip.mp4",
+                "仅提供视频抽样画面，不包含音频。", Arrays.asList(image(), image()));
+        Exception failure;
+        boolean readOnMain;
+        boolean budgetSizedResults;
+
+        @Override public AiTestChatDialog.LoadedMedia load(android.content.Context context, android.net.Uri uri,
+                AiTestChatDialog.AttachmentKind kind, int imageBudget) throws Exception {
+            uris.add(uri);
+            kinds.add(kind);
+            budgets.add(imageBudget);
+            readOnMain = Looper.myLooper() == Looper.getMainLooper();
+            if (failure != null) throw failure;
+            if (budgetSizedResults) {
+                List<ChatImage> frames = new ArrayList<>();
+                int count = kind == AiTestChatDialog.AttachmentKind.VIDEO ? imageBudget : 1;
+                for (int index = 0; index < count; index++) frames.add(image());
+                return new AiTestChatDialog.LoadedMedia(kind == AiTestChatDialog.AttachmentKind.VIDEO ? "clip.mp4" : "opaque.pdf",
+                        kind == AiTestChatDialog.AttachmentKind.VIDEO ? result.text : "PDF 页面", frames);
+            }
+            return result;
+        }
+    }
+
+    private static final class PdfMimeProvider extends android.content.ContentProvider {
+        int typeCalls;
+        boolean typeOnMain;
+        @Override public boolean onCreate() { return true; }
+        @Override public String getType(android.net.Uri uri) {
+            typeCalls++;
+            typeOnMain = Looper.myLooper() == Looper.getMainLooper();
+            return "application/pdf";
+        }
+        @Override public android.database.Cursor query(android.net.Uri uri, String[] projection, String selection,
+                String[] selectionArgs, String sortOrder) { throw new AssertionError("Media body must only be read by the injected worker"); }
+        @Override public android.net.Uri insert(android.net.Uri uri, android.content.ContentValues values) { throw new UnsupportedOperationException(); }
+        @Override public int delete(android.net.Uri uri, String where, String[] args) { throw new UnsupportedOperationException(); }
+        @Override public int update(android.net.Uri uri, android.content.ContentValues values, String where, String[] args) { throw new UnsupportedOperationException(); }
     }
 
     private static final class ManualExecutor extends AbstractExecutorService {

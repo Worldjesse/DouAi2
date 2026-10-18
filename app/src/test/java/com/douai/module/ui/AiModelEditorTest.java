@@ -5,6 +5,9 @@ import android.app.AlertDialog;
 import android.app.Dialog;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Gravity;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.EditText;
 import android.widget.CheckBox;
 import com.douai.module.config.AiModelConfig;
@@ -163,6 +166,30 @@ public final class AiModelEditorTest {
         assertFalse(saved.messageContactEnabled);
         assertEquals("专属 AI", saved.messageContactDisplayName());
         assertEquals(avatar, saved.messageContactAvatar);
+    }
+
+    @Test public void avatarIsCenteredAtTheTopAndItsMenuResetsTheDraftWhileContactToggleIsLast() throws Exception {
+        AiModelConfig original = AiModelConfig.fromJson(profile().toJson().put("messageContactAvatar",
+                com.douai.module.config.AiModelContactConfigTest.AVATAR));
+        editor = new AiModelEditor(activity, store, original, false, () -> { });
+        show(editor);
+        View root = editor.dialog().getWindow().getDecorView();
+        ImageView avatar = root.findViewWithTag("ai.message_contact_avatar_preview");
+        LinearLayout form = (LinearLayout) avatar.getParent();
+        assertSame(avatar, form.getChildAt(0));
+        assertEquals(Gravity.CENTER_HORIZONTAL, ((LinearLayout.LayoutParams) avatar.getLayoutParams()).gravity);
+        assertTrue(avatar.getClipToOutline());
+        View toggle = root.findViewWithTag("ai.message_contact_enabled");
+        assertSame(toggle, form.getChildAt(form.getChildCount() - 1));
+        assertNull(root.findViewWithTag("ai.message_contact_avatar"));
+        assertNull(root.findViewWithTag("ai.message_contact_avatar_reset"));
+        avatar.performClick();
+        AlertDialog actions = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertEquals("选择图片", actions.getListView().getAdapter().getItem(0));
+        assertEquals("恢复默认", actions.getListView().getAdapter().getItem(1));
+        actions.getListView().performItemClick(null, 1, 1);
+        editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertEquals("", AiModelSettings.read(store).selected().messageContactAvatar);
     }
 
     private void show(AiModelEditor value) {
