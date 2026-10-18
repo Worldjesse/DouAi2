@@ -63,7 +63,7 @@ public final class ComponentHideSettingsPageTest {
                 "settings.category.DOWNLOAD", "settings.category.AUTOPLAY", "settings.category.AUTO_REPLY",
                 "settings.category.AUTO_COMMENT", "settings.category.COMMENT", "settings.category.STREAK",
                 "settings.category.COMPONENT_HIDE", "settings.category.MESSAGE", "settings.category.SPOOF",
-                "settings.category.EXTENSION", "settings.category.BACKUP", "settings.category.ABOUT"), categoryTags(home));
+                "settings.category.EXTENSION", "settings.category.ABOUT"), categoryTags(home));
         home.scrollTo(0, 200);
 
         findDescription(home, "界面相关").performClick();
@@ -111,6 +111,11 @@ public final class ComponentHideSettingsPageTest {
         activity.setContentView(home);
 
         EditText search = (EditText) findDescription(home, "搜索设置分类");
+        for (String query : Arrays.asList("本地数据分析", "配置备份", "数据备份")) {
+            search.setText(query);
+            assertEquals(query, View.VISIBLE, findDescription(home, "扩展功能").getVisibility());
+            assertEquals(query, View.GONE, findDescription(home, "基本功能").getVisibility());
+        }
         search.setText("下载");
         assertEquals(View.VISIBLE, findDescription(home, "下载相关").getVisibility());
         assertEquals(View.GONE, findDescription(home, "基本功能").getVisibility());
@@ -150,8 +155,7 @@ public final class ComponentHideSettingsPageTest {
                 {"COMPONENT_HIDE", "组件隐藏", "24项"},
                 {"MESSAGE", "消息管理", "6项"},
                 {"SPOOF", "本地伪装", "6项"},
-                {"EXTENSION", "扩展功能", "2项"},
-                {"BACKUP", "配置备份", "2项"},
+                {"EXTENSION", "扩展功能", "4项"},
                 {"ABOUT", "关于", ""}
         };
         for (String[] item : expected) {
@@ -193,7 +197,20 @@ public final class ComponentHideSettingsPageTest {
         Dialog extensionDialog = ShadowDialog.getLatestDialog();
         assertEquals(1, countText(extensionDialog.getWindow().getDecorView(), "AI 模型设置"));
         assertEquals(1, countText(extensionDialog.getWindow().getDecorView(), "文本转语音设置"));
+        View extensionRoot = extensionDialog.getWindow().getDecorView();
+        assertNotNull(extensionRoot.findViewWithTag("settings.option.配置备份"));
+        extensionRoot.findViewWithTag("settings.option.本地数据分析").performClick();
+        Dialog analyticsDialog = ShadowDialog.getLatestDialog();
+        assertTrue(analyticsDialog.isShowing());
+        assertNotNull(analyticsDialog.getWindow().getDecorView().findViewWithTag("analytics.root"));
+        analyticsDialog.dismiss();
+        assertTrue(extensionDialog.isShowing());
+        extensionRoot.findViewWithTag("settings.option.本地数据分析").performClick();
+        Dialog reopenedAnalytics = ShadowDialog.getLatestDialog();
+        assertTrue(reopenedAnalytics.isShowing());
         screen.dismissChildPages();
+        assertFalse(reopenedAnalytics.isShowing());
+        assertFalse(extensionDialog.isShowing());
         activity.finish();
     }
 

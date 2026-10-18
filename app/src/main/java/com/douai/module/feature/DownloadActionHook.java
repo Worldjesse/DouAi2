@@ -132,9 +132,11 @@ public final class DownloadActionHook implements AutoCloseable {
         if (!enabled || !(settings.removeWatermark || options.enabled("download_custom_name")
                 || options.enabled("remove_download_limits") || !options.downloadSaveTree().isEmpty())) return chain.proceed();
         Context context = null;
+        Object selectedWork = null;
         List<MediaAsset> assets = Collections.emptyList();
         try {
             Object aweme = currentAweme(chain.getThisObject());
+            selectedWork = aweme;
             Object view = chain.getArg(0);
             if (aweme != null && view instanceof View) {
                 context = ((View) view).getContext();
@@ -148,7 +150,7 @@ public final class DownloadActionHook implements AutoCloseable {
                     && context.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
                     != PackageManager.PERMISSION_GRANTED) return chain.proceed();
             try {
-                saveAssets(context, assets);
+                saveAssets(context, assets, selectedWork);
                 safeLog("Queued " + assets.size() + " existing media resources from native download click");
             } catch (RuntimeException failure) {
                 safeLog("Local download queue failed: " + failure.getMessage());
@@ -271,9 +273,9 @@ public final class DownloadActionHook implements AutoCloseable {
         }
         if (action.kind == MenuAction.AUDIO || action.kind == MenuAction.CLEAN_VIDEO
                 || action.kind == MenuAction.PLAY_VIDEO) {
-            enqueueDownload(context, action.url, action.fileName, action.kind == MenuAction.AUDIO);
+            enqueueDownload(context, action.url, action.fileName, action.kind == MenuAction.AUDIO, aweme);
         } else if (action.kind == MenuAction.GALLERY) {
-            saveAssets(context, mediaAssets(aweme, settings.removeWatermark, options));
+            saveAssets(context, mediaAssets(aweme, settings.removeWatermark, options), aweme);
         } else if (action.kind == MenuAction.COPY_SOURCE) {
             copySourceData(context, aweme);
         }
@@ -409,13 +411,18 @@ public final class DownloadActionHook implements AutoCloseable {
         return assets;
     }
 
-    private void saveAssets(Context context, List<MediaAsset> assets) {
+    private void saveAssets(Context context, List<MediaAsset> assets, Object work) {
+        AnalyticsActionCapture analytics = AnalyticsActionCapture.capture(context, work);
+        if (!assets.isEmpty()) analytics.manual("download_request", "下载任务请求", "request");
+        boolean anyAccepted = false;
         for (MediaAsset asset : assets) {
             boolean accepted = asset.image
                     ? MediaStoreDownloader.downloadImage(context, asset.url, asset.name, options.downloadSaveTree(), this::safeLog)
                     : MediaStoreDownloader.download(context, asset.url, asset.name, false, options.downloadSaveTree(), this::safeLog);
             if (!accepted) showToast(context, "下载地址无效");
+            anyAccepted |= accepted;
         }
+        if (anyAccepted) analytics.manual("download_queued", "下载任务已加入", "accepted");
     }
 
     private static String imageExtension(String url) {
@@ -534,10 +541,14 @@ public final class DownloadActionHook implements AutoCloseable {
         }
     }
 
-    private void enqueueDownload(Context context, String url, String fileName, boolean audio) {
+    private void enqueueDownload(Context context, String url, String fileName, boolean audio, Object work) {
+        AnalyticsActionCapture analytics = AnalyticsActionCapture.capture(context, work);
+        analytics.manual("download_request", "下载任务请求", "request");
         if (!MediaStoreDownloader.download(context, url, fileName, audio,
                 options.downloadSaveTree(), message -> safeLog(message))) {
             showToast(context, "下载地址无效");
+        } else {
+            analytics.manual("download_queued", "下载任务已加入", "accepted");
         }
     }
 
@@ -627,6 +638,9 @@ public final class DownloadActionHook implements AutoCloseable {
                         return expectedId == null ? current == aweme : expectedId.equals(awemeId(current));
                     } catch (ReflectiveOperationException | RuntimeException failure) { return false; }
                 });
+        if (thirdPartyDownloadDialog != null) {
+            com.douai.module.analytics.LocalAnalytics.action(expectedId, "third_party_download", "第三方下载入口", "manual", "entry");
+        }
     }
 
     private static String awemeId(Object aweme) {

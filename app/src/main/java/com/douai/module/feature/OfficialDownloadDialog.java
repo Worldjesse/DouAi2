@@ -27,6 +27,7 @@ final class OfficialDownloadDialog implements AutoCloseable {
     }
 
     private final LiveSaver liveSaver;
+    private final AnalyticsActionCapture analytics;
     private Context context;
     private Object aweme;
     private LocalOptions options;
@@ -44,6 +45,7 @@ final class OfficialDownloadDialog implements AutoCloseable {
     OfficialDownloadDialog(Context context, Object aweme, LocalOptions options,
                            Consumer<String> log, BooleanSupplier valid, LiveSaver liveSaver) {
         this.context = ModuleTheme.themedContext(context);
+        this.analytics = AnalyticsActionCapture.capture(context, aweme);
         this.aweme = aweme;
         this.options = options == null ? new LocalOptions(Collections.emptyMap()) : options;
         this.log = log == null ? ignored -> { } : log;
@@ -182,10 +184,12 @@ final class OfficialDownloadDialog implements AutoCloseable {
         String tree = options.downloadSaveTree();
         Consumer<String> logger = log;
         close();
+        analytics.manual("download_request", "下载任务请求", "request");
         int accepted = 0;
         for (DownloadActionHook.MediaAsset asset : assets) {
             if (MediaStoreDownloader.downloadImage(target, asset.url, asset.name, tree, logger)) accepted++;
         }
+        if (accepted > 0) analytics.manual("download_queued", "下载任务已加入", "accepted");
         if (accepted < assets.size()) Toast.makeText(target, "部分图片未加入下载，请检查下载任务", Toast.LENGTH_SHORT).show();
     }
 
@@ -196,9 +200,10 @@ final class OfficialDownloadDialog implements AutoCloseable {
         String tree = options.downloadSaveTree();
         Consumer<String> logger = log;
         close();
+        analytics.manual("download_request", "下载任务请求", "request");
         if (!MediaStoreDownloader.download(target, source, name, false, tree, logger)) {
             Toast.makeText(target, "视频未加入下载，请检查下载任务", Toast.LENGTH_SHORT).show();
-        }
+        } else analytics.manual("download_queued", "下载任务已加入", "accepted");
     }
 
     private void saveAudio(String source) {
@@ -208,9 +213,10 @@ final class OfficialDownloadDialog implements AutoCloseable {
         String tree = options.downloadSaveTree();
         Consumer<String> logger = log;
         close();
+        analytics.manual("download_request", "下载任务请求", "request");
         if (!MediaStoreDownloader.download(target, source, name, true, tree, logger)) {
             Toast.makeText(target, "音频未加入下载，请检查下载任务", Toast.LENGTH_SHORT).show();
-        }
+        } else analytics.manual("download_queued", "下载任务已加入", "accepted");
     }
 
     private void saveDynamicVideos(List<Object> images, int[] indexes) {
@@ -227,10 +233,12 @@ final class OfficialDownloadDialog implements AutoCloseable {
         String tree = options.downloadSaveTree();
         Consumer<String> logger = log;
         close();
+        analytics.manual("download_request", "下载任务请求", "request");
         int accepted = 0;
         for (DownloadActionHook.MediaAsset asset : assets) {
             if (MediaStoreDownloader.download(target, asset.url, asset.name, false, tree, logger)) accepted++;
         }
+        if (accepted > 0) analytics.manual("download_queued", "下载任务已加入", "accepted");
         if (accepted < assets.size()) {
             Toast.makeText(target, accepted == 0 ? "动态视频未加入下载，请检查下载任务"
                     : "部分动态视频未加入下载，请检查下载任务", Toast.LENGTH_SHORT).show();
@@ -253,10 +261,12 @@ final class OfficialDownloadDialog implements AutoCloseable {
         LocalOptions current = options;
         Consumer<String> logger = log;
         close();
+        analytics.manual("download_request", "下载任务请求", "request");
         int accepted = 0;
         for (int imageIndex : imageIndexes) {
             if (liveSaver.start(target, work, imageIndex, current, logger)) accepted++;
         }
+        if (accepted > 0) analytics.manual("download_queued", "下载任务已加入", "accepted");
         if (accepted < imageIndexes.length) {
             Toast.makeText(target, accepted == 0 ? "实况未加入下载，请检查下载任务"
                     : "部分实况未加入下载，请检查下载任务", Toast.LENGTH_SHORT).show();

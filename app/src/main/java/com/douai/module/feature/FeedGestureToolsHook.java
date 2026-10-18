@@ -929,7 +929,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
                     case "menu": showMenu(root, holder); break;
                     case "copy_text": copyText(root.getContext(), aweme); break;
                     case "save_media": saveMedia(root, holder, aweme); break;
-                    case "open_comments": openComments(root); break;
+                    case "open_comments": openComments(root, readAid(aweme)); break;
                     case "toggle_components": componentVisibility.accept(!componentsShown.getAsBoolean()); break;
                     case "speed": applyConfiguredSpeed(root, holder); break;
                     case "view_finder": showViewFinder(root, holder); break;
@@ -951,6 +951,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
                 .setItems(labels, (dialog, index) -> dispatch(ACTION_IDS[index + 2], holder, root))
                 .setNegativeButton("取消", null).create();
         actionDialog.show();
+        com.douai.module.analytics.LocalAnalytics.feature("gesture_menu", "快捷菜单打开");
     }
 
     private void showViewFinder(View root, Object holder) throws ReflectiveOperationException {
@@ -1039,7 +1040,10 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
             pauseGuardAid = null;
             toast(root.getContext(), "视图查找器打开失败");
         }
-        else safeLog("View finder opened: " + viewFinder.diagnosticSummary());
+        else {
+            com.douai.module.analytics.LocalAnalytics.feature("view_finder", "视图查找器打开");
+            safeLog("View finder opened: " + viewFinder.diagnosticSummary());
+        }
     }
 
     private boolean persistCustomView(CustomViewLocator locator) {
@@ -1089,11 +1093,13 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         ClipboardManager clipboard = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
         if (clipboard == null) { toast(context, "剪贴板不可用"); return; }
         clipboard.setPrimaryClip(ClipData.newPlainText("抖音文案", (String) value));
+        com.douai.module.analytics.LocalAnalytics.action(readAid(aweme), "copy_text", "复制作品文案", "manual", "success");
         toast(context, "文案已复制");
     }
 
     private void saveMedia(View root, Object holder, Object aweme) {
         Context context = root.getContext();
+        com.douai.module.analytics.LocalAnalytics.action(readAid(aweme), "save_media", "手势保存媒体入口", "manual", "entry");
         LocalOptions current = options == null ? new LocalOptions(Collections.emptyMap()) : options;
         if (new com.douai.module.config.ThirdPartyDownloadSettings(current).thirdParty) {
             String expectedAid = readAid(aweme);
@@ -1125,6 +1131,8 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         List<DownloadActionHook.MediaAsset> assets = DownloadActionHook.mediaAssets(aweme,
                 current.enabled("remove_watermark", true), current);
         if (assets.isEmpty()) { toast(context, "当前作品没有可保存的媒体地址"); return; }
+        String workId = readAid(aweme);
+        com.douai.module.analytics.LocalAnalytics.action(workId, "download_request", "下载任务请求", "manual", "request");
         int accepted = 0;
         for (DownloadActionHook.MediaAsset asset : assets) {
             boolean queued = asset.image
@@ -1135,17 +1143,20 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
             if (queued) accepted++;
         }
         safeLog("Official direct download queued: " + accepted + "/" + assets.size());
+        if (accepted > 0) com.douai.module.analytics.LocalAnalytics.action(workId, "download_queued", "下载任务已加入", "manual", "accepted");
         if (accepted < assets.size()) toast(context, "部分媒体未加入下载，请检查下载任务");
     }
 
     @SuppressLint("ResourceType")
-    private void openComments(View root) {
+    private void openComments(View root, String workId) {
         View container = HostResourceCatalog.findVerifiedView(root, 2131371412);
         if (container == null) container = HostResourceCatalog.findVerifiedView(root, 2131371297);
         List<View> candidates = new ArrayList<>();
         collectClicks(container, candidates);
         if (candidates.size() != 1) { toast(root.getContext(), "评论入口未唯一定位"); return; }
-        candidates.get(0).performClick();
+        if (candidates.get(0).performClick()) {
+            com.douai.module.analytics.LocalAnalytics.action(workId, "open_comments", "快捷打开评论", "manual", "request");
+        }
     }
 
     private static void collectClicks(View view, List<View> candidates) {
@@ -1202,6 +1213,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         if (speedOverride == null) speedOverride = new GestureSpeedOverride();
         try {
             speedOverride.apply(requested, () -> setSpeed.invoke(player, requested));
+            com.douai.module.analytics.LocalAnalytics.action(aid, "gesture_speed", "手势切换倍速", "manual", "request");
             manualSpeedEnabled = enable;
             manualSpeedHolder = new WeakReference<>(holder);
             manualSpeedAid = aid;

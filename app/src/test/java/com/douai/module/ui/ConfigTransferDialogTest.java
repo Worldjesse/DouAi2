@@ -210,12 +210,20 @@ public final class ConfigTransferDialogTest {
     @Test public void backupNavigationClosesWithSettingsAndLeavesStorageUntouched() {
         ModuleSettingsScreen screen = new ModuleSettingsScreen(activity, store);
         View home = screen.createView(); activity.setContentView(home);
-        home.findViewWithTag("settings.category.BACKUP").performClick();
+        home.findViewWithTag("settings.category.EXTENSION").performClick();
+        Dialog extension = ShadowDialog.getLatestDialog();
+        extension.getWindow().getDecorView().findViewWithTag("settings.option.配置备份").performClick();
         Dialog backup = ShadowDialog.getLatestDialog();
         assertTrue(backup.isShowing());
         assertNotNull(backup.getWindow().getDecorView().findViewWithTag("config.backup.export"));
+        backup.dismiss(); ShadowLooper.idleMainLooper();
+        assertTrue(extension.isShowing());
+        extension.getWindow().getDecorView().findViewWithTag("settings.option.配置备份").performClick();
+        Dialog reopenedBackup = ShadowDialog.getLatestDialog();
+        assertTrue(reopenedBackup.isShowing());
         screen.dismissChildPages(); ShadowLooper.idleMainLooper();
-        assertFalse(backup.isShowing()); assertEquals(0, store.applies);
+        assertFalse(reopenedBackup.isShowing()); assertFalse(extension.isShowing());
+        assertEquals(0, store.applies);
     }
 
     private View view(String tag) { return page.dialog().getWindow().getDecorView().findViewWithTag("config.backup." + tag); }

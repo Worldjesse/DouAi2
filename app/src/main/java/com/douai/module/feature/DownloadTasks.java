@@ -71,7 +71,7 @@ public final class DownloadTasks {
     }
     static Task submit(Context source, String key, String name, Work work, Consumer<String> log) {
         Context application = source.getApplicationContext();
-        Task task = new Task(application == null ? source : application, name, log,
+        Task task = new Task(application == null ? source : application, key, name, log,
                 key.startsWith("third-party\n") ? "第三方下载失败，请重试" : "媒体保存失败，请重试");
         synchronized (TASKS) { TASKS.put(task.id, task); }
         BoundedMediaQueue.Handle handle = QUEUE.submit(key, () -> task.run(work), task::released);
@@ -107,6 +107,7 @@ public final class DownloadTasks {
         final Context context;
         final Consumer<String> log;
         final String failureMessage;
+        private final AnalyticsActionCapture analytics;
         final DownloadTransfer transfer = transfers.get();
         volatile BoundedMediaQueue.Handle handle;
         volatile String status = "queued";
@@ -114,8 +115,11 @@ public final class DownloadTasks {
         volatile String successMessage = "下载已完成";
         volatile boolean terminal;
         final AtomicBoolean disconnectQueued = new AtomicBoolean();
-        Task(Context context, String name, Consumer<String> log, String failureMessage) {
+        Task(Context context, String key, String name, Consumer<String> log, String failureMessage) {
             this.context = context; this.log = log; this.failureMessage = failureMessage;
+            // A parser finishing is not saved media. Completed saves count once per task, with no
+            // work/visit attribution: a later foreground card must never inherit this completion.
+            analytics = key.startsWith("third-party\nparse\n") ? null : AnalyticsActionCapture.capture(context, null);
             transfer.name = name; transfer.changed = DownloadTasks::changed;
         }
         Snapshot snapshot() {
@@ -184,6 +188,9 @@ public final class DownloadTasks {
                 handle = null;
                 transfer.phase = "completed".equals(status) ? "已完成" : "cancelled".equals(status) ? "已取消"
                         : "timed_out".equals(status) ? "超过 30 分钟，已停止" : "下载失败，请重试";
+            }
+            if ("completed".equals(status) && analytics != null) {
+                analytics.manual("download_completed", "下载任务完成", "success");
             }
             trim(); changed();
             MAIN.post(() -> {

@@ -10,6 +10,8 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -143,6 +145,11 @@ class MiuixHostSettingsTest {
     @Test
     @Config(sdk = [28])
     fun searchFindsCategoriesAndDownloadSwitchesKeepTheirDependency() {
+        for (query in listOf("本地数据分析", "配置备份", "数据备份")) {
+            compose.onNodeWithTag("settings.search").performTextReplacement(query)
+            compose.onNodeWithText("基本功能").assertDoesNotExist()
+            compose.onNodeWithText("扩展功能").assertIsDisplayed()
+        }
         compose.onNodeWithTag("settings.search").performTextReplacement("下载")
         compose.onNodeWithText("基本功能").assertDoesNotExist()
         compose.onNodeWithText("下载相关").assertIsDisplayed().performClick()
@@ -386,7 +393,7 @@ class MiuixHostSettingsTest {
             .put("systemPrompt", "原来的记忆"))
         compose.runOnUiThread { AiModelSettings(listOf(config), config.id).save(store) }
         compose.onNodeWithTag("settings.search").performTextReplacement("扩展")
-        compose.onNodeWithTag("settings.category.12").performClick()
+        compose.onNodeWithText("扩展功能").assertIsDisplayed().performClick()
         compose.onNodeWithTag("settings.option.AI 模型设置").performClick()
         compose.onNodeWithTag("settings.option.自定义代理").performClick()
         compose.onNodeWithTag("settings.input.API 基础地址").assertExists()
@@ -427,7 +434,8 @@ class MiuixHostSettingsTest {
         val layout = if (compose.activity.resources.configuration.orientation ==
             android.content.res.Configuration.ORIENTATION_LANDSCAPE) "landscape" else "narrow"
         compose.onNodeWithTag("settings.search").performTextReplacement("关于")
-        compose.onNodeWithTag("settings.category.14").assertIsDisplayed().performClick()
+        compose.onNode(hasText("关于") and !hasTestTag("settings.search"))
+            .assertIsDisplayed().performClick()
         compose.onNodeWithTag("settings.option.帮助").assertIsDisplayed()
         saveDialogPreview("about-$layout")
         compose.runOnUiThread {

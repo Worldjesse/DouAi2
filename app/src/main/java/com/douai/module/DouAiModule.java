@@ -47,6 +47,8 @@ import com.douai.module.feature.RecallHighlightHook;
 import com.douai.module.feature.FeedGestureToolsHook;
 import com.douai.module.feature.DirectMessageSpeechHook;
 import com.douai.module.feature.MediaModelHook;
+import com.douai.module.feature.LocalAnalyticsHook;
+import com.douai.module.analytics.LocalAnalytics;
 import com.douai.module.feature.CommentEnhancementsHook;
 import com.douai.module.feature.CommentVoiceHook;
 import com.douai.module.feature.NativeCommentSpeechHook;
@@ -104,6 +106,8 @@ public final class DouAiModule extends XposedModule {
     private volatile DirectMessageSpeechHook directMessageSpeechHook;
     private volatile boolean additionalInitialized;
     private volatile MediaModelHook mediaModelHook;
+    private volatile LocalAnalyticsHook localAnalyticsHook;
+    private volatile String localAnalyticsHookFailure;
     private volatile CommentEnhancementsHook commentEnhancementsHook;
     private volatile CommentVoiceHook commentVoiceHook;
     private volatile NativeCommentSpeechHook nativeCommentSpeechHook;
@@ -211,6 +215,11 @@ public final class DouAiModule extends XposedModule {
         try {
             Context hostContext = awaitHostContext();
             targetContext = hostContext;
+            try {
+                LocalAnalytics.initialize(hostContext);
+            } catch (RuntimeException failure) {
+                log(5, TAG, "Local analytics storage unavailable: " + failure.getClass().getSimpleName());
+            }
             hostVersionEvidence = HostAdaptationDiagnostics.readInstalledVersion(hostContext);
             HostUiController ui = ensureHostUiController(hostContext);
             registerDiagnosticsReceiver(hostContext);
@@ -652,6 +661,25 @@ public final class DouAiModule extends XposedModule {
 
     private synchronized void installFeatureHooksIfReady() {
         if (hostScanReport == null || hostClassLoader == null || targetContext == null || !configurationReady) return;
+        if (localAnalyticsHook == null) {
+            try {
+                localAnalyticsHook = LocalAnalyticsHook.install(this, hostScanReport, hostClassLoader,
+                        targetContext, message -> log(3, TAG, message));
+                localAnalyticsHookFailure = null;
+                Activity resumed = hostUiController == null ? null : hostUiController.getResumedActivity();
+                if (resumed != null) {
+                    LocalAnalyticsHook installed = localAnalyticsHook;
+                    new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                        if (hostUiController != null && hostUiController.getResumedActivity() == resumed) {
+                            installed.onActivityResumed(resumed);
+                        }
+                    });
+                }
+            } catch (Throwable failure) {
+                localAnalyticsHookFailure = HostAdaptationDiagnostics.installationFailure(failure);
+                log(5, TAG, "Local analytics hook unavailable: " + localAnalyticsHookFailure);
+            }
+        }
         if (nativeFollowLists == null) {
             nativeFollowLists = NativeFollowLists.install(hostClassLoader, hostScanReport, localOptions,
                     message -> log(3, TAG, message));
@@ -982,6 +1010,8 @@ public final class DouAiModule extends XposedModule {
         Bundle snapshot = new Bundle(scanDiagnostics);
         snapshot.putString("module_version", BuildConfig.VERSION_NAME);
         snapshot.putBoolean("additional_initialized", additionalInitialized);
+        snapshot.putBoolean("feature.local_analytics.installed", localAnalyticsHook != null);
+        snapshot.putString("feature.local_analytics.failure", localAnalyticsHookFailure);
         for (String key : new String[]{"remove_splash_ads", "remove_update_dialog", "remove_teen_dialog",
                 "hide_video_black_edges", "hide_camera_plus", "disable_double_tap_like",
                 "prevent_skip_hidden", "prevent_insert_video", "block_long_press_speed"}) {

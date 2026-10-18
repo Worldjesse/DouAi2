@@ -364,6 +364,13 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
             }
             removeNotice(item);
             record(withStatus(item.entry, result));
+            if ("sent".equals(result)) {
+                if (AutomationHistoryStore.COMMENT.equals(item.kind)) {
+                    com.douai.module.analytics.LocalAnalytics.feature("auto_comment_sent", "自动评论成功");
+                } else if (isReply(item.kind)) {
+                    com.douai.module.analytics.LocalAnalytics.feature("auto_reply_sent", "自动回复成功");
+                }
+            }
             safeLog("Automatic " + item.kind + " outcome: " + result);
             item.outcome.accept(result);
         });

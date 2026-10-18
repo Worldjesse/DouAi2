@@ -311,7 +311,18 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
             // UP goes to the next item; DOWN goes to the previous item. The pager checks boundaries.
             boolean followDirection = local == null || local.enabled("smart_swipe", true);
             int targetDirection = followDirection ? direction : 1;
-            Object moved = (targetDirection > 0 ? next : previous).invoke(pagerContext, "DouAiAutoSlide", true);
+            // The host may deliver the next selection synchronously during invoke().
+            com.douai.module.analytics.LocalAnalytics.markAutomaticAdvance();
+            Object moved;
+            try {
+                moved = (targetDirection > 0 ? next : previous).invoke(pagerContext, "DouAiAutoSlide", true);
+            } catch (ReflectiveOperationException | RuntimeException failure) {
+                com.douai.module.analytics.LocalAnalytics.cancelAutomaticAdvance();
+                throw failure;
+            }
+            if (Boolean.TRUE.equals(moved)) {
+                com.douai.module.analytics.LocalAnalytics.action(aid, "auto_slide", "自动翻页", "automatic", "accepted");
+            } else com.douai.module.analytics.LocalAnalytics.cancelAutomaticAdvance();
             diagnostic = Boolean.TRUE.equals(moved) ? (targetDirection > 0 ? "已请求向上翻页" : "已请求向下翻页")
                     : "当前列表边界未能翻页";
             safeLog("DouAi auto-slide advance direction=" + (targetDirection > 0 ? "UP" : "DOWN")

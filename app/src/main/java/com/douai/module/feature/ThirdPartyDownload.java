@@ -51,7 +51,7 @@ public final class ThirdPartyDownload {
             link = "";
         }
         Session session = new Session(activity, config, link, current.downloadSaveTree(),
-                log == null ? ignored -> { } : log, active);
+                log == null ? ignored -> { } : log, active, AnalyticsActionCapture.capture(source, aweme));
         onMain(session::begin);
         return session;
     }
@@ -76,6 +76,8 @@ public final class ThirdPartyDownload {
         Context application = source.getApplicationContext();
         Context context = application == null ? source : application;
         String key = config.getTemplate + '\n' + link + '\n' + tree;
+        AnalyticsActionCapture analytics = AnalyticsActionCapture.capture(source, aweme);
+        analytics.manual("download_request", "下载任务请求", "request");
         boolean accepted = DownloadTasks.submit(context, "third-party\n" + key, "第三方作品", transfer -> {
                 transfer.phase("正在解析作品");
                 String body = new ThirdPartyGetClient.Request(transfer, MediaStoreDownloader.connections).fetch(config, link);
@@ -86,6 +88,7 @@ public final class ThirdPartyDownload {
                 return "已保存 " + plan.assets.size() + " 个文件和作品信息到 "
                         + (tree.isEmpty() ? "Download/DouAi" : "所选目录");
         }, log) != null;
+        if (accepted) analytics.manual("download_queued", "下载任务已加入", "accepted");
         toast(context, accepted ? "已加入下载任务，可在设置中查看进度或取消" : "该作品正在下载或队列已满");
     }
 
@@ -94,6 +97,7 @@ public final class ThirdPartyDownload {
         private final Application application;
         private final ThirdPartyDownloadSettings config;
         private final String link, tree;
+        private final AnalyticsActionCapture analytics;
         private Consumer<String> log;
         private BooleanSupplier valid;
         private volatile boolean closed;
@@ -104,10 +108,11 @@ public final class ThirdPartyDownload {
         private AutoCloseable taskSubscription;
 
         Session(Activity activity, ThirdPartyDownloadSettings config, String link, String tree,
-                Consumer<String> log, BooleanSupplier valid) {
+                Consumer<String> log, BooleanSupplier valid, AnalyticsActionCapture analytics) {
             owner = new WeakReference<>(activity);
             application = activity.getApplication();
             this.config = config; this.link = link; this.tree = tree; this.log = log; this.valid = valid;
+            this.analytics = analytics;
         }
 
         private String key() { return config.getTemplate + '\n' + link + '\n' + tree; }
@@ -186,11 +191,13 @@ public final class ThirdPartyDownload {
             for (ThirdPartyDownloadPlan.Asset asset : plan.assets) selectedKey.append('\n').append(asset.url).append('\n').append(asset.name);
             Application target = application;
             close();
+            analytics.manual("download_request", "下载任务请求", "request");
             boolean accepted = DownloadTasks.submit(target, selectedKey.toString(), plan.baseName, transfer -> {
                 MediaStoreDownloader.saveThirdPartyBundle(target, plan, capturedTree, transfer);
                 return "已保存 " + plan.assets.size() + " 个文件和作品信息到 "
                         + (capturedTree.isEmpty() ? "Download/DouAi" : "所选目录");
             }, logger) != null;
+            if (accepted) analytics.manual("download_queued", "下载任务已加入", "accepted");
             toast(target, accepted ? "已加入下载任务，可在设置中查看进度或取消" : "该选择正在下载或队列已满");
         }
 

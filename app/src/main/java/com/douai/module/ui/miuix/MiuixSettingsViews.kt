@@ -127,6 +127,7 @@ object MiuixSettingsViews {
     ) : AutoCloseable {
         private val environment = HostComposeEnvironment(activity, onClose)
         private var currentScan by mutableStateOf(ScanStatus.pending())
+        private var categorySearchTerms by mutableStateOf(titles.copyOf())
         val view = ComposeView(environment.context())
 
         init {
@@ -136,6 +137,10 @@ object MiuixSettingsViews {
         }
 
         fun setScanStatus(status: ScanStatus) { currentScan = status }
+        fun setSearchTerms(terms: Array<String>) {
+            require(terms.size == titles.size)
+            categorySearchTerms = terms.copyOf()
+        }
         fun bindBackNavigation(dialog: Dialog) = environment.bindBackNavigation(dialog)
         override fun close() = environment.close()
 
@@ -178,7 +183,7 @@ object MiuixSettingsViews {
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
                         .testTag("settings.search"),
                 )
-                val matching = titles.indices.filter { titles[it].contains(query.trim(), ignoreCase = true) }
+                val matching = titles.indices.filter { categorySearchTerms[it].contains(query.trim(), ignoreCase = true) }
                 if (matching.isEmpty()) BasicComponent(title = "没有匹配的设置分类")
                 matching.forEach { index ->
                     BasicComponent(

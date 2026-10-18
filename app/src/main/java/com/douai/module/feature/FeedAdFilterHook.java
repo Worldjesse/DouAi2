@@ -222,6 +222,8 @@ public final class FeedAdFilterHook implements AutoCloseable {
         try {
             Object result = chain.proceed();
             int page = filteredPages.incrementAndGet();
+            // One successful filtered response, irrespective of how many overlapping preload lists it has.
+            com.douai.module.analytics.LocalAnalytics.feature("feed_filter", "内容过滤生效批次");
             if (page <= 5) {
                 safeLog("Removed " + removed + " entries from feed and preload response lists");
             }

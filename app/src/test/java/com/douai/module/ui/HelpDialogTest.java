@@ -46,14 +46,13 @@ public final class HelpDialogTest {
         ShadowLooper.idleMainLooper();
     }
 
-    @Test public void backupFollowsExtensionAndAboutKeepsItsExistingProjectInformation() {
+    @Test public void aboutFollowsExtensionAndKeepsItsExistingProjectInformation() {
         View extension = home.findViewWithTag("settings.category.EXTENSION");
-        View backup = home.findViewWithTag("settings.category.BACKUP");
         View about = home.findViewWithTag("settings.category.ABOUT");
         LinearLayout list = (LinearLayout) extension.getParent();
-        assertNotNull(backup);
-        assertEquals(list.indexOfChild(extension) + 2, list.indexOfChild(backup));
-        assertEquals(list.indexOfChild(backup) + 2, list.indexOfChild(about));
+        assertNull(home.findViewWithTag("settings.category.ANALYTICS"));
+        assertNull(home.findViewWithTag("settings.category.BACKUP"));
+        assertEquals(list.indexOfChild(extension) + 2, list.indexOfChild(about));
         assertEquals(View.GONE, ((LinearLayout) about).getChildAt(1).getVisibility());
         about.performClick();
         AlertDialog page = latest();

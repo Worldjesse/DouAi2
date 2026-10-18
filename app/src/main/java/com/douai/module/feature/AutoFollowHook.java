@@ -150,6 +150,8 @@ public final class AutoFollowHook implements AutoCloseable {
                                 || !button.isAttachedToWindow()
                                 || !button.performClick()) {
                             attemptedIds.remove(awemeId);
+                        } else {
+                            com.douai.module.analytics.LocalAnalytics.action(awemeId, "auto_follow", "自动关注点击", "automatic", "request");
                         }
                     } catch (Throwable failure) {
                         attemptedIds.remove(awemeId);

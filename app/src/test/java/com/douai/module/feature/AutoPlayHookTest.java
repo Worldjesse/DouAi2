@@ -361,6 +361,36 @@ public final class AutoPlayHookTest {
 
     private static void idle() { ShadowLooper.idleMainLooper(); }
 
+    @Test
+    public void analyticsCountsAcceptedAutoSlideOnceAndSkipsFailedOrDisabledActions() throws Throwable {
+        try (Fixture f = new Fixture(Collections.emptyMap())) {
+            com.douai.module.analytics.LocalAnalytics store = com.douai.module.analytics.LocalAnalytics.get(f.activity);
+            com.douai.module.analytics.LocalAnalytics.initialize(f.activity);
+            try {
+                store.clear();
+                store.setEnabled(true);
+                f.completed("one");
+                f.completed("one");
+                assertEquals("duplicate completion must not count twice", 1, store.snapshot(0).totalFeatureUses);
+                assertEquals("自动翻页", store.snapshot(0).features.get(0).label);
+                f.select(f.holder("blocked-at-list-boundary"));
+                f.panel.B3.canMove = false;
+                f.completed("blocked-at-list-boundary");
+                assertEquals("rejected host move is not usage", 1, store.snapshot(0).totalFeatureUses);
+                store.setEnabled(false);
+                f.panel.B3.canMove = true;
+                f.select(f.holder("disabled-analytics"));
+                f.completed("disabled-analytics");
+                assertEquals("feature still works while collection is disabled", 3, f.panel.B3.nextCalls);
+                assertEquals("disabled analytics stores no event", 1, store.snapshot(0).totalFeatureUses);
+            } finally {
+                store.setEnabled(false);
+                store.clear();
+                store.close();
+            }
+        }
+    }
+
     private static final class Fixture implements AutoCloseable {
         final Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         final FeedRoot root = new FeedRoot(activity);

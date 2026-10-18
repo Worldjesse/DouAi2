@@ -137,6 +137,9 @@ public final class ModuleSettingsScreen {
         }
         miuixHome = new MiuixSettingsViews.Home(activity, titles, counts,
                 index -> openCategory(categories[index]), () -> { if (onClose != null) onClose.run(); });
+        String[] searchTerms = new String[categories.length];
+        for (int index = 0; index < categories.length; index++) searchTerms[index] = categories[index].searchText();
+        miuixHome.setSearchTerms(searchTerms);
         View home = miuixHome.getView();
         home.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
             @Override public void onViewAttachedToWindow(View view) { }
@@ -168,7 +171,7 @@ public final class ModuleSettingsScreen {
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
                 String query = s.toString().trim().toLowerCase(java.util.Locale.ROOT);
                 for (CategoryRow row : categoryRows) {
-                    row.view.setVisibility(query.isEmpty() || row.category.title.toLowerCase(java.util.Locale.ROOT).contains(query)
+                    row.view.setVisibility(query.isEmpty() || row.category.searchText().toLowerCase(java.util.Locale.ROOT).contains(query)
                             ? View.VISIBLE : View.GONE);
                 }
             }
@@ -216,12 +219,6 @@ public final class ModuleSettingsScreen {
 
     private void openCategory(Category category) {
         settings = repository.load();
-        if (category == Category.BACKUP) {
-            ConfigTransferDialog page = new ConfigTransferDialog(context, repository, miuixHome != null,
-                    () -> settings = repository.load());
-            showOptionDialog(page.dialog(), page::close);
-            return;
-        }
         if (category == Category.ABOUT) {
             showOptionDialog(AboutDialog.create(context, miuixHome != null, this::showOptionDialog));
             return;
@@ -447,11 +444,24 @@ public final class ModuleSettingsScreen {
             case EXTENSION:
                 addOption("AI 模型设置", "", null, true, this::showAiModelSettings);
                 addOption("文本转语音设置", "", null, true, this::showSpeechSettings);
+                addOption("本地数据分析", "", null, true, this::showLocalAnalytics);
+                addOption("配置备份", "", null, true, this::showConfigBackup);
                 break;
             case ABOUT:
             case COMPONENT_HIDE:
                 break;
         }
+    }
+
+    private void showLocalAnalytics() {
+        LocalAnalyticsDialog page = new LocalAnalyticsDialog(context, repository);
+        showOptionDialog(page.dialog(), page::close);
+    }
+
+    private void showConfigBackup() {
+        ConfigTransferDialog page = new ConfigTransferDialog(context, repository, miuixHome != null,
+                () -> settings = repository.load());
+        showOptionDialog(page.dialog(), page::close);
     }
 
     private void buildDownloadControls() {
@@ -1778,8 +1788,7 @@ public final class ModuleSettingsScreen {
         COMPONENT_HIDE("组件隐藏", 24),
         MESSAGE("消息管理", 6),
         SPOOF("本地伪装", 6),
-        EXTENSION("扩展功能", 2),
-        BACKUP("配置备份", 2),
+        EXTENSION("扩展功能", 4),
         ABOUT("关于", -1);
 
         final String title;
@@ -1788,6 +1797,10 @@ public final class ModuleSettingsScreen {
         Category(String title, int itemCount) {
             this.title = title;
             this.itemCount = itemCount;
+        }
+
+        String searchText() {
+            return this == EXTENSION ? title + " AI 模型设置 文本转语音设置 本地数据分析 数据备份 配置备份" : title;
         }
     }
 

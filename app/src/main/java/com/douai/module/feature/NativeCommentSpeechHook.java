@@ -134,6 +134,7 @@ public final class NativeCommentSpeechHook implements AutoCloseable {
                     HostTargets.field(model.getClass(), "d").set(model, Collections.emptyList());
                     reentry.set(Boolean.TRUE);
                     submit.invoke(receiver, model);
+                    com.douai.module.analytics.LocalAnalytics.feature("comment_tts", "评论语音提交");
                     safeLog("Submitted synthesized audio through the native comment publish workflow");
                 } catch (ReflectiveOperationException | RuntimeException error) {
                     Throwable cause = error instanceof InvocationTargetException ? ((InvocationTargetException) error).getCause() : error;

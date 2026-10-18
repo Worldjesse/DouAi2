@@ -1,0 +1,751 @@
+package com.douai.module.ui;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Intent;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Switch;
+import android.widget.ScrollView;
+import android.widget.TextView;
+
+import com.douai.module.analytics.AnalyticsSnapshot;
+import com.douai.module.analytics.AnalyticsSnapshot.Bucket;
+import com.douai.module.analytics.AnalyticsSnapshot.Rank;
+import com.douai.module.analytics.AnalyticsSnapshot.Recent;
+import com.douai.module.analytics.PortraitSnapshot;
+
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.json.JSONObject;
+import org.robolectric.Robolectric;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
+import org.robolectric.shadow.api.Shadow;
+import org.robolectric.annotation.Config;
+import org.robolectric.annotation.GraphicsMode;
+import org.robolectric.shadows.ShadowDialog;
+import org.robolectric.shadows.ShadowActivity;
+import org.robolectric.shadows.ShadowLooper;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.Assert.*;
+
+@RunWith(RobolectricTestRunner.class)
+@Config(sdk = 35, qualifiers = "notnight")
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+public final class LocalAnalyticsDialogTest {
+    private static final String[] AI_KEYS = {"overview", "trend", "types", "authors", "topics", "features", "hours"};
+    private static final String[] AI_TEXTS = {
+            "当前范围累计刷到 1,572 次、涉及 1,419 个不同作品，模块功能使用共 628 次。浏览次数不等于实际观看时长。",
+            "10/15 记录了 315 次浏览，是当前图表最高值。单日变化不能直接用于判断长期习惯。",
+            "短视频共有 1,000 次，占比约 63.61%；实况图集共有 200 次。类型占比描述本次样本构成。",
+            "作者排行仅覆盖前十位作者。反复刷到同一作者不代表关注或完整观看了对应作品。",
+            "一个作品可以包含多个话题，因此话题次数之和可能超过浏览次数，不能据此推断个人身份。",
+            "保存媒体触发 248 次、作品总结触发 183 次。功能触发次数不等于每次请求或下载均成功。",
+            "19 时记录了 71 次浏览，属于当前样本中较活跃的时段。缺少实际观看时长，无法推算使用时长。"
+    };
+    private Activity activity;
+    private LocalAnalyticsDialog page;
+    private FakeSource source;
+    private ManualExecutor worker;
+    private ManualExecutor analysisWorker;
+    private FakeAnalysisService analysis;
+
+    @Before public void setup() {
+        activity = Robolectric.buildActivity(Activity.class).setup().get();
+        source = new FakeSource();
+        worker = new ManualExecutor();
+        analysisWorker = new ManualExecutor();
+        analysis = new FakeAnalysisService();
+        page = new LocalAnalyticsDialog(activity, source, worker, analysis, analysisWorker);
+        page.dialog().show();
+        ShadowLooper.idleMainLooper(); // Dialog dispatches onShow through its Handler.
+    }
+
+    @After public void cleanup() {
+        page.dialog().dismiss();
+        page.close();
+        activity.finish();
+        ShadowLooper.idleMainLooper();
+    }
+
+    @Test public void recordingDefaultsOffAndUsesBackgroundMutation() {
+        assertEquals(0, source.reads);
+        assertTrue(text("analytics.status").contains("正在读取"));
+        drain();
+        Switch recording = find("analytics.recording");
+        assertFalse(recording.isChecked());
+        assertNotNull(find("analytics.empty"));
+        recording.setChecked(true);
+        assertFalse(source.enabled);
+        assertFalse(recording.isEnabled());
+        drain();
+        assertTrue(source.enabled);
+        assertTrue(recording.isEnabled());
+        assertTrue(text("analytics.status").contains("正在本地记录"));
+    }
+
+    @Test public void staleRangeAndDismissedResultsCannotReplaceCurrentReport() {
+        find("analytics.range.30").performClick();
+        assertEquals(2, worker.tasks.size());
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertTrue(text("analytics.status").contains("正在读取"));
+        assertEquals(7, source.lastDays);
+        worker.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(30, source.lastDays);
+        assertTrue(text("analytics.status").contains("最近 30 天"));
+        find("analytics.range.0").performClick();
+        String pendingStatus = text("analytics.status");
+        page.dialog().dismiss();
+        drain();
+        assertEquals(pendingStatus, text("analytics.status"));
+    }
+
+    @Test public void clearRequiresConfirmationAndKeepsRecordingChoice() {
+        source.enabled = true;
+        source.data = fixture();
+        drain();
+        find("analytics.clear").performClick();
+        AlertDialog confirmation = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertEquals(0, source.clears);
+        confirmation.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+        ShadowLooper.idleMainLooper();
+        assertEquals(0, source.clears);
+        find("analytics.clear").performClick();
+        confirmation = (AlertDialog) ShadowDialog.getLatestDialog();
+        confirmation.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertEquals(0, source.clears);
+        drain();
+        assertEquals(1, source.clears);
+        assertTrue(source.enabled);
+        assertTrue(((Switch) find("analytics.recording")).isChecked());
+        assertNotNull(find("analytics.empty"));
+    }
+
+    @Test public void failedReadCanBeRetriedWithoutChangingData() {
+        source.failure = true;
+        drain();
+        assertTrue(text("analytics.status").contains("读取失败"));
+        source.failure = false;
+        source.data = fixture();
+        find("analytics.refresh").performClick();
+        drain();
+        assertNotNull(find("analytics.types.chart"));
+        assertEquals(0, source.clears);
+    }
+
+    @Test public void confirmedClearFinishesEvenWhenReportClosesBeforeWorkerStarts() {
+        source.enabled = true;
+        source.data = fixture();
+        drain();
+        find("analytics.clear").performClick();
+        AlertDialog confirmation = (AlertDialog) ShadowDialog.getLatestDialog();
+        confirmation.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        ShadowLooper.idleMainLooper(); // Dispatch the confirmed action before closing its report.
+        String pendingStatus = text("analytics.status");
+        page.dialog().dismiss();
+        page.close();
+        assertTrue(worker.isShutdown());
+        assertEquals(0, source.clears);
+        drain();
+        assertEquals(1, source.clears);
+        assertEquals(pendingStatus, text("analytics.status"));
+    }
+
+    @Test public void chartAccessibilityCanSelectAnExactTrendValue() {
+        source.data = fixture();
+        drain();
+        View chart = find("analytics.trend.chart");
+        assertTrue(chart.getContentDescription().toString().contains("10/12 250 次"));
+        chart.performClick();
+        assertEquals("10/12 · 250 次", text("analytics.trend.selection"));
+        chart.performClick();
+        assertEquals("10/13 · 246 次", text("analytics.trend.selection"));
+        View donut = find("analytics.types.chart");
+        assertTrue(donut.getContentDescription().toString().contains("实况图集 200 次"));
+        assertTrue(donut.getContentDescription().toString().contains("12.72%"));
+    }
+
+    @Test public void aiRequestIsExplicitAndSharesOnlyAnalysisTextAfterSuccess() {
+        source.data = fixture();
+        drain();
+        assertEquals(0, analysis.requests.size());
+        ViewGroup report = find("analytics.report");
+        assertSame(find("analytics.analysis.card"), report.getChildAt(report.getChildCount() - 1));
+        assertNull(find("analytics.analysis.share"));
+        find("analytics.analysis.request").performClick();
+        assertEquals(1, analysis.requests.size());
+        assertSame(source.data, analysis.snapshot);
+        assertEquals(7, analysis.days);
+        assertEquals(0, analysis.requests.get(0).runs);
+        assertNotNull(find("analytics.analysis.progress"));
+        assertNull(find("analytics.analysis.share"));
+        finishAnalysis();
+        assertEquals(1, analysis.requests.get(0).runs);
+        assertEquals("分析已显示在各图表下方", text("analytics.analysis.result"));
+        for (int index = 0; index < AI_KEYS.length; index++) {
+            TextView sectionText = find("analytics.analysis.text." + AI_KEYS[index]);
+            assertEquals(AI_TEXTS[index], sectionText.getText().toString());
+            assertTrue(sectionText.isTextSelectable());
+            ViewGroup slot = find("analytics.analysis.section." + AI_KEYS[index]);
+            ViewGroup chartCard = find("analytics.chartcard." + AI_KEYS[index]);
+            assertSame(slot, sectionText.getParent());
+            assertSame(chartCard, slot.getParent());
+            assertSame(slot, chartCard.getChildAt(chartCard.getChildCount() - 1));
+        }
+        assertNull(find("analytics.analysis.request"));
+        ShadowActivity shadowActivity = Shadow.extract(activity);
+        assertNull(shadowActivity.getNextStartedActivity());
+        find("analytics.analysis.share").performClick();
+        Intent chooser = shadowActivity.getNextStartedActivity();
+        assertEquals(Intent.ACTION_CHOOSER, chooser.getAction());
+        Intent shared = chooser.getParcelableExtra(Intent.EXTRA_INTENT);
+        assertEquals(Intent.ACTION_SEND, shared.getAction());
+        assertEquals("text/plain", shared.getType());
+        String text = shared.getStringExtra(Intent.EXTRA_TEXT);
+        assertTrue(text.contains("最近 7 天"));
+        assertTrue(text.contains("模块功能使用共 628 次"));
+        for (String section : AI_TEXTS) assertTrue(text.contains(section));
+        assertTrue(text.contains("浏览趋势"));
+        assertTrue(text.contains("模块功能"));
+        assertFalse(text.contains("生活记录"));
+        assertFalse(text.contains("山间行走的人"));
+    }
+
+    @Test public void refreshedChartsInvalidateAnalysisAndRangeChangeAlsoResetsIt() {
+        source.data = fixture();
+        drain();
+        find("analytics.analysis.request").performClick();
+        finishAnalysis();
+        find("analytics.refresh").performClick();
+        drain();
+        assertNull(find("analytics.analysis.result"));
+        assertNotNull(find("analytics.analysis.request"));
+        for (String key : AI_KEYS) assertNull(find("analytics.analysis.text." + key));
+        assertEquals(1, analysis.requests.size());
+        find("analytics.analysis.request").performClick();
+        finishAnalysis();
+        assertNotNull(find("analytics.analysis.result"));
+        find("analytics.range.30").performClick();
+        drain();
+        assertNull(find("analytics.analysis.result"));
+        assertNotNull(find("analytics.analysis.request"));
+        assertEquals(2, analysis.requests.size());
+    }
+
+    @Test public void refreshingChartsCancelsPendingAnalysisWithoutSendingAgain() {
+        source.data = fixture();
+        drain();
+        find("analytics.analysis.request").performClick();
+        FakeAnalysisService.FakeRequest request = analysis.requests.get(0);
+        find("analytics.refresh").performClick();
+        assertTrue(request.cancelled);
+        drain();
+        finishAnalysis();
+        assertEquals(0, request.runs);
+        assertEquals(1, analysis.requests.size());
+        assertNull(find("analytics.analysis.result"));
+        assertNotNull(find("analytics.analysis.request"));
+    }
+
+    @Test public void aiFailureOffersRetryWithoutLeakingProviderErrors() {
+        source.data = fixture();
+        analysis.fail = true;
+        drain();
+        find("analytics.analysis.request").performClick();
+        finishAnalysis();
+        assertNotNull(find("analytics.analysis.error"));
+        assertFalse(text("analytics.analysis.error").contains("secret-test"));
+        assertNull(find("analytics.analysis.share"));
+        analysis.fail = false;
+        find("analytics.analysis.request").performClick();
+        finishAnalysis();
+        assertEquals(2, analysis.requests.size());
+        assertNotNull(find("analytics.analysis.result"));
+    }
+
+    @Test public void aiRequiresAllSevenSectionsBeforeRenderingAnyAnalysis() {
+        source.data = fixture();
+        analysis.response = "{\"overview\":\"只有总览\"}";
+        drain();
+        find("analytics.analysis.request").performClick();
+        finishAnalysis();
+        assertNotNull(find("analytics.analysis.error"));
+        assertNull(find("analytics.analysis.share"));
+        for (String key : AI_KEYS) assertNull(find("analytics.analysis.text." + key));
+        assertNotNull(find("analytics.analysis.request"));
+    }
+
+    @Test public void aiCompletionPreservesExistingChartsSelectionAndScroll() {
+        source.data = fixture();
+        drain();
+        View root = find("analytics.root");
+        root.measure(View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY));
+        root.layout(0, 0, 360, 600);
+        View chart = find("analytics.trend.chart");
+        chart.performClick();
+        ScrollView scroll = find("analytics.scroll");
+        scroll.scrollTo(0, 200);
+        int position = scroll.getScrollY();
+        find("analytics.analysis.request").performClick();
+        finishAnalysis();
+        assertSame(chart, find("analytics.trend.chart"));
+        assertEquals("10/12 · 250 次", text("analytics.trend.selection"));
+        assertEquals(position, scroll.getScrollY());
+    }
+
+    @Test public void aiRangeAndCloseCancelRequestsAndIgnoreLateResponses() {
+        source.data = fixture();
+        drain();
+        find("analytics.analysis.request").performClick();
+        FakeAnalysisService.FakeRequest first = analysis.requests.get(0);
+        analysisWorker.runNext(); // Response is waiting on main; switching ranges invalidates it.
+        find("analytics.range.30").performClick();
+        assertTrue(first.cancelled);
+        drain();
+        assertNull(find("analytics.analysis.result"));
+        find("analytics.analysis.request").performClick();
+        FakeAnalysisService.FakeRequest second = analysis.requests.get(1);
+        page.dialog().dismiss();
+        page.close();
+        assertTrue(second.cancelled);
+        assertTrue(analysisWorker.isShutdown());
+        assertEquals(0, second.runs);
+        assertTrue(analysisWorker.tasks.isEmpty());
+        ShadowLooper.idleMainLooper();
+        assertNull(find("analytics.analysis.result"));
+    }
+
+    @Test public void aiEmptyAndUnconfiguredReportsDoNotSendRequests() {
+        drain();
+        assertFalse(find("analytics.analysis.request").isEnabled());
+        find("analytics.analysis.request").performClick();
+        assertTrue(analysis.requests.isEmpty());
+        source.data = fixture();
+        analysis.configured = false;
+        find("analytics.refresh").performClick();
+        drain();
+        assertFalse(find("analytics.analysis.request").isEnabled());
+        find("analytics.analysis.request").performClick();
+        assertTrue(analysis.requests.isEmpty());
+    }
+
+    @Test public void aiResultsUnderEachChartRenderLightAndDarkWithoutClipping() throws Exception {
+        source.data = fixture();
+        drain();
+        find("analytics.analysis.request").performClick();
+        finishAnalysis();
+        render(find("analytics.body"), 360, "analytics-360-ai-success-light.png");
+        View card = find("analytics.analysis.card");
+        renderArtifact(card, 360, "analytics-ai-result-light.png", false);
+        renderArtifact(find("analytics.chartcard.features"), 360, "analytics-ai-features-light.png", false);
+        RuntimeEnvironment.setQualifiers("+night");
+        ModuleTheme.bind(find("analytics.root"));
+        renderArtifact(card, 360, "analytics-ai-result-dark.png", false);
+        renderArtifact(find("analytics.chartcard.features"), 360, "analytics-ai-features-dark.png", false);
+        render(find("analytics.body"), 360, "analytics-360-ai-success-dark.png");
+    }
+
+    @Test public void populatedReportRendersNarrowLightDarkAndWideWithReadableLabels() throws Exception {
+        source.enabled = true;
+        source.data = fixture();
+        drain();
+        View body = find("analytics.body");
+        render(body, 360, "analytics-360-light.png");
+        RuntimeEnvironment.setQualifiers("+night");
+        ModuleTheme.bind(find("analytics.root"));
+        assertEquals(0xFFF2F2F2, ((Switch) find("analytics.recording")).getCurrentTextColor());
+        render(body, 360, "analytics-360-dark.png");
+        RuntimeEnvironment.setQualifiers("+notnight");
+        ModuleTheme.bind(find("analytics.root"));
+        assertEquals(0xFF1F272D, ((Switch) find("analytics.recording")).getCurrentTextColor());
+        render(body, 560, "analytics-560-light.png");
+    }
+
+    @Test public void portraitChartsRenderAndExposeExactEvidenceAndAccessibilityValues() throws Exception {
+        source.data = portraitFixture();
+        drain();
+        render(find("analytics.body"), 360, "portrait-360-light.png");
+        for (String key : List.of("calendar", "types", "topics", "authors", "rhythm", "comparison")) {
+            View chart = find("analytics.portrait." + key + ".chart");
+            assertNotNull(chart);
+            assertTrue(chart.getContentDescription().length() > 30);
+            assertTrue(chart.performClick());
+        }
+        assertTrue(text("analytics.portrait.calendar.selection").contains("2026-10-12"));
+        assertTrue(text("analytics.portrait.calendar.selection").contains("250"));
+        assertTrue(text("analytics.portrait.rhythm.selection").contains("周一 0 时"));
+        assertTrue(text("analytics.portrait.comparison.selection").contains("覆盖不完整"));
+        View evidence = find("analytics.portrait.evidence.sources.text");
+        assertEquals(View.GONE, evidence.getVisibility());
+        find("analytics.portrait.evidence.sources").performClick();
+        assertEquals(View.VISIBLE, evidence.getVisibility());
+        assertTrue(((TextView) evidence).getText().toString().contains("42 位"));
+        find("analytics.portrait.coverage").performClick();
+        assertTrue(text("analytics.portrait.coverage.text").contains("记录空白不等于没有使用"));
+        assertNull(find("analytics.profile"));
+        RuntimeEnvironment.setQualifiers("+night");
+        ModuleTheme.bind(find("analytics.root"));
+        render(find("analytics.body"), 360, "portrait-360-dark.png");
+        RuntimeEnvironment.setQualifiers("+notnight");
+        ModuleTheme.bind(find("analytics.root"));
+        render(find("analytics.body"), 560, "portrait-560-light.png");
+    }
+
+    @Test public void portraitAiRemainsUnderCorrespondingChartsAndSharesAllInterpretations() throws Exception {
+        source.data = portraitFixture();
+        JSONObject answer = new JSONObject(analysisResponse());
+        answer.put("portraitTitle", "主线稳定的内容漫游者");
+        answer.put("portrait", "这段记录中接触 42 位作者，旅行话题经常出现；反映内容接触，不能直接推断偏好。");
+        answer.put("contrasts", "本期 1572 次浏览，前期 1210 次；采集覆盖不完整，暂不判断长期变化。");
+        answer.put("questions", "这些内容是主动搜索还是首页推荐？使用目的可以帮助解释动机。");
+        analysis.response = answer.toString();
+        drain();
+        assertTrue(analysis.requests.isEmpty());
+        find("analytics.analysis.request").performClick();
+        finishAnalysis();
+        assertTrue(text("analytics.analysis.text.portrait").contains("主线稳定"));
+        assertTrue(text("analytics.analysis.text.changes").contains("覆盖不完整"));
+        assertTrue(text("analytics.analysis.text.associations").contains("主动搜索"));
+        for (String key : AI_KEYS) assertNotNull(find("analytics.analysis.text." + key));
+        assertNull(find("analytics.analysis.request"));
+        render(find("analytics.body"), 360, "portrait-360-ai-light.png");
+        find("analytics.analysis.share").performClick();
+        ShadowActivity shadowActivity = Shadow.extract(activity);
+        Intent shared = shadowActivity.getNextStartedActivity().getParcelableExtra(Intent.EXTRA_INTENT);
+        String sharedText = shared.getStringExtra(Intent.EXTRA_TEXT);
+        assertTrue(sharedText.contains("主线稳定"));
+        assertTrue(sharedText.contains("采集覆盖不完整"));
+        assertTrue(sharedText.contains("主动搜索"));
+        find("analytics.refresh").performClick();
+        drain();
+        assertNull(find("analytics.analysis.text.portrait"));
+    }
+
+    @Test public void selfReportedPurposeSavesOnlyOnWorkerAndCancelsOlderAnalysis() {
+        source.data = portraitFixture();
+        drain();
+        find("analytics.analysis.request").performClick();
+        find("analytics.purpose").performClick();
+        AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
+        android.widget.EditText input = findEditText(editor.getWindow().getDecorView());
+        assertNotNull(input);
+        input.setText("学习摄影，寻找旅行灵感");
+        editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        ShadowLooper.idleMainLooper();
+        assertNull(source.savedPurpose);
+        assertTrue(analysis.requests.get(0).cancelled);
+        drain();
+        assertEquals("学习摄影，寻找旅行灵感", source.savedPurpose);
+        assertEquals(1, analysis.requests.size());
+    }
+
+    @Test public void ratingExistingPortraitPreservesChartsAnalysisAndSharingWithoutReload() throws Exception {
+        source.data = portraitFixture();
+        JSONObject answer = new JSONObject(analysisResponse());
+        answer.put("portraitTitle", "内容漫游者");
+        answer.put("portrait", "接触来源多样，主要话题保持相近；这是本次记录中的观察。");
+        answer.put("contrasts", "前后期记录覆盖不同，不能据此判断生活方式变化。");
+        answer.put("questions", "这段时间你主要是放松还是寻找灵感？");
+        analysis.response = answer.toString();
+        drain();
+        find("analytics.analysis.request").performClick();
+        finishAnalysis();
+        View portrait = find("analytics.analysis.text.portrait");
+        View chart = find("analytics.portrait.calendar.chart");
+        View share = find("analytics.analysis.share");
+        View root = find("analytics.root");
+        root.measure(View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY));
+        root.layout(0, 0, 360, 600);
+        Bitmap chartPixels = Bitmap.createBitmap(chart.getWidth(), chart.getHeight(), Bitmap.Config.ARGB_8888);
+        chart.draw(new Canvas(chartPixels));
+        chartPixels.recycle();
+        chart.performClick();
+        String selection = text("analytics.portrait.calendar.selection");
+        ScrollView scroll = find("analytics.scroll");
+        scroll.scrollTo(0, 200);
+        int scrollPosition = scroll.getScrollY();
+        int snapshotReads = source.reads;
+        find("analytics.feedback").performClick();
+        AlertDialog feedback = (AlertDialog) ShadowDialog.getLatestDialog();
+        feedback.getListView().performItemClick(null, 0, 0);
+        ShadowLooper.idleMainLooper();
+        assertNull(source.savedFeedback);
+        assertFalse(find("analytics.feedback").isEnabled());
+        assertSame(portrait, find("analytics.analysis.text.portrait"));
+        drain();
+        assertEquals("符合", source.savedFeedback);
+        assertSame(portrait, find("analytics.analysis.text.portrait"));
+        assertSame(chart, find("analytics.portrait.calendar.chart"));
+        assertSame(share, find("analytics.analysis.share"));
+        assertEquals(selection, text("analytics.portrait.calendar.selection"));
+        assertEquals(scrollPosition, scroll.getScrollY());
+        assertTrue(text("analytics.feedback").contains("符合"));
+        assertEquals(snapshotReads, source.reads);
+        assertEquals(1, analysis.requests.size());
+        assertFalse(analysis.requests.get(0).cancelled);
+    }
+
+    @Test public void topicMigrationShowsMatchedRanksAndMissingPeriodWithoutInventingZeroInterest() throws Exception {
+        source.data = portraitFixture();
+        drain();
+        assertTrue(text("analytics.portrait.comparison.topics.row.0").contains("#生活记录"));
+        assertTrue(text("analytics.portrait.comparison.topics.row.0").contains("第 2 · 130 次  →  第 1 · 238 次"));
+        assertTrue(text("analytics.portrait.comparison.topics.row.1").contains("未列入摘要"));
+        assertTrue(text("analytics.portrait.comparison.topics.row.3").contains("#往日专题"));
+        renderArtifact(find("analytics.chartcard.changes"), 280, "portrait-topic-migration-280.png", false);
+        source.data = portraitFixture(false);
+        find("analytics.range.30").performClick();
+        drain();
+        assertEquals(30, source.lastDays);
+        assertNull(find("analytics.portrait.comparison.topics.row.0"));
+        String missing = text("analytics.portrait.comparison.topics.empty");
+        assertTrue(missing.contains("前期缺少可比话题记录"));
+        assertTrue(missing.contains("不代表没有兴趣"));
+        assertFalse(missing.contains("0 次"));
+    }
+
+    private static android.widget.EditText findEditText(View view) {
+        if (view instanceof android.widget.EditText) return (android.widget.EditText) view;
+        if (view instanceof ViewGroup) for (int index = 0; index < ((ViewGroup) view).getChildCount(); index++) {
+            android.widget.EditText found = findEditText(((ViewGroup) view).getChildAt(index));
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private void render(View view, int width, String name) throws Exception {
+        renderArtifact(view, width, name, true);
+    }
+
+    private void renderArtifact(View view, int width, String name, boolean fullReport) throws Exception {
+        // Individual-card captures change attached child bounds. Every nested layout must
+        // rerun, including the report column whose own measure specs can remain unchanged.
+        forceLayoutTree(view);
+        view.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        int height = view.getMeasuredHeight();
+        assertTrue(height > (fullReport ? 1600 : 100));
+        view.layout(0, 0, width, height);
+        assertNoClippedText(view);
+        if (fullReport) assertReportCardsDoNotOverlap(view);
+        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        canvas.drawColor(ModuleTheme.isDark(activity) ? 0xFF141414 : 0xFFF8FAFA);
+        view.draw(canvas);
+        File directory = new File("build/reports/local-analytics-screenshots");
+        assertTrue(directory.isDirectory() || directory.mkdirs());
+        try (FileOutputStream stream = new FileOutputStream(new File(directory, name))) {
+            assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream));
+        }
+        bitmap.recycle();
+    }
+
+    private static void forceLayoutTree(View view) {
+        view.forceLayout();
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int index = 0; index < group.getChildCount(); index++) forceLayoutTree(group.getChildAt(index));
+        }
+    }
+
+    private static void assertReportCardsDoNotOverlap(View body) {
+        ViewGroup report = body.findViewWithTag("analytics.report");
+        assertNotNull(report);
+        int previousBottom = 0;
+        for (int index = 0; index < report.getChildCount(); index++) {
+            View card = report.getChildAt(index);
+            if (card.getVisibility() == View.GONE) continue;
+            String label = String.valueOf(card.getTag());
+            assertTrue("Report card overlaps its predecessor: " + label, card.getTop() >= previousBottom);
+            assertTrue("Report card has no visible height: " + label, card.getBottom() > card.getTop());
+            assertTrue("Report card exceeds report bounds: " + label, card.getBottom() <= report.getHeight());
+            assertTrue("Report card exceeds report width: " + label, card.getLeft() >= 0 && card.getRight() <= report.getWidth());
+            previousBottom = card.getBottom();
+        }
+    }
+
+    private static void assertNoClippedText(View root) {
+        if (root instanceof TextView) {
+            TextView text = (TextView) root;
+            if (text.getVisibility() == View.VISIBLE && text.getLayout() != null) {
+                for (int line = 0; line < text.getLayout().getLineCount(); line++) {
+                    assertEquals(text.getText().toString(), 0, text.getLayout().getEllipsisCount(line));
+                }
+                assertTrue(text.getText().toString(), text.getLayout().getHeight()
+                        <= text.getHeight() - text.getCompoundPaddingTop() - text.getCompoundPaddingBottom());
+            }
+        }
+        if (root instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) root;
+            for (int index = 0; index < group.getChildCount(); index++) assertNoClippedText(group.getChildAt(index));
+        }
+    }
+
+    @SuppressWarnings("unchecked") private <T extends View> T find(String tag) {
+        return page.dialog().getWindow().getDecorView().findViewWithTag(tag);
+    }
+    private String text(String tag) { return ((TextView) find(tag)).getText().toString(); }
+    private void drain() {
+        while (true) {
+            ShadowLooper.idleMainLooper();
+            if (worker.tasks.isEmpty()) return;
+            worker.runNext();
+        }
+    }
+    private void finishAnalysis() {
+        while (!analysisWorker.tasks.isEmpty()) analysisWorker.runNext();
+        ShadowLooper.idleMainLooper();
+    }
+
+    private static String analysisResponse() {
+        try {
+            JSONObject result = new JSONObject();
+            for (int index = 0; index < AI_KEYS.length; index++) result.put(AI_KEYS[index], AI_TEXTS[index]);
+            return result.toString();
+        } catch (Exception failure) { throw new AssertionError(failure); }
+    }
+
+    private static AnalyticsSnapshot fixture() {
+        long[] hours = {7, 3, 0, 0, 7, 1, 0, 12, 25, 42, 33, 51, 58, 29, 47, 29, 52, 64, 18, 71, 6, 23, 43, 21};
+        return new AnalyticsSnapshot(1572, 628, 1419, 9, 7, 7, 1791763200000L,
+                Arrays.asList(new Bucket("10/12", 250), new Bucket("10/13", 246), new Bucket("10/14", 226),
+                        new Bucket("10/15", 315), new Bucket("10/16", 277), new Bucket("10/17", 187), new Bucket("10/18", 71)),
+                Arrays.asList(new Rank("短视频", 1000), new Rank("图集", 300), new Rank("实况图集", 200),
+                        new Rank("长视频", 50), new Rank("直播卡片", 20), new Rank("未知", 2)),
+                Arrays.asList(new Rank("山间行走的人", 128), new Rank("这是一个较长的作者名称，用于验证窄屏自动换行", 86), new Rank("城市漫游", 62)),
+                Arrays.asList(new Rank("#生活记录", 238), new Rank("#旅途中的风景", 177), new Rank("#摄影", 123)),
+                Arrays.asList(new Rank("保存媒体", 248), new Rank("AI 作品总结", 183), new Rank("复制文案", 121), new Rank("自动评论", 76)),
+                hours, List.of(new Recent(1792281960000L, "保存媒体", "feature"),
+                        new Recent(1792281600000L, "实况图集 · 山间行走的人", "view")));
+    }
+
+    private static AnalyticsSnapshot portraitFixture() {
+        return portraitFixture(true);
+    }
+
+    private static AnalyticsSnapshot portraitFixture(boolean hasPreviousTopics) {
+        AnalyticsSnapshot base = fixture();
+        List<PortraitSnapshot.Day> days = new ArrayList<>();
+        long[][] weekdayHours = new long[7][24];
+        for (int index = 0; index < 7; index++) {
+            long count = base.trend.get(index).count;
+            days.add(new PortraitSnapshot.Day("2026-10-" + (12 + index), count, 30 + index * 10, count - 20,
+                    Map.of("短视频", count * 3 / 5, "实况图集", count / 5, "图集", count - count * 3 / 5 - count / 5)));
+            weekdayHours[index][19] = count / 2;
+            weekdayHours[index][13] = count - count / 2;
+        }
+        PortraitSnapshot.Comparison comparison = new PortraitSnapshot.Comparison("2026-10-12", "2026-10-18",
+                "2026-10-05", "2026-10-11", 1572, 1210, 628, 810, base.types, base.types,
+                false, false, "今天尚未结束；前期部分日期未开启采集。记录计数只能描述已观察样本。",
+                base.topics, hasPreviousTopics ? List.of(new Rank("#摄影", 200), new Rank("#生活记录", 130),
+                        new Rank("#往日专题", 100), new Rank("其他（11 类）", 80)) : List.of(), base.authors, base.authors);
+        PortraitSnapshot portrait = new PortraitSnapshot("2026-10-12", "2026-10-18", days, weekdayHours,
+                base.topics, base.authors, List.of(new Rank("主动操作", 301), new Rank("自动触发", 327)),
+                7, 42, 17, 538, 153, 45, 40, 123_000, 0,
+                .79, .55, .23, .44, .108, .12, .32, comparison, comparison, comparison,
+                List.of(new PortraitSnapshot.Insight("sources", "主线稳定，接触来源多样", "作者来源分散，主要话题仍围绕生活与旅行。",
+                        "本期识别到 42 位作者、17 个话题。作者来源多样性 0.79，话题多样性 0.55。", "多样性是内容分布的指标，不是心理分数。"),
+                        new PortraitSnapshot.Insight("tools", "工具使用有自己的习惯", "保存、总结与复制进入了你的使用流程。",
+                                "功能共触发 628 次；主动操作 301 次，自动触发 327 次。", "触发不能证明请求成功，自动行为不是主动认可。")),
+                List.of(new PortraitSnapshot.Joint("#旅行", "19 时", 20)),
+                List.of(new PortraitSnapshot.Joint("图集", "保存媒体 · 主动操作", 12)),
+                List.of("仅覆盖已接入的宿主页面，今天尚未结束。", "停留记录从新版本开始采集，历史汇总不能补齐。"), "初步样本");
+        return new AnalyticsSnapshot(base.totalViews, base.totalFeatureUses, base.uniqueWorks, base.advertisementViews,
+                base.activeDays, base.currentStreak, base.firstSeen, base.trend, base.types, base.authors, base.topics,
+                base.features, base.hours, base.recent, portrait);
+    }
+
+    private static final class ManualExecutor extends AbstractExecutorService {
+        final ArrayDeque<Runnable> tasks = new ArrayDeque<>();
+        boolean shutdown;
+        @Override public void execute(Runnable command) {
+            if (shutdown) throw new RejectedExecutionException();
+            tasks.add(command);
+        }
+        @Override public void shutdown() { shutdown = true; }
+        @Override public List<Runnable> shutdownNow() {
+            shutdown = true;
+            List<Runnable> cancelled = new ArrayList<>(tasks);
+            tasks.clear();
+            return cancelled;
+        }
+        @Override public boolean isShutdown() { return shutdown; }
+        @Override public boolean isTerminated() { return shutdown && tasks.isEmpty(); }
+        @Override public boolean awaitTermination(long timeout, TimeUnit unit) { return isTerminated(); }
+        void runNext() { tasks.remove().run(); }
+    }
+
+    private static final class FakeSource implements LocalAnalyticsDialog.Source {
+        boolean enabled;
+        boolean failure;
+        int reads;
+        int clears;
+        int lastDays;
+        String savedPurpose;
+        String savedFeedback;
+        AnalyticsSnapshot data = AnalyticsSnapshot.empty();
+        @Override public boolean isEnabled() { return enabled; }
+        @Override public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        @Override public AnalyticsSnapshot snapshot(int days) {
+            reads++;
+            lastDays = days;
+            if (failure) throw new IllegalStateException("Test failure");
+            return data;
+        }
+        @Override public void clear() { clears++; data = AnalyticsSnapshot.empty(); }
+        @Override public void purpose(String value) { savedPurpose = value; }
+        @Override public void feedback(String value) { savedFeedback = value; }
+    }
+
+    private static final class FakeAnalysisService implements LocalAnalyticsDialog.AnalysisService {
+        boolean configured = true;
+        boolean fail;
+        String response = analysisResponse();
+        AnalyticsSnapshot snapshot;
+        int days;
+        final List<FakeRequest> requests = new ArrayList<>();
+        @Override public boolean isConfigured() { return configured; }
+        @Override public String modelLabel() { return "测试模型 · test-only"; }
+        @Override public Request prepare(AnalyticsSnapshot snapshot, int days) {
+            this.snapshot = snapshot;
+            this.days = days;
+            FakeRequest request = new FakeRequest(fail, response);
+            requests.add(request);
+            return request;
+        }
+        private static final class FakeRequest implements Request {
+            final boolean fail;
+            final String response;
+            int runs;
+            boolean cancelled;
+            FakeRequest(boolean fail, String response) { this.fail = fail; this.response = response; }
+            @Override public String modelLabel() { return "测试模型 · test-only"; }
+            @Override public String run() {
+                runs++;
+                if (fail) throw new IllegalStateException("secret-test-provider-response");
+                return response;
+            }
+            @Override public void cancel() { cancelled = true; }
+        }
+    }
+}

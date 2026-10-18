@@ -101,7 +101,7 @@ public final class ModuleSettingsReferenceTest {
                 {"MESSAGE", "消息防撤回", "自己撤回的消息", "对方撤回的消息", "撤回的背景色", "替换私聊语音",
                         "自动文本转语音"},
                 {"SPOOF", "伪装总开关", "获赞数量", "关注数量", "粉丝数量", "互关数量", "版本信息"},
-                {"EXTENSION", "AI 模型设置", "文本转语音设置"}
+                {"EXTENSION", "AI 模型设置", "文本转语音设置", "本地数据分析", "配置备份"}
         };
         for (String[] reference : references) {
             View page = openCategory(reference[0]);

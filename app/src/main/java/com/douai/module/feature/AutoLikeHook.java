@@ -135,6 +135,7 @@ public final class AutoLikeHook implements AutoCloseable {
                 if (!attemptedAwemeIds.add(id)) return result;
                 reservedAwemeId = id;
                 likeMethod.invoke(currentViewModel, activity, "douai_auto", null);
+                com.douai.module.analytics.LocalAnalytics.action(id, "auto_like", "自动点赞请求", "automatic", "request");
                 likeQueued = true;
                 reservedAwemeId = null;
             }
