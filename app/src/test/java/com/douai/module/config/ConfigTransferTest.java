@@ -23,6 +23,8 @@ public final class ConfigTransferTest {
         AiModelConfig contact = AiModelConfig.fromJson(new JSONObject().put("id", "ai-contact")
                 .put("name", "Configured model").put("apiEndpoint", "https://api.test/v1")
                 .put("modelName", "model").put("apiKey", "fixture-secret")
+                .put("responseMode", AiModelConfig.RESPONSE_STREAM)
+                .put("reasoningEffort", "high")
                 .put("messageContactEnabled", true).put("messageContactName", "小助手")
                 .put("messageContactAvatar", AiModelContactConfigTest.AVATAR));
         source.values.put(AiModelSettings.KEY, new AiModelSettings(java.util.List.of(contact), contact.id).serialize());
@@ -33,7 +35,45 @@ public final class ConfigTransferTest {
         assertTrue(restored.messageContactEnabled);
         assertEquals("小助手", restored.messageContactDisplayName());
         assertEquals(AiModelContactConfigTest.AVATAR, restored.messageContactAvatar);
+        assertTrue(restored.streaming());
+        assertEquals("high", restored.reasoningEffort);
         assertEquals("", restored.apiKey);
+    }
+
+    @Test public void oldModelBackupsWithoutResponseModeRemainImportableAndDefaultToNonStreaming() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        JSONObject settings = new JSONObject(model("https://api.test/v1", "fixture-key", "{}", "{}"));
+        settings.getJSONArray("configs").getJSONObject(0).remove("responseMode");
+        settings.getJSONArray("configs").getJSONObject(0).remove("reasoningEffort");
+        source.values.put(AiModelSettings.KEY, settings.toString());
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, ConfigTransfer.export(source, true)));
+        AiModelConfig restored = AiModelSettings.parse((String) target.values.get(AiModelSettings.KEY)).selected();
+        assertFalse(restored.streaming());
+        assertFalse(restored.hasReasoningEffort());
+    }
+
+    @Test public void backupRejectsUnknownResponseModesBeforeChangingAnySettings() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put(AiModelSettings.KEY, model("https://api.test/v1", "fixture-key", "{}", "{}"));
+        JSONObject backup = new JSONObject(ConfigTransfer.export(source, true));
+        JSONObject entry = backup.getJSONObject("values").getJSONObject(AiModelSettings.KEY);
+        JSONObject settings = new JSONObject(entry.getString("value"));
+        settings.getJSONArray("configs").getJSONObject(0).put("responseMode", "auto");
+        entry.put("value", settings.toString());
+        assertThrows(IllegalArgumentException.class, () -> ConfigTransfer.inspect(target, backup.toString()));
+        assertTrue(target.values.isEmpty());
+    }
+
+    @Test public void backupRejectsUnknownReasoningEffortBeforeChangingAnySettings() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put(AiModelSettings.KEY, model("https://api.test/v1", "fixture-key", "{}", "{}"));
+        JSONObject backup = new JSONObject(ConfigTransfer.export(source, true));
+        JSONObject entry = backup.getJSONObject("values").getJSONObject(AiModelSettings.KEY);
+        JSONObject settings = new JSONObject(entry.getString("value"));
+        settings.getJSONArray("configs").getJSONObject(0).put("reasoningEffort", "ultra");
+        entry.put("value", settings.toString());
+        assertThrows(IllegalArgumentException.class, () -> ConfigTransfer.inspect(target, backup.toString()));
+        assertTrue(target.values.isEmpty());
     }
 
     @Test public void fullBackupRoundTripsTypesAndAllConfigurationFamilies() throws Exception {

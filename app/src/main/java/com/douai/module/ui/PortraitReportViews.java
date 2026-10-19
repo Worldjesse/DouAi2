@@ -26,12 +26,14 @@ import java.util.function.Consumer;
 
 /** All geometry and summaries are local; AI text is attached by the owning dialog. */
 final class PortraitReportViews {
-    private static final int TEXT = 0xFF1F272D, MUTED = 0xFF69737A, BLUE = 0xFF0085E1;
+    private static final int TEXT = 0xFF1F272D, MUTED = 0xFF69737A, ACCENT = 0xFF008579;
     private static final int[] COLORS = {0xFF1683EE, 0xFF54B76A, 0xFF9869D8,
             0xFFF5A33C, 0xFFE66C9B, 0xFF89959F, 0xFF1FA8AA, 0xFFB48B56, 0xFF65758C};
     interface Host {
         LinearLayout section(String title);
         void analysis(LinearLayout section, String key);
+        default Button button(Context context) { return new Button(context); }
+        default View controlView(View control) { return control; }
     }
     private final Context context;
     private final PortraitSnapshot data;
@@ -43,13 +45,13 @@ final class PortraitReportViews {
     void overview() {
         LinearLayout card = host.section("这段时间的你");
         card.setTag("analytics.portrait.overview");
-        add(card, "由本地行为记录拼出的阶段侧写", 13, BLUE, true);
-        add(card, data.evidenceLevel + " · " + data.startDate + " — " + data.endDate, 12, MUTED, false);
+        add(card, "由本地行为记录拼出的阶段侧写", 13, MUTED, false);
+        add(card, data.evidenceLevel + " · " + data.startDate + " — " + data.endDate, 13, MUTED, false);
         if (data.insights.isEmpty()) {
             add(card, "还没有足够的记录来描述你。继续使用后，内容、节奏与工具习惯会逐渐清晰。", 14, TEXT, false);
         }
         for (PortraitSnapshot.Insight insight : data.insights) {
-            add(card, insight.title, 16, BLUE, true);
+            heading(card, insight.title);
             add(card, insight.body, 14, TEXT, false);
             disclosure(card, "查看依据与边界", insight.evidence + "\n" + insight.limitations,
                     "analytics.portrait.evidence." + insight.id);
@@ -67,12 +69,12 @@ final class PortraitReportViews {
     private void calendar() {
         LinearLayout card = host.section("浏览足迹 · 日期热力图");
         List<PortraitSnapshot.Day> shown = data.days.subList(Math.max(0, data.days.size() - 84), data.days.size());
-        TextView selected = add(card, "点选日期，查看那一天的浏览与功能次数", 13, BLUE, false);
+        TextView selected = add(card, "点选日期，查看那一天的浏览与功能次数", 13, MUTED, false);
         selected.setTag("analytics.portrait.calendar.selection");
         chart(card, new CalendarChart(context, shown, value -> select(selected, value)),
                 "calendar", Math.max(108, 38 + (int) Math.ceil((shown.size() + 6) / 7.0) * 22));
         add(card, "色彩表示浏览次数；空心格表示无保留事件，可能是采集关闭或未覆盖。"
-                + (data.days.size() > 84 ? "当前展示范围内最近 84 天。" : ""), 12, MUTED, false);
+                + (data.days.size() > 84 ? "当前展示范围内最近 84 天。" : ""), 13, MUTED, false);
         host.analysis(card, "trend");
     }
 
@@ -93,12 +95,12 @@ final class PortraitReportViews {
             String from = shortDate(data.days.get(start).date), to = shortDate(data.days.get(end - 1).date);
             bands.add(new Band(from.equals(to) ? from : from + "—" + to, counts));
         }
-        TextView selected = add(card, "每行归一为 100%，点选色带查看原始次数", 13, BLUE, false);
+        TextView selected = add(card, "每行归一为 100%，点选色带查看原始次数", 13, MUTED, false);
         selected.setTag("analytics.portrait.types.selection");
         chart(card, new TypeChart(context, bands, colors, value -> select(selected, value)),
                 "types", Math.max(76, bands.size() * 52));
         for (Map.Entry<String, Integer> item : colors.entrySet()) legend(card, item.getKey(), item.getValue());
-        add(card, "比较的是已记录内容构成；空行表示缺少记录。Live 为实况照片；视频时长 ≥ 5 分钟计为长视频。", 12, MUTED, false);
+        add(card, "比较的是已记录内容构成；空行表示缺少记录。Live 为实况照片；视频时长 ≥ 5 分钟计为长视频。", 13, MUTED, false);
         host.analysis(card, "types");
     }
 
@@ -106,7 +108,7 @@ final class PortraitReportViews {
         LinearLayout card = host.section("你的内容世界 · 话题地图");
         if (data.topicTiles.isEmpty()) add(card, "暂无可识别话题，不能据此判断兴趣是否广泛。", 14, MUTED, false);
         else {
-            TextView selected = add(card, "面积代表话题出现次数，点选色块查看完整名称", 13, BLUE, false);
+            TextView selected = add(card, "面积代表话题出现次数，点选色块查看完整名称", 13, MUTED, false);
             selected.setTag("analytics.portrait.topics.selection");
             chart(card, new TopicChart(context, data.topicTiles, value -> select(selected, value)), "topics", 230);
             for (int index = 0; index < data.topicTiles.size(); index++) {
@@ -115,7 +117,7 @@ final class PortraitReportViews {
             }
         }
         add(card, "识别到 " + number(data.topicCount) + " 个话题，共 " + number(data.topicOccurrences)
-                + " 次标签出现。一个作品可能有多个话题；标签不是独立作品，也不是使用者自述兴趣。", 12, MUTED, false);
+                + " 次标签出现。一个作品可能有多个话题；标签不是独立作品，也不是使用者自述兴趣。", 13, MUTED, false);
         host.analysis(card, "topics");
     }
 
@@ -123,27 +125,27 @@ final class PortraitReportViews {
         LinearLayout card = host.section("接触来源 · 作者集中曲线");
         if (data.authorPareto.isEmpty()) add(card, "暂无可识别作者，暂不能描述接触来源。", 14, MUTED, false);
         else {
-            TextView selected = add(card, "按出现次数排序，曲线表示累计占比", 13, BLUE, false);
+            TextView selected = add(card, "按出现次数排序，曲线表示累计占比", 13, MUTED, false);
             selected.setTag("analytics.portrait.authors.selection");
             chart(card, new AuthorChart(context, data.authorPareto, value -> select(selected, value)), "authors", 185);
             for (int index = 0; index < data.authorPareto.size(); index++) {
                 Rank rank = data.authorPareto.get(index);
-                add(card, (index + 1) + "  " + rank.label + " · " + number(rank.count) + " 次", 12, MUTED, false);
+                add(card, (index + 1) + "  " + rank.label + " · " + number(rank.count) + " 次", 13, MUTED, false);
             }
         }
         add(card, "共接触 " + number(data.authorCount) + " 位可识别作者。跨日再次遇见的作品占比 "
-                + pct(data.crossDayRepeatShare) + "。反复刷到可能来自推荐，不等于主动关注或重看。", 12, MUTED, false);
+                + pct(data.crossDayRepeatShare) + "。反复刷到可能来自推荐，不等于主动关注或重看。", 13, MUTED, false);
         host.analysis(card, "authors");
     }
 
     private void rhythm() {
         LinearLayout card = host.section("一周节奏 · 星期 × 小时");
-        TextView selected = add(card, "点选格子查看次数；辅助功能点击可依次查看", 13, BLUE, false);
+        TextView selected = add(card, "点选格子查看次数；辅助功能点击可依次查看", 13, MUTED, false);
         selected.setTag("analytics.portrait.rhythm.selection");
         chart(card, new RhythmChart(context, data.weekdayHours, value -> select(selected, value)), "rhythm", 220);
         add(card, "按事件发生时的本地时间统计。夜间（0—5 时）占 " + pct(data.nightShare)
                 + "，周末占 " + pct(data.weekendShare)
-                + "。所选范围的工作日和周末天数可能不同；不代表睡眠或生活作息。", 12, MUTED, false);
+                + "。所选范围的工作日和周末天数可能不同；不代表睡眠或生活作息。", 13, MUTED, false);
         host.analysis(card, "hours");
     }
 
@@ -152,14 +154,14 @@ final class PortraitReportViews {
         PortraitSnapshot.Comparison comparison = data.comparison;
         if (comparison == null) { add(card, "暂无可比较的前一时段。", 14, MUTED, false); return; }
         add(card, "本期 " + comparison.currentStart + " — " + comparison.currentEnd
-                + "\n前期 " + comparison.previousStart + " — " + comparison.previousEnd, 12, MUTED, false);
+                + "\n前期 " + comparison.previousStart + " — " + comparison.previousEnd, 13, MUTED, false);
         if (!comparison.currentComplete || !comparison.previousComplete) {
             add(card, "记录覆盖尚不完整，暂不判断上升或下降。", 14, TEXT, true);
         }
-        TextView selected = add(card, "灰点为前期，蓝点为本期；每项使用独立刻度", 13, BLUE, false);
+        TextView selected = add(card, "灰点为前期，蓝点为本期；每项使用独立刻度", 13, MUTED, false);
         selected.setTag("analytics.portrait.comparison.selection");
         chart(card, new CompareChart(context, comparison, value -> select(selected, value)), "comparison", 155);
-        add(card, comparison.limitation, 12, MUTED, false);
+        add(card, comparison.limitation, 13, MUTED, false);
         topicChanges(card, comparison);
         if (data.weekComparison != null) periodEvidence(card, "最近 7 天", data.weekComparison);
         if (data.monthComparison != null) periodEvidence(card, "最近 30 天", data.monthComparison);
@@ -167,12 +169,12 @@ final class PortraitReportViews {
     }
 
     private void topicChanges(LinearLayout card, PortraitSnapshot.Comparison comparison) {
-        add(card, "话题迁移 · 前期 → 本期", 14, TEXT, true);
+        heading(card, "话题迁移 · 前期 → 本期");
         List<Rank> current = namedTopics(comparison.currentTopics);
         List<Rank> previous = namedTopics(comparison.previousTopics);
         if (current.isEmpty() || previous.isEmpty()) {
             String missing = current.isEmpty() && previous.isEmpty() ? "两期" : current.isEmpty() ? "本期" : "前期";
-            TextView empty = add(card, missing + "缺少可比话题记录，暂不判断主题变化。采集空白或未识别话题不代表没有兴趣。", 12, MUTED, false);
+            TextView empty = add(card, missing + "缺少可比话题记录，暂不判断主题变化。采集空白或未识别话题不代表没有兴趣。", 13, MUTED, false);
             empty.setTag("analytics.portrait.comparison.topics.empty");
             return;
         }
@@ -185,10 +187,10 @@ final class PortraitReportViews {
         for (int index = 0; index < labels.size(); index++) {
             String name = labels.get(index);
             TextView row = add(card, name + "\n" + rankDescription(previous, name) + "  →  "
-                    + rankDescription(current, name), 12, MUTED, false);
+                    + rankDescription(current, name), 13, MUTED, false);
             row.setTag("analytics.portrait.comparison.topics.row." + index);
         }
-        add(card, "展示两期主要话题的名次和记录次数。未列入摘要不等于零；今天尚未结束，次数受采集覆盖影响。榜单迁移不直接等于兴趣改变。", 12, MUTED, false);
+        add(card, "展示两期主要话题的名次和记录次数。未列入摘要不等于零；今天尚未结束，次数受采集覆盖影响。榜单迁移不直接等于兴趣改变。", 13, MUTED, false);
     }
 
     private static List<Rank> namedTopics(List<Rank> ranks) {
@@ -215,23 +217,23 @@ final class PortraitReportViews {
     private void associations() {
         LinearLayout card = host.section("从接触到行动 · 关联线索");
         if (!data.featureSources.isEmpty()) {
-            add(card, "功能触发来源", 14, TEXT, true);
+            heading(card, "功能触发来源");
             for (Rank source : data.featureSources) add(card, source.label + " · " + number(source.count) + " 次", 13, MUTED, false);
         }
         if (data.topicHours.isEmpty() && data.typeActions.isEmpty()) {
             add(card, "尚无可关联的记录。不能把独立的夜间次数、话题次数与保存次数拼成同一次行为。", 14, MUTED, false);
         }
         if (!data.topicHours.isEmpty()) {
-            add(card, "同一次接触中的话题与时段", 14, TEXT, true);
+            heading(card, "同一次接触中的话题与时段");
             joint(card, data.topicHours, "topicHours");
-            add(card, "时段指可见片段开始的小时；每段可含多个话题。这里不是停留时长分布。", 12, MUTED, false);
+            add(card, "时段指可见片段开始的小时；每段可含多个话题。这里不是停留时长分布。", 13, MUTED, false);
         }
         if (!data.typeActions.isEmpty()) {
-            add(card, "同一次接触中的内容与动作", 14, TEXT, true);
+            heading(card, "同一次接触中的内容与动作");
             joint(card, data.typeActions, "typeActions");
         }
         add(card, "可见片段 " + number(data.capturedVisits) + " 段；已结束 " + number(data.finishedVisits)
-                + " 段，确认可见停留合计 " + duration(data.visibleMillis) + "。停留不等于完整观看或喜欢；自动行为单独标注。", 12, MUTED, false);
+                + " 段，确认可见停留合计 " + duration(data.visibleMillis) + "。停留不等于完整观看或喜欢；自动行为单独标注。", 13, MUTED, false);
         host.analysis(card, "associations");
     }
 
@@ -248,28 +250,38 @@ final class PortraitReportViews {
         LinearLayout row = new LinearLayout(context);
         row.setGravity(android.view.Gravity.CENTER_VERTICAL);
         View swatch = new View(context); swatch.setBackgroundColor(color);
-        row.addView(swatch, new LinearLayout.LayoutParams(dp(9), dp(9)));
-        TextView label = new TextView(context); label.setText(text); label.setTextSize(12); label.setTextColor(TEXT);
+        ModuleTheme.preserveColors(swatch);
+        row.addView(swatch, new LinearLayout.LayoutParams(dp(10), dp(10)));
+        TextView label = new TextView(context); label.setText(text); label.setTextSize(13); label.setTextColor(TEXT);
+        label.setIncludeFontPadding(false);
         label.setPadding(dp(8), dp(5), 0, dp(5));
         row.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
         card.addView(row, new LinearLayout.LayoutParams(-1, -2));
     }
     private void chart(LinearLayout parent, View view, String key, int height) {
         view.setTag("analytics.portrait." + key + ".chart");
-        parent.addView(view, new LinearLayout.LayoutParams(-1, dp(height)));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(height));
+        params.topMargin = dp(8);
+        params.bottomMargin = dp(4);
+        parent.addView(view, params);
+    }
+    private void heading(LinearLayout parent, String value) {
+        TextView text = add(parent, value, 16, TEXT, true);
+        text.setPadding(0, dp(12), 0, dp(4));
     }
     private TextView add(LinearLayout parent, String value, int size, int color, boolean bold) {
         TextView text = new TextView(context); text.setText(value); text.setTextSize(size); text.setTextColor(color);
-        text.setPadding(0, dp(6), 0, dp(6)); text.setLineSpacing(dp(3), 1);
-        if (bold) text.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        text.setIncludeFontPadding(false);
+        text.setPadding(0, dp(4), 0, dp(4)); text.setLineSpacing(dp(2), 1);
+        if (bold) text.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         parent.addView(text, new LinearLayout.LayoutParams(-1, -2)); return text;
     }
     private void disclosure(LinearLayout card, String label, String content, String tag) {
-        Button button = new Button(context); button.setText(label); button.setTextSize(12); button.setTextColor(BLUE);
-        button.setAllCaps(false); button.setMinHeight(0); button.setMinimumHeight(0);
-        button.setPadding(0, dp(8), 0, dp(8)); button.setBackgroundColor(Color.TRANSPARENT); button.setTag(tag);
-        card.addView(button, new LinearLayout.LayoutParams(-1, -2));
-        TextView evidence = add(card, content, 12, MUTED, false); evidence.setVisibility(View.GONE);
+        Button button = host.button(context); button.setText(label); button.setTextSize(14); button.setTextColor(ACCENT);
+        button.setAllCaps(false); button.setMinHeight(dp(48)); button.setMinimumHeight(dp(48));
+        button.setPadding(dp(12), dp(8), dp(12), dp(8)); button.setBackgroundColor(Color.TRANSPARENT); button.setTag(tag);
+        card.addView(host.controlView(button), new LinearLayout.LayoutParams(-1, -2));
+        TextView evidence = add(card, content, 13, MUTED, false); evidence.setVisibility(View.GONE);
         evidence.setTag(tag + ".text"); evidence.setTextIsSelectable(true);
         button.setContentDescription(label + "，已收起");
         button.setOnClickListener(view -> {

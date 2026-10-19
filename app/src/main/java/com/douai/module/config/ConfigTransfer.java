@@ -145,6 +145,15 @@ public final class ConfigTransfer {
         store.replaceSnapshot(preview.expected, preview.replacement);
     }
 
+    /** Compensation after another selected backup component fails; never overwrites newer settings. */
+    static void rollback(SettingsStore store, Preview preview) {
+        store.replaceSnapshot(preview.replacement, preview.expected);
+    }
+
+    static void requireCurrent(SettingsStore store, Preview preview) {
+        if (!preview.expected.equals(store.snapshot())) throw new IllegalStateException("设置已发生变化，请重新预览备份");
+    }
+
     private static Map<String, ?> copy(Map<String, ?> input) {
         Map<String, Object> output = new LinkedHashMap<>();
         input.forEach((key, value) -> output.put(key, value instanceof java.util.Set<?>

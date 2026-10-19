@@ -19,8 +19,10 @@ final class CommentReplyLedger {
     private static final String PREFIX = "incoming.";
     private static final String WATERMARK = "watermark.";
     private static final String BASELINE = "baseline.";
+    private static final String INBOX_MODEL = "inbox_model.";
     static final int MAX_ENTRIES = 10_000;
     static final int MAX_ATTEMPTS = 3;
+    static final int INBOX_MODEL_VERSION = 4;
     static final long RETRY_DELAY_MILLIS = 60_000L;
     private static final Object LOCK = new Object();
     private final SharedPreferences preferences;
@@ -60,6 +62,29 @@ final class CommentReplyLedger {
         }
     }
 
+    /** Replays the original inbox range once after a model change, without releasing any claim. */
+    boolean ensureInboxModelVersion(long account) {
+        synchronized (LOCK) {
+            if (persistenceFailed || account <= 0) return false;
+            try {
+                if (!preferences.contains(WATERMARK + account)) return false;
+                long watermark = preferences.getLong(WATERMARK + account, 0);
+                long baseline = preferences.getLong(BASELINE + account, watermark);
+                if (watermark < 0 || baseline < 0 || baseline > watermark) {
+                    persistenceFailed = true;
+                    return false;
+                }
+                int version = preferences.getInt(INBOX_MODEL + account, 0);
+                if (version >= INBOX_MODEL_VERSION) return true;
+                return commit(preferences.edit().putLong(WATERMARK + account, baseline)
+                        .putInt(INBOX_MODEL + account, INBOX_MODEL_VERSION));
+            } catch (RuntimeException ignored) {
+                persistenceFailed = true;
+                return false;
+            }
+        }
+    }
+
     /** Establishes the first scan baseline. A failed commit leaves the account uninitialized. */
     void initialize(long account, long sinceSeconds) {
         initialize(account, sinceSeconds, Collections.emptyList());
@@ -82,7 +107,8 @@ final class CommentReplyLedger {
             for (String id : unique) if (!all.containsKey(key(account, id))) count++;
             if (count > MAX_ENTRIES) return false;
             SharedPreferences.Editor editor = preferences.edit().putLong(WATERMARK + account, sinceSeconds)
-                    .putLong(BASELINE + account, sinceSeconds);
+                    .putLong(BASELINE + account, sinceSeconds)
+                    .putInt(INBOX_MODEL + account, INBOX_MODEL_VERSION);
             for (String id : unique) {
                 if (!all.containsKey(key(account, id))) {
                     editor.putString(key(account, id), encode(new Record("", "ignored", 1, clock.millis())));

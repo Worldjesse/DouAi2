@@ -46,6 +46,7 @@ import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 /** Shared settings behavior with Miuix host UI and a native recovery UI. */
 public final class ModuleSettingsScreen {
@@ -57,6 +58,7 @@ public final class ModuleSettingsScreen {
     private final Context context;
     private final SettingsStore repository;
     private final Runnable onClose;
+    private final Consumer<String> analyticsDiagnostics;
     private FeatureSettings settings;
     private LinearLayout content;
     private TextView scanTitle;
@@ -82,9 +84,15 @@ public final class ModuleSettingsScreen {
     }
 
     public ModuleSettingsScreen(Context context, SettingsStore repository, Runnable onClose) {
+        this(context, repository, onClose, null);
+    }
+
+    public ModuleSettingsScreen(Context context, SettingsStore repository, Runnable onClose,
+                                Consumer<String> analyticsDiagnostics) {
         this.context = ModuleTheme.themedContext(context);
         this.repository = repository;
         this.onClose = onClose;
+        this.analyticsDiagnostics = analyticsDiagnostics;
         this.settings = repository.load();
     }
 
@@ -454,7 +462,8 @@ public final class ModuleSettingsScreen {
     }
 
     private void showLocalAnalytics() {
-        LocalAnalyticsDialog page = new LocalAnalyticsDialog(context, repository);
+        LocalAnalyticsDialog page = new LocalAnalyticsDialog(context, repository, miuixHome != null,
+                analyticsDiagnostics);
         showOptionDialog(page.dialog(), page::close);
     }
 

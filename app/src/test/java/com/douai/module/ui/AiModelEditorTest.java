@@ -10,6 +10,7 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.EditText;
 import android.widget.CheckBox;
+import android.widget.Spinner;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.FeatureSettings;
@@ -48,6 +49,98 @@ public final class AiModelEditorTest {
     }
 
     @After public void closeEditor() { if (editor != null) editor.close(); }
+
+    @Test public void changingResponseModeSavesAndReopensInNativeEditor() throws Exception {
+        AiModelConfig original = profile();
+        editor = new AiModelEditor(activity, store, original, false, () -> { });
+        show(editor);
+        Spinner mode = editor.dialog().getWindow().getDecorView().findViewWithTag("ai.response_mode");
+        assertEquals("响应方式", mode.getContentDescription().toString());
+        assertEquals("非流式", mode.getSelectedItem());
+        mode.setSelection(1);
+        editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        AiModelConfig saved = AiModelSettings.read(store).selected();
+        assertTrue(saved.streaming());
+
+        editor = new AiModelEditor(activity, store, saved, false, () -> { });
+        show(editor);
+        mode = editor.dialog().getWindow().getDecorView().findViewWithTag("ai.response_mode");
+        assertEquals("流式", mode.getSelectedItem());
+        mode.setSelection(0);
+        editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertFalse(AiModelSettings.read(store).selected().streaming());
+    }
+
+    @Test public void testChatUsesUnsavedResponseModeWithoutChangingSavedProfile() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setHeader("Content-Type", "text/event-stream")
+                    .setBody("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n"
+                            + "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+                            + "data: [DONE]\n\n"));
+            server.start();
+            AiModelConfig original = AiModelConfig.fromJson(profile().toJson()
+                    .put("apiEndpoint", server.url("/v1").toString())
+                    .put("allowInsecureHttp", true).put("contextRounds", 0));
+            new AiModelSettings(Collections.singletonList(original), original.id).save(store);
+            editor = new AiModelEditor(activity, store, original, false, () -> { });
+            show(editor);
+            View root = editor.dialog().getWindow().getDecorView();
+            ((Spinner) root.findViewWithTag("ai.response_mode")).setSelection(1);
+            selectEffort(root, "high");
+            root.findViewWithTag("ai.test_chat").performClick();
+            Dialog test = ShadowDialog.getLatestDialog();
+            assertTrue(test instanceof AiTestChatDialog);
+            View testRoot = test.getWindow().getDecorView();
+            ((EditText) testRoot.findViewWithTag("ai.chat.input")).setText("fixture");
+            testRoot.findViewWithTag("ai.chat.send").performClick();
+            okhttp3.mockwebserver.RecordedRequest request = server.takeRequest(3, TimeUnit.SECONDS);
+            assertNotNull(request);
+            JSONObject body = new JSONObject(request.getBody().readUtf8());
+            assertTrue(body.getBoolean("stream"));
+            assertEquals("high", body.getString("reasoning_effort"));
+            assertFalse(AiModelSettings.read(store).selected().streaming());
+            assertFalse(AiModelSettings.read(store).selected().hasReasoningEffort());
+            editor.close();
+        }
+    }
+
+    @Test public void reasoningEffortSavesAndReopensInNativeEditor() throws Exception {
+        editor = new AiModelEditor(activity, store, profile(), false, () -> { });
+        show(editor);
+        Spinner effort = editor.dialog().getWindow().getDecorView().findViewWithTag("ai.reasoning_effort");
+        assertEquals("推理强度", effort.getContentDescription().toString());
+        assertEquals("模型默认", effort.getSelectedItem());
+        selectEffort(editor.dialog().getWindow().getDecorView(), "max");
+        editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        AiModelConfig saved = AiModelSettings.read(store).selected();
+        assertEquals("max", saved.reasoningEffort);
+
+        editor = new AiModelEditor(activity, store, saved, false, () -> { });
+        show(editor);
+        effort = editor.dialog().getWindow().getDecorView().findViewWithTag("ai.reasoning_effort");
+        assertEquals("max", effort.getSelectedItem());
+        effort.setSelection(0);
+        editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertFalse(AiModelSettings.read(store).selected().hasReasoningEffort());
+    }
+
+    @Test public void explicitReasoningConflictKeepsEditorOpenAndSavedProfileUnchanged() throws Exception {
+        AiModelConfig original = profile();
+        new AiModelSettings(Collections.singletonList(original), original.id).save(store);
+        editor = new AiModelEditor(activity, store, original, false, () -> { });
+        show(editor);
+        View root = editor.dialog().getWindow().getDecorView();
+        selectEffort(root, "high");
+        input(editor.dialog(), "自定义参数 JSON").setText("{\"reasoning_effort\":\"medium\"}");
+        editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertTrue(editor.dialog().isShowing());
+        assertFalse(AiModelSettings.read(store).selected().hasReasoningEffort());
+        assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("冲突"));
+        ((Spinner) root.findViewWithTag("ai.reasoning_effort")).setSelection(0);
+        editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertFalse(editor.dialog().isShowing());
+        assertEquals("medium", AiModelSettings.read(store).selected().parameters().getString("reasoning_effort"));
+    }
 
     @Test public void invalidDraftAndFailedPersistenceStayOpenUntilSuccessfulSave() throws Exception {
         AiModelConfig original = profile();
@@ -209,6 +302,14 @@ public final class AiModelEditorTest {
         EditText found = findInput(dialog.getWindow().getDecorView(), label);
         assertNotNull(label, found);
         return found;
+    }
+
+    private static void selectEffort(View root, String value) {
+        Spinner effort = root.findViewWithTag("ai.reasoning_effort");
+        for (int index = 0; index < effort.getCount(); index++) {
+            if (value.equals(effort.getItemAtPosition(index))) { effort.setSelection(index); return; }
+        }
+        fail("Missing reasoning effort option: " + value);
     }
 
     private static EditText findInput(View view, String label) {

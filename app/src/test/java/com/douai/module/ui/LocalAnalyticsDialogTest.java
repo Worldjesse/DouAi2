@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.drawable.GradientDrawable;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Switch;
@@ -16,6 +17,9 @@ import com.douai.module.analytics.AnalyticsSnapshot.Bucket;
 import com.douai.module.analytics.AnalyticsSnapshot.Rank;
 import com.douai.module.analytics.AnalyticsSnapshot.Recent;
 import com.douai.module.analytics.PortraitSnapshot;
+import com.douai.module.analytics.AnalyticsAiAnalysis;
+import com.douai.module.config.AiModelConfig;
+import com.douai.module.config.AiModelSettings;
 
 import org.junit.After;
 import org.junit.Before;
@@ -65,6 +69,7 @@ public final class LocalAnalyticsDialogTest {
     private ManualExecutor worker;
     private ManualExecutor analysisWorker;
     private FakeAnalysisService analysis;
+    private final List<String> diagnostics = new ArrayList<>();
 
     @Before public void setup() {
         activity = Robolectric.buildActivity(Activity.class).setup().get();
@@ -72,7 +77,7 @@ public final class LocalAnalyticsDialogTest {
         worker = new ManualExecutor();
         analysisWorker = new ManualExecutor();
         analysis = new FakeAnalysisService();
-        page = new LocalAnalyticsDialog(activity, source, worker, analysis, analysisWorker);
+        page = new LocalAnalyticsDialog(activity, source, worker, analysis, analysisWorker, false, diagnostics::add);
         page.dialog().show();
         ShadowLooper.idleMainLooper(); // Dialog dispatches onShow through its Handler.
     }
@@ -82,6 +87,116 @@ public final class LocalAnalyticsDialogTest {
         page.close();
         activity.finish();
         ShadowLooper.idleMainLooper();
+    }
+
+    @Test public void reportUsesTheSharedDialogChromeWithOneScrollableBody() {
+        drain();
+        assertTrue(page.dialog() instanceof AlertDialog);
+        AlertDialog shown = (AlertDialog) page.dialog();
+        assertEquals("关闭", shown.getButton(AlertDialog.BUTTON_NEGATIVE).getText().toString());
+        assertNull(find("analytics.back"));
+        ViewGroup root = find("analytics.root");
+        assertNull("The shared dialog owns the outside surface", root.getBackground());
+        assertEquals(1, root.getChildCount());
+        assertSame(find("analytics.scroll"), root.getChildAt(0));
+        root.measure(View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(480, View.MeasureSpec.AT_MOST));
+        root.layout(0, 0, root.getMeasuredWidth(), root.getMeasuredHeight());
+        assertTrue("Scroll content must occupy the dialog viewport", find("analytics.scroll").getHeight() > 0);
+        shown.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+        ShadowLooper.idleMainLooper();
+        assertFalse(shown.isShowing());
+        assertTrue(worker.isShutdown());
+    }
+
+    @Test public void reportUsesSettingsTypographyAndCompactUnoutlinedCards() {
+        source.data = fixture();
+        drain();
+        ViewGroup overview = find("analytics.chartcard.overview");
+        TextView heading = find("analytics.section.heading.overview");
+        float scaledDensity = activity.getResources().getDisplayMetrics().scaledDensity;
+        assertEquals(16f, heading.getTextSize() / scaledDensity, 0.01f);
+        assertEquals(0xFF1F272D, heading.getCurrentTextColor());
+        assertEquals(12f * activity.getResources().getDisplayMetrics().density,
+                ((GradientDrawable) overview.getBackground()).getCornerRadius(), 0.01f);
+        TextView purpose = find("analytics.purpose");
+        assertEquals(0xFF008579, purpose.getCurrentTextColor());
+        assertEquals(0xFFE7F5F2,
+                ((GradientDrawable) purpose.getBackground()).getColor().getDefaultColor());
+        assertNotNull(find("analytics.types.chart"));
+    }
+
+    @Test public void reportStartsCompactWithDiscoverableSummariesAndOnlyRequestedDetailsExpand() throws Exception {
+        source.data = portraitFixture();
+        drain();
+        assertEquals(View.GONE, find("analytics.section.body.settings").getVisibility());
+        assertEquals(View.VISIBLE, find("analytics.section.body.overview").getVisibility());
+        assertEquals(View.VISIBLE, find("analytics.section.body.analysis").getVisibility());
+        for (String key : List.of("portrait", "trend", "types", "topics", "authors", "hours",
+                "changes", "associations", "features", "recent", "history")) {
+            assertEquals(key, View.GONE, find("analytics.section.body." + key).getVisibility());
+            assertFalse(text("analytics.section.summary." + key).isEmpty());
+            assertEquals("展开", text("analytics.section.toggle." + key));
+        }
+        renderArtifact(find("analytics.body"), 360, "portrait-360-collapsed-light.png", false);
+        find("analytics.section.toggle.types").performClick();
+        assertEquals(View.VISIBLE, find("analytics.section.body.types").getVisibility());
+        assertEquals(View.GONE, find("analytics.section.body.topics").getVisibility());
+        assertTrue(find("analytics.section.toggle.types").isSelected());
+        assertTrue(find("analytics.section.toggle.types").getContentDescription().toString().contains("已展开"));
+        find("analytics.section.toggle.types").performClick();
+        assertEquals(View.GONE, find("analytics.section.body.types").getVisibility());
+    }
+
+    @Test public void expandedSectionsSurviveRefreshAndRangeChanges() {
+        source.data = fixture();
+        drain();
+        expandSection("types");
+        expandSection("features");
+        find("analytics.refresh").performClick();
+        drain();
+        assertEquals(View.VISIBLE, find("analytics.section.body.types").getVisibility());
+        assertEquals(View.VISIBLE, find("analytics.section.body.features").getVisibility());
+        find("analytics.section.toggle.features").performClick();
+        find("analytics.range.30").performClick();
+        drain();
+        assertEquals(View.VISIBLE, find("analytics.section.body.types").getVisibility());
+        assertEquals(View.GONE, find("analytics.section.body.features").getVisibility());
+        assertEquals(View.GONE, find("analytics.section.body.settings").getVisibility());
+    }
+
+    @Test public void aiResultsKeepCardsCompactAndOfferExplicitExpansion() {
+        source.data = fixture();
+        drain();
+        View chart = find("analytics.types.chart");
+        find("analytics.analysis.request").performClick();
+        finishAnalysis();
+        assertSame(chart, find("analytics.types.chart"));
+        assertEquals(View.GONE, find("analytics.section.body.types").getVisibility());
+        assertTrue(text("analytics.section.summary.types").contains("含 AI 解读"));
+        assertNotNull(find("analytics.analysis.share"));
+        find("analytics.analysis.expand").performClick();
+        for (String key : AI_KEYS) assertEquals(key, View.VISIBLE, find("analytics.section.body." + key).getVisibility());
+        assertEquals(AI_TEXTS[2], text("analytics.analysis.text.types"));
+    }
+
+    @Test public void collapsingPortraitPreservesInlineEvidenceAndChartSelection() {
+        source.data = portraitFixture();
+        drain();
+        expandSection("portrait");
+        expandSection("trend");
+        View evidence = find("analytics.portrait.evidence.sources.text");
+        find("analytics.portrait.evidence.sources").performClick();
+        assertEquals(View.VISIBLE, evidence.getVisibility());
+        View chart = find("analytics.portrait.calendar.chart");
+        chart.performClick();
+        String selected = text("analytics.portrait.calendar.selection");
+        find("analytics.section.toggle.portrait").performClick();
+        expandSection("portrait");
+        assertSame(evidence, find("analytics.portrait.evidence.sources.text"));
+        assertEquals(View.VISIBLE, evidence.getVisibility());
+        assertSame(chart, find("analytics.portrait.calendar.chart"));
+        assertEquals(selected, text("analytics.portrait.calendar.selection"));
     }
 
     @Test public void recordingDefaultsOffAndUsesBackgroundMutation() {
@@ -207,8 +322,10 @@ public final class LocalAnalyticsDialogTest {
             ViewGroup slot = find("analytics.analysis.section." + AI_KEYS[index]);
             ViewGroup chartCard = find("analytics.chartcard." + AI_KEYS[index]);
             assertSame(slot, sectionText.getParent());
-            assertSame(chartCard, slot.getParent());
-            assertSame(slot, chartCard.getChildAt(chartCard.getChildCount() - 1));
+            ViewGroup details = find("analytics.section.body." + AI_KEYS[index]);
+            assertSame(details, slot.getParent());
+            assertSame(chartCard, details.getParent());
+            assertSame(slot, details.getChildAt(details.getChildCount() - 1));
         }
         assertNull(find("analytics.analysis.request"));
         ShadowActivity shadowActivity = Shadow.extract(activity);
@@ -273,12 +390,85 @@ public final class LocalAnalyticsDialogTest {
         finishAnalysis();
         assertNotNull(find("analytics.analysis.error"));
         assertFalse(text("analytics.analysis.error").contains("secret-test"));
+        assertFalse(String.join("\n", diagnostics).contains("secret-test"));
         assertNull(find("analytics.analysis.share"));
         analysis.fail = false;
         find("analytics.analysis.request").performClick();
         finishAnalysis();
         assertEquals(2, analysis.requests.size());
         assertNotNull(find("analytics.analysis.result"));
+    }
+
+    @Test public void typedFormatAndTimeoutFailuresKeepTheirSafeMessagesAndDiagnosticKinds() {
+        source.data = fixture(); drain();
+        for (AnalyticsAiAnalysis.AnalysisFailure.Kind kind : List.of(
+                AnalyticsAiAnalysis.AnalysisFailure.Kind.FORMAT, AnalyticsAiAnalysis.AnalysisFailure.Kind.TIMEOUT)) {
+            AnalyticsAiAnalysis.AnalysisFailure failure = new AnalyticsAiAnalysis.AnalysisFailure(kind);
+            analysis.requestFailure = failure;
+            find("analytics.analysis.request").performClick(); finishAnalysis();
+            assertEquals(failure.safeMessage(), text("analytics.analysis.error"));
+            assertNull(find("analytics.analysis.share"));
+            assertNotNull(find("analytics.analysis.request"));
+            assertTrue(diagnostics.stream().anyMatch(value -> value.contains("stage=ui_failed kind=" + kind.name())));
+        }
+    }
+
+    @Test public void arbitraryProviderExceptionsCannotLeakBodiesCredentialsAddressesOrLabels() {
+        source.data = fixture();
+        String sensitive = "secret-ui-key https://private.invalid/v1 Bearer authorization 测试作者 私密话题 request-body";
+        analysis.requestFailure = new IllegalStateException(sensitive);
+        drain(); find("analytics.analysis.request").performClick(); finishAnalysis();
+        assertEquals("本次分析未完成，请稍后重试。", text("analytics.analysis.error"));
+        String logged = String.join("\n", diagnostics);
+        for (String fragment : sensitive.split(" ")) {
+            assertFalse(text("analytics.analysis.error").contains(fragment));
+            assertFalse(logged.contains(fragment));
+        }
+        assertTrue(logged.contains("stage=ui_failed kind=TRANSPORT status=0 chars=0"));
+    }
+
+    @Test public void typedPrepareFailuresAndUnexpectedPrepareExceptionsStaySafe() {
+        source.data = fixture(); drain();
+        analysis.prepareFailure = new AnalyticsAiAnalysis.AnalysisFailure(AnalyticsAiAnalysis.AnalysisFailure.Kind.PREPARE);
+        find("analytics.analysis.request").performClick();
+        assertEquals(analysis.prepareFailure.getMessage(), text("analytics.analysis.error"));
+        analysis.prepareFailure = new IllegalStateException("secret-prepare-key https://private.invalid/request");
+        find("analytics.analysis.request").performClick();
+        assertEquals(new AnalyticsAiAnalysis.AnalysisFailure(AnalyticsAiAnalysis.AnalysisFailure.Kind.PREPARE).safeMessage(),
+                text("analytics.analysis.error"));
+        assertFalse(String.join("\n", diagnostics).contains("secret-prepare-key"));
+        assertTrue(analysis.requests.isEmpty());
+    }
+
+    @Test public void staleTypedFailureCannotRepopulateAChangedRangeOrItsUiFailureLog() {
+        source.data = fixture(); drain();
+        analysis.requestFailure = new AnalyticsAiAnalysis.AnalysisFailure(AnalyticsAiAnalysis.AnalysisFailure.Kind.TIMEOUT);
+        find("analytics.analysis.request").performClick();
+        analysisWorker.runNext(); // The failure callback is posted but has not reached the UI.
+        find("analytics.range.30").performClick(); drain();
+        assertNull(find("analytics.analysis.error"));
+        assertNull(find("analytics.analysis.result"));
+        assertFalse(diagnostics.stream().anyMatch(value -> value.contains("stage=ui_failed kind=TIMEOUT")));
+    }
+
+    @Test public void productionAnalysisAdapterForwardsOnlySafePreparationDiagnosticsWithoutSendingARequest() throws Exception {
+        ConfigTransferDialogTest.MemoryStore store = new ConfigTransferDialogTest.MemoryStore();
+        AiModelConfig config = AiModelConfig.fromJson(new JSONObject().put("id", "ui-diagnostics")
+                .put("name", "private-model-label").put("provider", "openai")
+                .put("apiEndpoint", "https://private.invalid/v1").put("apiKey", "secret-ui-adapter-key")
+                .put("modelName", "private-model-name"));
+        new AiModelSettings(List.of(config), config.id).save(store);
+        LocalAnalyticsDialog.AnalysisService adapter = LocalAnalyticsDialog.analysisService(store, diagnostics::add);
+        assertTrue(adapter.isConfigured());
+        LocalAnalyticsDialog.AnalysisService.Request request = adapter.prepare(fixture(), 7, "private-purpose-text");
+        assertNotNull(request);
+        request.cancel(); // Preparing and cancelling does not execute the network request.
+        String logged = String.join("\n", diagnostics);
+        assertTrue(logged.contains("[analytics] stage=prepare"));
+        for (String value : List.of("private.invalid", "secret-ui-adapter-key", "private-model-label",
+                "private-model-name", "private-purpose-text")) assertFalse(logged.contains(value));
+        LocalAnalyticsDialog.analysisService(store, ignored -> { throw new IllegalStateException("broken logger"); })
+                .prepare(fixture(), 7).cancel();
     }
 
     @Test public void aiRequiresAllSevenSectionsBeforeRenderingAnyAnalysis() {
@@ -288,6 +478,9 @@ public final class LocalAnalyticsDialogTest {
         find("analytics.analysis.request").performClick();
         finishAnalysis();
         assertNotNull(find("analytics.analysis.error"));
+        assertEquals(new AnalyticsAiAnalysis.AnalysisFailure(AnalyticsAiAnalysis.AnalysisFailure.Kind.FORMAT).safeMessage(),
+                text("analytics.analysis.error"));
+        assertTrue(diagnostics.stream().anyMatch(value -> value.contains("stage=ui_failed kind=FORMAT")));
         assertNull(find("analytics.analysis.share"));
         for (String key : AI_KEYS) assertNull(find("analytics.analysis.text." + key));
         assertNotNull(find("analytics.analysis.request"));
@@ -296,6 +489,7 @@ public final class LocalAnalyticsDialogTest {
     @Test public void aiCompletionPreservesExistingChartsSelectionAndScroll() {
         source.data = fixture();
         drain();
+        expandSection("trend");
         View root = find("analytics.root");
         root.measure(View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY));
@@ -443,6 +637,7 @@ public final class LocalAnalyticsDialogTest {
     @Test public void selfReportedPurposeSavesOnlyOnWorkerAndCancelsOlderAnalysis() {
         source.data = portraitFixture();
         drain();
+        expandSection("settings");
         find("analytics.analysis.request").performClick();
         find("analytics.purpose").performClick();
         AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
@@ -467,6 +662,8 @@ public final class LocalAnalyticsDialogTest {
         answer.put("questions", "这段时间你主要是放松还是寻找灵感？");
         analysis.response = answer.toString();
         drain();
+        expandSection("settings");
+        expandSection("trend");
         find("analytics.analysis.request").performClick();
         finishAnalysis();
         View portrait = find("analytics.analysis.text.portrait");
@@ -512,6 +709,7 @@ public final class LocalAnalyticsDialogTest {
         assertTrue(text("analytics.portrait.comparison.topics.row.0").contains("第 2 · 130 次  →  第 1 · 238 次"));
         assertTrue(text("analytics.portrait.comparison.topics.row.1").contains("未列入摘要"));
         assertTrue(text("analytics.portrait.comparison.topics.row.3").contains("#往日专题"));
+        expandSection("changes");
         renderArtifact(find("analytics.chartcard.changes"), 280, "portrait-topic-migration-280.png", false);
         source.data = portraitFixture(false);
         find("analytics.range.30").performClick();
@@ -538,6 +736,7 @@ public final class LocalAnalyticsDialogTest {
     }
 
     private void renderArtifact(View view, int width, String name, boolean fullReport) throws Exception {
+        if (fullReport) expandAllSections();
         // Individual-card captures change attached child bounds. Every nested layout must
         // rerun, including the report column whose own measure specs can remain unchanged.
         forceLayoutTree(view);
@@ -587,7 +786,8 @@ public final class LocalAnalyticsDialogTest {
     private static void assertNoClippedText(View root) {
         if (root instanceof TextView) {
             TextView text = (TextView) root;
-            if (text.getVisibility() == View.VISIBLE && text.getLayout() != null) {
+            if (text.getVisibility() == View.VISIBLE && text.getLayout() != null
+                    && !String.valueOf(text.getTag()).startsWith("analytics.section.summary.")) {
                 for (int line = 0; line < text.getLayout().getLineCount(); line++) {
                     assertEquals(text.getText().toString(), 0, text.getLayout().getEllipsisCount(line));
                 }
@@ -605,6 +805,14 @@ public final class LocalAnalyticsDialogTest {
         return page.dialog().getWindow().getDecorView().findViewWithTag(tag);
     }
     private String text(String tag) { return ((TextView) find(tag)).getText().toString(); }
+    private void expandSection(String key) {
+        View toggle = find("analytics.section.toggle." + key);
+        if (toggle != null && !toggle.isSelected()) toggle.performClick();
+    }
+    private void expandAllSections() {
+        for (String key : List.of("settings", "portrait", "trend", "types", "topics", "authors", "hours",
+                "changes", "associations", "features", "recent", "history")) expandSection(key);
+    }
     private void drain() {
         while (true) {
             ShadowLooper.idleMainLooper();
@@ -720,6 +928,8 @@ public final class LocalAnalyticsDialogTest {
     private static final class FakeAnalysisService implements LocalAnalyticsDialog.AnalysisService {
         boolean configured = true;
         boolean fail;
+        RuntimeException prepareFailure;
+        Exception requestFailure;
         String response = analysisResponse();
         AnalyticsSnapshot snapshot;
         int days;
@@ -727,21 +937,26 @@ public final class LocalAnalyticsDialogTest {
         @Override public boolean isConfigured() { return configured; }
         @Override public String modelLabel() { return "测试模型 · test-only"; }
         @Override public Request prepare(AnalyticsSnapshot snapshot, int days) {
+            if (prepareFailure != null) throw prepareFailure;
             this.snapshot = snapshot;
             this.days = days;
-            FakeRequest request = new FakeRequest(fail, response);
+            FakeRequest request = new FakeRequest(fail, response, requestFailure);
             requests.add(request);
             return request;
         }
         private static final class FakeRequest implements Request {
             final boolean fail;
             final String response;
+            final Exception failure;
             int runs;
             boolean cancelled;
-            FakeRequest(boolean fail, String response) { this.fail = fail; this.response = response; }
+            FakeRequest(boolean fail, String response, Exception failure) {
+                this.fail = fail; this.response = response; this.failure = failure;
+            }
             @Override public String modelLabel() { return "测试模型 · test-only"; }
-            @Override public String run() {
+            @Override public String run() throws Exception {
                 runs++;
+                if (failure != null) throw failure;
                 if (fail) throw new IllegalStateException("secret-test-provider-response");
                 return response;
             }

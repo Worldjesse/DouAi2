@@ -36,6 +36,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
         long baseline(long account, BooleanSupplier valid) throws Exception;
         default List<String> baselineIds() { return Collections.emptyList(); }
         default long scannedThrough() { return 0; }
+        default long watermarkCeiling() { return Long.MAX_VALUE; }
         List<CommentReplyEvent> scan(long account, long since, BooleanSupplier valid) throws Exception;
         @Override default void close() { }
     }
@@ -150,6 +151,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                 @Override public long baseline(long account, BooleanSupplier valid) throws Exception { return captured.baseline(account, valid); }
                 @Override public List<String> baselineIds() { return captured.baselineCommentIds(); }
                 @Override public long scannedThrough() { return captured.scannedThrough(); }
+                @Override public long watermarkCeiling() { return captured.scannedThrough(); }
                 @Override public List<CommentReplyEvent> scan(long account, long since, BooleanSupplier valid) throws Exception { return captured.scan(account, since, valid); }
                 @Override public void close() { captured.close(); }
             };
@@ -171,7 +173,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                     return Long.parseLong(String.valueOf(HostTargets.invoke(current, "getUid")));
                 } catch (ReflectiveOperationException | RuntimeException failure) { return 0; }
             };
-            installed[0] = new CommentReplyHook(context, options, dispatcher, source, sender, new SharedReplyGenerator(),
+            installed[0] = new CommentReplyHook(context, options, dispatcher, source, sender, new SharedReplyGenerator(log),
                     account, Executors.newSingleThreadExecutor(), Executors.newSingleThreadExecutor(), log);
             return installed[0];
         } catch (Exception failure) {
@@ -231,6 +233,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
         long epoch = generation.get();
         try {
             scanner.execute(() -> {
+                String stage = "baseline";
                 try {
                     if (!valid(account, epoch)) return;
                     if (!ledger.initialized(account)) {
@@ -242,6 +245,16 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                         diagnostic = "已建立起点，等待新回复";
                         return;
                     }
+                    stage = "model_migration";
+                    long previousWatermark = ledger.watermark(account);
+                    if (!ledger.ensureInboxModelVersion(account)) {
+                        throw new NativeCommentReplyInbox.ScanFailure(NativeCommentReplyInbox.FailureReason.STATE_MIGRATION);
+                    }
+                    if (ledger.watermark(account) < previousWatermark) {
+                        safeLog("Comment reply inbox replay: source=baseline; model_version="
+                                + CommentReplyLedger.INBOX_MODEL_VERSION);
+                    }
+                    stage = "scan";
                     long since = Math.max(ledger.baseline(account), ledger.watermark(account) - 300);
                     List<CommentReplyEvent> events = source.scan(account, since, () -> valid(account, epoch));
                     if (!valid(account, epoch)) return;
@@ -277,12 +290,13 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                             catch (RejectedExecutionException failure) { complete(task, "failed"); }
                         }, delay);
                     }
-                    if (!deferred && tasks.isEmpty()) ledger.advance(account, newest);
+                    if (!deferred && tasks.isEmpty()) ledger.advance(account, Math.min(newest, source.watermarkCeiling()));
                     diagnostic = deferred ? "等待处理或发送额度" : "已检查新回复";
                 } catch (Exception failure) {
                     if (valid(account, epoch)) {
                         diagnostic = "扫描暂未完成，稍后重试";
-                        safeLog("Comment reply scan failed: " + failure.getClass().getSimpleName());
+                        safeLog("Comment reply scan failed: stage=" + stage + "; "
+                                + NativeCommentReplyInbox.failureDiagnostic(failure));
                     }
                 } finally {
                     scanQueued.set(false);
@@ -310,40 +324,51 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                 task.settings = options;
             }
             if ("ai".equals(task.settings.text("reply_mode", "fixed"))) {
+                task.stage = "media";
                 task.images = java.util.Collections.unmodifiableList(new java.util.ArrayList<>(
                         mediaLoader.load(application, task.event, task.settings, task.media)));
             }
             if (!valid(task)) { complete(task, "cancelled"); return; }
             if ((task.event.text == null || task.event.text.trim().isEmpty()) && task.images.isEmpty()) { complete(task, "cancelled"); return; }
+            task.stage = "input";
             task.input = input(task.event, task.images.isEmpty() ? "" : AutomationReplyMedia.commentSourceLabel(task.event, task.settings));
+            task.stage = "model";
             Generated generated = generator.generate(task.account, task.event, task.settings, task.images, task.input, count -> {
                 task.requestImageCount = count;
                 task.modelRequestSent = true;
+                safeLog("Comment reply AI request sent: images=" + count);
             });
             if (!valid(task)) { complete(task, "cancelled"); return; }
+            task.stage = "output";
+            task.generatedChars = generated == null || generated.text == null ? 0 : generated.text.length();
             if (generated == null || generated.text == null || generated.text.trim().isEmpty()) {
                 complete(task, "cancelled");
                 return;
             }
+            task.generated = true;
             if (generated.text.length() > 1000) throw new IllegalArgumentException("Comment reply output is too long");
             task.text = generated.text.trim();
             task.model = generated.model == null ? "" : generated.model;
+            safeLog("Comment reply generated: chars=" + task.generatedChars);
             if (task.settings.enabled(LocalOptions.REPLY_VOICE)) {
+                task.stage = "speech";
                 SpeechPreparation.Audio audio = speechPreparer.prepare(application, task.text, task.settings, 30_000, () -> valid(task));
                 task.audio = audio;
                 if (!valid(task)) { audio.delete(); complete(task, "cancelled"); return; }
             }
+            task.stage = "dispatch";
             dispatcher.prepare(entry(task, "pending"), () -> valid(task),
                     done -> send(task, done), status -> complete(task, status));
         } catch (Exception failure) {
             if (!task.finished.get()) {
-                if (valid(task)) fail(task, failure.getClass().getSimpleName());
+                if (valid(task)) fail(task, generationFailureDiagnostic(failure));
                 else complete(task, "cancelled");
             }
         } finally { main.removeCallbacks(timeout); }
     }
 
     private void send(Task task, Consumer<String> done) {
+        task.stage = "publish";
         sender.send(task.event, task.text, task.audio, () -> valid(task), () -> {
             synchronized (stateLock) {
                 if (!valid(task)) return false;
@@ -383,9 +408,55 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
     }
 
     private void fail(Task task, String reason) {
-        safeLog("Comment reply generation failed: " + reason);
+        safeLog("Comment reply generation failed: " + reason + "; stage=" + task.stage
+                + "; ai_sent=" + (task.modelRequestSent ? 1 : 0) + "; generated=" + (task.generated ? 1 : 0)
+                + "; submitted=" + (task.submitted ? 1 : 0) + "; chars=" + task.generatedChars);
         dispatcher.reportFinalFailure(entry(task, "failed"));
         complete(task, "failed");
+    }
+
+    /** Fixed reason codes and module symbols only; exception messages and causes may contain credentials. */
+    static String generationFailureDiagnostic(Exception failure) {
+        String detail = failure.getClass().getSimpleName() + "; reason=" + generationFailureReason(failure);
+        if (failure instanceof ChatCompletionClient.ReplyFailure) {
+            detail += "; http=" + ((ChatCompletionClient.ReplyFailure) failure).httpStatus();
+        }
+        if (failure instanceof SpeechPreparation.Failure) {
+            detail += "; " + ((SpeechPreparation.Failure) failure).diagnostic()
+                    .replace("stage=", "speech_stage=").replace("reason=", "speech_reason=")
+                    .replace("error=", "speech_error=");
+        }
+        for (StackTraceElement frame : failure.getStackTrace()) {
+            String owner = frame.getClassName(), method = frame.getMethodName();
+            if (owner.startsWith("com.douai.module.") && owner.length() <= 180
+                    && owner.matches("[A-Za-z0-9_.$]+") && method.length() <= 100
+                    && method.matches("[A-Za-z0-9_$<>]+")) {
+                detail += "; site=" + owner + "." + method + ":" + Math.max(-1, frame.getLineNumber());
+                break;
+            }
+        }
+        return detail;
+    }
+
+    private static String generationFailureReason(Exception failure) {
+        if (failure instanceof ChatCompletionClient.ReplyFailure) {
+            return "ai_" + ((ChatCompletionClient.ReplyFailure) failure).kind().name().toLowerCase(java.util.Locale.ROOT);
+        }
+        String message = failure.getMessage();
+        if (message == null) return "unexpected";
+        switch (message) {
+            case "视频播放地址无法读取": return "video_source_unavailable";
+            case "图文图片无法读取": return "work_image_unavailable";
+            case "视频封面地址无法读取": return "work_cover_unavailable";
+            case "对方评论附图没有可读取的地址": return "comment_image_missing";
+            case "对方评论附图地址不受支持": return "comment_image_unsupported";
+            case "图片地址不属于受支持的抖音媒体域名": return "image_host_unsupported";
+            case "图片下载失败": return "image_download_failed";
+            case "图片超过 16 MB": return "image_size_limit";
+            case "Comment reply output is too long": return "output_limit";
+            case "请先添加并启用模型配置": return "model_unselected";
+            default: return "unexpected";
+        }
     }
 
     private void complete(Task task, String status) {
@@ -415,12 +486,9 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
         return input(event, "");
     }
     static String input(CommentReplyEvent event, String mediaSource) {
-        String description = String.valueOf(HostTargets.invoke(event.work, "getDesc"));
-        if ("null".equals(description)) description = "";
-        String conversation = "\n我的原评论：" + bounded(event.originalText, 1000)
+        return "我的原评论：" + bounded(event.originalText, 1000)
                 + "\n对方的回复：" + bounded(event.text, 2400)
                 + (mediaSource == null || mediaSource.isEmpty() ? "" : "\n实际附带的视觉素材：" + bounded(mediaSource, 200));
-        return "作品：" + bounded(description, Math.max(0, 4000 - "作品：".length() - conversation.length())) + conversation;
     }
     private static String bounded(String value, int max) { return value == null ? "" : value.substring(0, Math.min(max, value.length())); }
     private void safeLog(String value) { try { log.accept(value); } catch (RuntimeException ignored) { } }
@@ -489,14 +557,23 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
         volatile String input;
         volatile int requestImageCount = -1;
         volatile boolean modelRequestSent;
+        volatile String stage = "queued";
+        volatile boolean generated;
+        volatile int generatedChars;
         Task(long account, long epoch, String identity, CommentReplyEvent event) {
             this.account = account; this.epoch = epoch; this.identity = identity; this.event = event;
             input = input(event);
         }
     }
     static final class SharedReplyGenerator implements Generator {
-        private final ChatCompletionClient ai = new ChatCompletionClient();
+        private final ChatCompletionClient ai;
         private final java.util.Random random = new java.util.Random();
+        SharedReplyGenerator() { this(null); }
+        SharedReplyGenerator(Consumer<String> log) {
+            ai = new ChatCompletionClient(null, value -> {
+                if (log != null) log.accept("Comment reply AI " + value);
+            });
+        }
         @Override public Generated generate(long account, CommentReplyEvent event, LocalOptions options) throws Exception {
             return generate(account, event, options, Collections.emptyList(), input(event), ignored -> { });
         }

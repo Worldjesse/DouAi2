@@ -653,9 +653,16 @@ public final class ModuleSettingsReferenceTest {
 
         AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
         assertTrue(editor.isShowing());
-        List<Spinner> providerControls = collect(editor.getWindow().getDecorView(), Spinner.class);
-        assertEquals(2, providerControls.size());
-        assertEquals("通义千问", providerControls.get(0).getSelectedItem());
+        View editorRoot = editor.getWindow().getDecorView();
+        Spinner provider = editorRoot.findViewWithTag("ai.provider");
+        Spinner responseMode = editorRoot.findViewWithTag("ai.response_mode");
+        Spinner reasoningEffort = editorRoot.findViewWithTag("ai.reasoning_effort");
+        assertNotNull(provider);
+        assertNotNull(responseMode);
+        assertNotNull(reasoningEffort);
+        assertEquals("通义千问", provider.getSelectedItem());
+        assertEquals("非流式", responseMode.getSelectedItem());
+        assertEquals("模型默认", reasoningEffort.getSelectedItem());
         setEditorInput(editor, "配置名称", "测试模型");
         setEditorInput(editor, "模型名称", "qwen-turbo");
         editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick();

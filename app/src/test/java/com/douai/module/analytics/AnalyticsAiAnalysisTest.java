@@ -3,6 +3,7 @@ package com.douai.module.analytics;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.SettingsRepository;
+import com.douai.module.feature.ChatMediaLoader;
 
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -104,6 +105,116 @@ public final class AnalyticsAiAnalysisTest {
         }
     }
 
+    @Test public void richPortraitAttachmentUsesTheSame16000CharacterBudgetAsManualDocuments() throws Exception {
+        AnalyticsSnapshot rich = richBudgetSnapshot();
+        String purpose = "SELF_REPORT_BUDGET_FIXTURE_" + "p".repeat(180);
+        List<String> diagnostics = new ArrayList<>();
+        try (MockWebServer server = new MockWebServer()) {
+            server.start(); server.enqueue(reply("bounded portrait"));
+            AnalyticsAiAnalysis.prepare(settings(server), rich, 90, purpose, diagnostics::add).run();
+            String content = body(server).getJSONArray("messages").getJSONObject(1).getString("content");
+            String marker = "[附件文本]\n";
+            int index = content.indexOf(marker); assertTrue(index >= 0);
+            String document = content.substring(index + marker.length());
+            assertTrue("Analysis attachments must share the manual 16000-character budget; actual=" + document.length(),
+                    document.length() <= ChatMediaLoader.MAX_DOCUMENT_CHARS);
+            assertTrue(document.getBytes(StandardCharsets.UTF_8).length <= 32768);
+            JSONObject data = new JSONObject(document);
+            assertEquals(90, data.getJSONObject("range").getInt("days"));
+            assertEquals(123456, data.getJSONObject("totals").getLong("views"));
+            assertEquals(3456, data.getJSONObject("totals").getLong("featureUses"));
+            assertEquals(100123, data.getJSONObject("totals").getLong("uniqueWorks"));
+            assertEquals(purpose, data.getString("selfReport"));
+            for (String key : List.of("typesTop10", "authorsTop10", "topicsTop10", "featuresTop10")) {
+                assertEquals(10, data.getJSONArray(key).length());
+                for (int i = 0; i < 10; i++) {
+                    assertEquals(rich.types.get(i).count, data.getJSONArray(key).getJSONObject(i).getLong("count"));
+                    assertEquals(rich.types.get(i).label, data.getJSONArray(key).getJSONObject(i).getString("label"));
+                }
+            }
+            assertEquals(24, data.getJSONArray("viewsByLocalHour").length());
+            assertEquals(1234, data.getJSONArray("viewsByLocalHour").getLong(23));
+            JSONObject evidence = data.getJSONObject("portraitEvidence");
+            assertEquals(789, evidence.getInt("authorsAcrossFullDistribution"));
+            assertEquals(2468, evidence.getInt("topicsAcrossFullDistribution"));
+            assertEquals(17, evidence.getLong("queueDropped"));
+            JSONObject comparison = evidence.getJSONObject("selectedComparison");
+            assertEquals(123456, comparison.getLong("currentViews"));
+            assertEquals(111111, comparison.getLong("previousViews"));
+            assertFalse(comparison.getBoolean("previousComplete"));
+            assertTrue(comparison.getString("limitation").startsWith("SELECTED_COMPARISON_COVERAGE_UNKNOWN"));
+            assertTrue(evidence.getString("omittedForSize").length() > 0);
+            String coverage = evidence.getJSONArray("coverageLimitations").toString();
+            for (int i = 0; i < 9; i++) assertTrue(coverage.contains("COVERAGE_FACT_" + i + "=unknown"));
+            assertEquals(123, evidence.getJSONObject("jointObserved").getJSONArray("typeAndAction").getJSONObject(0).getLong("count"));
+            String logged = String.join("\n", diagnostics);
+            assertTrue(logged.contains("stage=aggregate documentChars=" + document.length()));
+            assertTrue(logged.contains("documentBytes=" + document.getBytes(StandardCharsets.UTF_8).length));
+            assertTrue(logged.contains("elapsedMs="));
+            for (String privateValue : List.of(purpose, rich.types.get(0).label, "COVERAGE_FACT_", "secret-api-key"))
+                assertFalse(logged.contains(privateValue));
+        }
+    }
+
+    @Test public void mandatoryAggregateThatStillExceedsBudgetIsRejectedBeforeAnyRequestWithSpecificSafeReason() throws Exception {
+        AnalyticsSnapshot rich = richBudgetSnapshot("\\\"".repeat(30));
+        List<String> diagnostics = new ArrayList<>();
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            // Deliberately huge mandatory evidence is not replaced with invented shortened facts.
+            PortraitSnapshot p = rich.portrait;
+            PortraitSnapshot oversized = new PortraitSnapshot(p.startDate, p.endDate, p.days, p.weekdayHours,
+                    p.topicTiles, p.authorPareto, p.featureSources, p.browseDays, p.authorCount, p.topicCount,
+                    p.topicOccurrences, p.repeatedWorks, p.capturedVisits, p.finishedVisits, p.visibleMillis, p.queueDropped,
+                    p.authorDiversity, p.topicDiversity, p.topAuthorShare, p.topTopicShare, p.crossDayRepeatShare,
+                    p.nightShare, p.weekendShare, p.comparison, p.weekComparison, p.monthComparison, p.insights,
+                    p.topicHours, p.typeActions, p.coverage, "MANDATORY_PRIVATE_EVIDENCE_" + "q".repeat(16000));
+            AnalyticsSnapshot input = new AnalyticsSnapshot(rich.totalViews, rich.totalFeatureUses, rich.uniqueWorks,
+                    rich.advertisementViews, rich.activeDays, rich.currentStreak, rich.firstSeen, rich.trend,
+                    rich.types, rich.authors, rich.topics, rich.features, rich.hours, rich.recent, oversized);
+            try {
+                AnalyticsAiAnalysis.prepare(settings(server), input, 90, "PRIVATE_PURPOSE", diagnostics::add);
+                fail("Oversized mandatory facts must not be sent or silently truncated");
+            } catch (AnalyticsAiAnalysis.AnalysisFailure failure) {
+                assertEquals(AnalyticsAiAnalysis.AnalysisFailure.Kind.INPUT_TOO_LARGE, failure.kind());
+                assertTrue(failure.safeMessage().contains("缩小统计范围"));
+                assertFalse(failure.safeMessage().contains("模型配置")); assertNull(failure.getCause());
+            }
+            assertEquals(0, server.getRequestCount());
+            String logged = String.join("\n", diagnostics);
+            assertTrue(logged.contains("kind=INPUT_TOO_LARGE")); assertTrue(logged.contains("documentChars="));
+            assertFalse(logged.contains("MANDATORY_PRIVATE_EVIDENCE")); assertFalse(logged.contains("PRIVATE_PURPOSE"));
+        }
+    }
+
+    @Test public void incompleteResponsesStreamMapsToSafeIncompleteAnalysisWithoutPublishingPartialJson() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            String partial = new JSONObject().put("type", "response.output_text.delta")
+                    .put("delta", result("PRIVATE_PARTIAL_ANALYSIS")).toString();
+            server.enqueue(new MockResponse().addHeader("Content-Type", "text/event-stream")
+                    .setBody("event: response.output_text.delta\ndata: " + partial + "\n\n"));
+            SettingsRepository store = settings(server);
+            AiModelConfig current = AiModelSettings.read(store).selected();
+            AiModelConfig responses = AiModelConfig.fromJson(current.toJson().put("protocol", AiModelConfig.RESPONSES)
+                    .put("responseMode", "streaming"));
+            new AiModelSettings(List.of(responses), responses.id).save(store);
+            List<String> diagnostics = new ArrayList<>();
+            try {
+                AnalyticsAiAnalysis.prepare(store, snapshot(), 7, "", diagnostics::add).run();
+                fail("Complete-looking JSON without a completed stream is still incomplete");
+            } catch (AnalyticsAiAnalysis.AnalysisFailure failure) {
+                assertEquals(AnalyticsAiAnalysis.AnalysisFailure.Kind.INCOMPLETE, failure.kind());
+                assertEquals("模型分析未完整返回，请稍后重试。", failure.safeMessage());
+                assertNull(failure.getCause());
+            }
+            assertEquals(1, server.getRequestCount());
+            String logged = String.join("\n", diagnostics);
+            assertTrue(logged.contains("kind=INCOMPLETE")); assertFalse(logged.contains("stage=complete "));
+            assertFalse(logged.contains("PRIVATE_PARTIAL_ANALYSIS")); assertFalse(logged.contains("secret-api-key"));
+        }
+    }
+
     @Test public void eachAnalysisHasNoSharedConversationHistory() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.start(); server.enqueue(reply("FIRST_PRIVATE_MODEL_RESPONSE")); server.enqueue(reply("second"));
@@ -153,17 +264,128 @@ public final class AnalyticsAiAnalysisTest {
         try (MockWebServer server = new MockWebServer()) {
             server.start();
             server.enqueue(new MockResponse().setResponseCode(401).setBody("secret-api-key PRIVATE_SERVER_RESPONSE"));
-            server.enqueue(reply("   "));
+            server.enqueue(rawReply("   "));
             server.enqueue(new MockResponse().setBody("not JSON PRIVATE_SERVER_RESPONSE"));
             server.enqueue(reply("x".repeat(4001)));
             SettingsRepository store = settings(server);
+            AnalyticsAiAnalysis.AnalysisFailure.Kind[] kinds = {
+                    AnalyticsAiAnalysis.AnalysisFailure.Kind.HTTP, AnalyticsAiAnalysis.AnalysisFailure.Kind.EMPTY,
+                    AnalyticsAiAnalysis.AnalysisFailure.Kind.FORMAT, AnalyticsAiAnalysis.AnalysisFailure.Kind.OVERLONG};
             for (int i = 0; i < 4; i++) {
                 try { AnalyticsAiAnalysis.prepare(store, snapshot(), 7).run(); fail("invalid response must fail"); }
-                catch (IllegalStateException expected) {
-                    assertEquals("AI 分析失败，请检查模型配置或稍后重试", expected.getMessage());
+                catch (AnalyticsAiAnalysis.AnalysisFailure expected) {
+                    assertEquals(kinds[i], expected.kind());
+                    assertFalse(expected.safeMessage().contains("secret-api-key"));
+                    assertFalse(expected.safeMessage().contains("PRIVATE_SERVER_RESPONSE"));
                     assertNull(expected.getCause());
                 }
             }
+        }
+    }
+
+    @Test public void receivedUnstructuredReplyReportsAnalysisFormatInsteadOfModelConfiguration() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            server.enqueue(rawReply("这是一段普通模型回复。"));
+            try {
+                AnalyticsAiAnalysis.prepare(settings(server), snapshot(), 7).run();
+                fail("A plain model reply cannot satisfy the per-chart analysis contract");
+            } catch (IllegalStateException expected) {
+                String message = expected.getMessage();
+                assertTrue("A received HTTP 200 reply needs a distinct safe diagnostic: " + message,
+                        message != null && message.contains("已收到模型回复"));
+                assertTrue(message.contains("分析格式"));
+                assertFalse(message.contains("检查模型配置"));
+                assertNull("Provider content and credentials must not escape through a cause", expected.getCause());
+            }
+            assertEquals(1, server.getRequestCount());
+        }
+    }
+
+    /** Compatibility boundary only: this synthetic response is not evidence of the reported device failure. */
+    @Test public void requestAcceptsFencedAnalysisWithinCanonicalLimitWhenTransportTextSlightlyExceedsIt() throws Exception {
+        JSONObject fields = new JSONObject(result("分析"));
+        for (String key : new String[]{"overview", "trend", "types", "authors", "topics", "features", "hours"}) {
+            fields.put(key, "a".repeat(500));
+        }
+        int padding = 3995 - fields.toString().length();
+        assertTrue(padding > 0 && fields.getString("portrait").length() + padding <= 600);
+        fields.put("portrait", fields.getString("portrait") + "p".repeat(padding));
+        String canonical = fields.toString();
+        String fenced = "\n```json\n" + canonical + "\n```\n";
+        assertEquals(3995, canonical.length());
+        assertTrue(fenced.length() > 4000);
+        assertTrue(fenced.length() <= 4032);
+        // Establish that the response is already accepted by the real structured parser.
+        assertEquals(canonical, AnalyticsAiAnalysis.parseResult(fenced).toJson());
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            server.enqueue(rawReply(fenced));
+            String returned = AnalyticsAiAnalysis.prepare(settings(server), snapshot(), 7).run();
+            assertEquals(canonical, returned);
+            assertEquals(1, server.getRequestCount());
+        }
+    }
+
+    @Test public void diagnosticsClassifyStructuredFailuresWithoutLoggingValuesOrUnknownKeys() throws Exception {
+        JSONObject missing = new JSONObject(result("PRIVATE_MODEL_TEXT")); missing.remove("hours");
+        JSONObject wrongType = new JSONObject(result("PRIVATE_MODEL_TEXT")).put("authors", new JSONArray().put("PRIVATE_AUTHOR_LABEL"));
+        JSONObject empty = new JSONObject(result("PRIVATE_MODEL_TEXT")).put("topics", " ");
+        JSONObject tooLong = new JSONObject(result("PRIVATE_MODEL_TEXT")).put("features", "x".repeat(601));
+        JSONObject unknown = new JSONObject(result("PRIVATE_MODEL_TEXT")).put("PRIVATE_UNKNOWN_KEY", "PRIVATE_VALUE");
+        JSONObject legacy = new JSONObject(result("PRIVATE_MODEL_TEXT"));
+        for (String key : new String[]{"portraitTitle", "portrait", "contrasts", "questions"}) legacy.remove(key);
+        String[] responses = {"PRIVATE_MODEL_TEXT", missing.toString(), wrongType.toString(), empty.toString(),
+                tooLong.toString(), unknown.toString(), legacy.toString()};
+        String[] reasons = {"not_json", "missing_fields", "wrong_type", "empty_field", "field_too_long", "extra_fields", "missing_portrait"};
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            SettingsRepository store = settings(server);
+            for (int index = 0; index < responses.length; index++) {
+                server.enqueue(rawReply(responses[index]));
+                List<String> diagnostics = new ArrayList<>();
+                try {
+                    AnalyticsAiAnalysis.prepare(store, snapshot(), 7, "PRIVATE_SELF_REPORT", diagnostics::add).run();
+                    fail("invalid structured response must fail");
+                } catch (AnalyticsAiAnalysis.AnalysisFailure failure) {
+                    assertEquals(index == 4 ? AnalyticsAiAnalysis.AnalysisFailure.Kind.OVERLONG
+                            : AnalyticsAiAnalysis.AnalysisFailure.Kind.FORMAT, failure.kind());
+                    assertNull(failure.getCause());
+                    assertFalse(failure.safeMessage().contains("PRIVATE_"));
+                }
+                String logged = String.join("\n", diagnostics);
+                assertTrue(logged, logged.contains("formatReason=" + reasons[index]));
+                assertTrue(logged.contains("stage=failed"));
+                assertFalse(logged.contains("PRIVATE_"));
+                assertFalse(logged.contains("作者"));
+                assertFalse(logged.contains("secret-api-key"));
+                assertFalse(logged.contains(server.url("/").toString()));
+            }
+        }
+    }
+
+    @Test public void timeoutAndConnectionFailureHaveDistinctSafeKinds() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            SettingsRepository store = settings(server);
+            AiModelConfig current = AiModelSettings.read(store).selected();
+            AiModelConfig shortTimeout = AiModelConfig.fromJson(current.toJson().put("timeoutSeconds", 5));
+            new AiModelSettings(List.of(shortTimeout), shortTimeout.id).save(store);
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            try { AnalyticsAiAnalysis.prepare(store, snapshot(), 7).run(); fail("timeout expected"); }
+            catch (AnalyticsAiAnalysis.AnalysisFailure failure) {
+                assertEquals(AnalyticsAiAnalysis.AnalysisFailure.Kind.TIMEOUT, failure.kind());
+                assertNull(failure.getCause());
+            }
+            server.shutdown();
+            List<String> diagnostics = new ArrayList<>();
+            try { AnalyticsAiAnalysis.prepare(store, snapshot(), 7, "", diagnostics::add).run(); fail("connection failure expected"); }
+            catch (AnalyticsAiAnalysis.AnalysisFailure failure) {
+                assertEquals(AnalyticsAiAnalysis.AnalysisFailure.Kind.TRANSPORT, failure.kind());
+                assertNull(failure.getCause());
+                assertFalse(failure.safeMessage().contains("localhost"));
+            }
+            assertTrue(String.join("\n", diagnostics).contains("kind=TRANSPORT"));
         }
     }
 
@@ -173,8 +395,9 @@ public final class AnalyticsAiAnalysisTest {
         assertFalse(AnalyticsAiAnalysis.isConfigured(store));
         assertEquals("未配置 AI 模型", AnalyticsAiAnalysis.modelLabel(store));
         try { AnalyticsAiAnalysis.prepare(store, snapshot(), 7); fail("invalid configuration must fail"); }
-        catch (IllegalStateException expected) {
-            assertEquals("请先完成并启用 AI 模型配置", expected.getMessage());
+        catch (AnalyticsAiAnalysis.AnalysisFailure expected) {
+            assertEquals(AnalyticsAiAnalysis.AnalysisFailure.Kind.PREPARE, expected.kind());
+            assertFalse(expected.safeMessage().contains("secret-api-key"));
             assertNull(expected.getCause());
         }
     }
@@ -250,8 +473,8 @@ public final class AnalyticsAiAnalysisTest {
             SettingsRepository settings = settings(server);
             for (int i = 0; i < 2; i++) {
                 try { AnalyticsAiAnalysis.prepare(settings, snapshot(), 7).run(); fail("invalid sections"); }
-                catch (IllegalStateException expected) {
-                    assertEquals("AI 分析失败，请检查模型配置或稍后重试", expected.getMessage());
+                catch (AnalyticsAiAnalysis.AnalysisFailure expected) {
+                    assertEquals(AnalyticsAiAnalysis.AnalysisFailure.Kind.FORMAT, expected.kind());
                 }
             }
             String normalized = AnalyticsAiAnalysis.prepare(settings, snapshot(), 7).run();
@@ -298,7 +521,9 @@ public final class AnalyticsAiAnalysisTest {
         try (MockWebServer server = new MockWebServer()) {
             server.start(); server.enqueue(rawReply(legacy.toString()));
             try { AnalyticsAiAnalysis.prepare(settings(server), snapshot(), 7).run(); fail("缺少综合侧写"); }
-            catch (IllegalStateException expected) { assertEquals("AI 分析失败，请检查模型配置或稍后重试", expected.getMessage()); }
+            catch (AnalyticsAiAnalysis.AnalysisFailure expected) {
+                assertEquals(AnalyticsAiAnalysis.AnalysisFailure.Kind.FORMAT, expected.kind());
+            }
         }
     }
 
@@ -332,6 +557,39 @@ public final class AnalyticsAiAnalysisTest {
                 List.of(new AnalyticsSnapshot.Rank("摄影", 5)),
                 List.of(new AnalyticsSnapshot.Rank("自动点赞请求", 8)), hours,
                 List.of(new AnalyticsSnapshot.Recent(1722222222333L, "RECENT_PRIVATE_COMMENT_123", "view")));
+    }
+
+    private static AnalyticsSnapshot richBudgetSnapshot() {
+        return richBudgetSnapshot(null);
+    }
+
+    private static AnalyticsSnapshot richBudgetSnapshot(String rankLabel) {
+        List<AnalyticsSnapshot.Rank> ranks = new ArrayList<>();
+        List<AnalyticsSnapshot.Bucket> trend = new ArrayList<>();
+        List<PortraitSnapshot.Insight> observations = new ArrayList<>();
+        List<PortraitSnapshot.Joint> joints = new ArrayList<>();
+        List<String> coverage = new ArrayList<>();
+        for (int i = 0; i < 10; i++) ranks.add(new AnalyticsSnapshot.Rank(
+                rankLabel == null ? "R" + i + "_" + "r".repeat(57) : rankLabel, 123456 + i));
+        for (int i = 0; i < 90; i++) trend.add(new AnalyticsSnapshot.Bucket("day-" + i + "-" + "t".repeat(10), 1000 + i));
+        for (int i = 0; i < 5; i++) observations.add(new PortraitSnapshot.Insight("OBS_" + i + "_" + "i".repeat(30),
+                "TITLE_" + i + "_" + "t".repeat(32), "observation " + "o".repeat(100),
+                "evidence " + "e".repeat(141), "limitation " + "l".repeat(99)));
+        for (int i = 0; i < 6; i++) joints.add(new PortraitSnapshot.Joint("LEFT_" + i + "_" + "a".repeat(53),
+                "RIGHT_" + i + "_" + "b".repeat(52), 123 + i));
+        for (int i = 0; i < 9; i++) coverage.add("COVERAGE_FACT_" + i + "=unknown; " + "c".repeat(110));
+        PortraitSnapshot.Comparison comparison = new PortraitSnapshot.Comparison("2026-07-21", "2026-10-18",
+                "2026-04-22", "2026-07-20", 123456, 111111, 3456, 2222, ranks, ranks, false, false,
+                "SELECTED_COMPARISON_COVERAGE_UNKNOWN; " + "l".repeat(124), ranks, ranks, ranks, ranks);
+        long[][] weekdayHours = new long[7][24];
+        for (int day = 0; day < 7; day++) for (int hour = 0; hour < 24; hour++) weekdayHours[day][hour] = 100 + day * 24 + hour;
+        PortraitSnapshot portrait = new PortraitSnapshot("2026-07-21", "2026-10-18", List.of(), weekdayHours,
+                ranks, ranks, ranks, 90, 789, 2468, 321456, 123, 1000, 999, 999999, 17,
+                .8, .7, .3, .2, .1, .2, .4, comparison, comparison, comparison,
+                observations, joints, joints, coverage, "cross-day observations with incomplete coverage");
+        long[] hours = new long[24]; hours[23] = 1234;
+        return new AnalyticsSnapshot(123456, 3456, 100123, 12, 90, 5, 0,
+                trend, ranks, ranks, ranks, ranks, hours, List.of(), portrait);
     }
 
     private static MockResponse reply(String content) throws Exception {

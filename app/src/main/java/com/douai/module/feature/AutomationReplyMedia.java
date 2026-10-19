@@ -12,7 +12,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
-/** Visual input for automatic replies, using the parent reply switches and captured sources. */
+/** Visual input for automatic replies, scoped to the incoming message or comment. */
 public final class AutomationReplyMedia {
     public static final String RECOGNIZE_IMAGES = "reply_recognize_images";
     public static final String RECOGNIZE_VIDEO = "reply_recognize_video";
@@ -23,32 +23,21 @@ public final class AutomationReplyMedia {
                                    MediaReadCancellation cancellation) throws Exception {
         cancellation.start();
         cancellation.check();
-        boolean images = options.enabled(RECOGNIZE_IMAGES, true);
-        boolean video = options.enabled(RECOGNIZE_VIDEO, false);
-        if (!images && !video) return Collections.emptyList();
+        if (!options.enabled(RECOGNIZE_IMAGES, true)) return Collections.emptyList();
         if (event == null) throw new IllegalArgumentException("评论回复素材目标为空");
-        // The incoming comment's images are a separate subject. Do not mix in the work or own original comment.
-        if (images && hasCommentImages(event.targetComment)) {
+        // The parent video switch applies to incoming message videos, not to the original work.
+        if (hasCommentImages(event.targetComment)) {
             List<String> sources = commentImageUrls(event.targetComment);
             if (sources.isEmpty()) throw new IllegalArgumentException("对方评论附图没有可读取的地址");
             return Collections.unmodifiableList(new ArrayList<>(AutomationImages.load(sources, cancellation)));
         }
-        List<String> sources = images ? AutomationCommentMedia.imageUrls(event.work) : Collections.emptyList();
-        String source = video ? AutomationCommentMedia.videoUrl(event.work) : null;
-        return loadIncoming(context, sources, source, options, cancellation);
+        return Collections.emptyList();
     }
 
     /** The label describes exactly the sources selected by comment(), not an assumed image subject. */
     static String commentSourceLabel(CommentReplyEvent event, LocalOptions options) {
         if (event == null) return "";
-        boolean images = options.enabled(RECOGNIZE_IMAGES, true);
-        boolean video = options.enabled(RECOGNIZE_VIDEO, false);
-        if (images && hasCommentImages(event.targetComment)) return "对方评论附图";
-        boolean workImages = images && !AutomationCommentMedia.imageUrls(event.work).isEmpty();
-        boolean workVideo = video && AutomationCommentMedia.videoUrl(event.work) != null;
-        if (workImages && workVideo) return "原作品图片/封面与视频帧";
-        if (workVideo) return "原作品视频帧（不含音频）";
-        return workImages ? "原作品图片/封面" : "";
+        return options.enabled(RECOGNIZE_IMAGES, true) && hasCommentImages(event.targetComment) ? "对方评论附图" : "";
     }
 
     static boolean hasCommentImages(Object comment) {

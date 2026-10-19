@@ -218,7 +218,7 @@ public final class HostUiController implements Application.ActivityLifecycleCall
         Dialog dialog = new Dialog(activity, ModuleTheme.dialogTheme(activity));
         dialog.setOwnerActivity(activity);
         dialog.setCanceledOnTouchOutside(true);
-        ModuleSettingsScreen screen = new ModuleSettingsScreen(activity, settingsStore, dialog::dismiss);
+        ModuleSettingsScreen screen = createSettingsScreen(activity, dialog::dismiss);
         dialog.setOnDismissListener(ignored -> {
             screen.close();
             if (settingsDialog == dialog) settingsDialog = null;
@@ -251,6 +251,10 @@ public final class HostUiController implements Application.ActivityLifecycleCall
             settingsDialog = null;
             safeLog("Could not show in-host settings page: " + failure.getMessage());
         }
+    }
+
+    ModuleSettingsScreen createSettingsScreen(Activity activity, Runnable onClose) {
+        return new ModuleSettingsScreen(activity, settingsStore, onClose, this::safeLog);
     }
 
     private void renderScanDialog() {

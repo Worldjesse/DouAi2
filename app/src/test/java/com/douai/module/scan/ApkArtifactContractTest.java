@@ -93,6 +93,14 @@ public final class ApkArtifactContractTest {
 
     @Test public void releaseHostReflectionNamesAndScannerOpcodeTextSurviveR8() throws Exception {
         DexFacts release = dexFacts("DOUAI_VERIFY_RELEASE_APK");
+        assertMethod(release, "Lcom/douai/module/feature/CommentReplyHook;",
+                "generationFailureDiagnostic(Ljava/lang/Exception;)Ljava/lang/String;", 0, true);
+        assertMethod(release, "Lcom/douai/module/feature/CommentReplyHook$SharedReplyGenerator;",
+                "<init>(Ljava/util/function/Consumer;)V", 0, false);
+        for (String marker : new String[]{"Comment reply AI request sent: images=", "Comment reply generated: chars=",
+                "video_source_unavailable"}) {
+            assertTrue("Missing comment reply diagnostic: " + marker, release.strings.contains(marker));
+        }
         assertNotNull("Native AI chat bridge was removed by R8",
                 release.classes.get("Lcom/douai/module/ui/HostNativeChatViews;"));
         assertNotNull("Native album bridge was removed by R8",
@@ -142,7 +150,8 @@ public final class ApkArtifactContractTest {
             for (CharSequence parameter : method.getParameterTypes()) descriptor.append(parameter);
             descriptor.append(')').append(method.getReturnType());
             if (!signature.contentEquals(descriptor)) continue;
-            assertTrue(type + " visibility: " + signature, (method.getAccessFlags() & visibility) != 0);
+            // Zero requests no visibility constraint, e.g. package-private diagnostic helpers.
+            if (visibility != 0) assertTrue(type + " visibility: " + signature, (method.getAccessFlags() & visibility) != 0);
             assertEquals(type + " static: " + signature, isStatic,
                     AccessFlags.STATIC.isSet(method.getAccessFlags()));
             return;

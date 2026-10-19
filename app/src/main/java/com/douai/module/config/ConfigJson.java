@@ -12,15 +12,19 @@ import java.util.Set;
 final class ConfigJson {
     private ConfigJson() { }
     static Object parse(String text) {
-        if (text == null || text.length() > ConfigTransfer.MAX_BYTES) throw invalid();
+        return parse(text, ConfigTransfer.MAX_BYTES, 4096);
+    }
+    static Object parse(String text, int maxBytes, int maxArrayItems) {
+        if (text == null || text.length() > maxBytes
+                || text.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > maxBytes) throw invalid();
         try (JsonReader reader = new JsonReader(new StringReader(text))) {
             reader.setLenient(false);
-            Object value = read(reader, 0);
+            Object value = read(reader, 0, maxArrayItems);
             if (reader.peek() != JsonToken.END_DOCUMENT) throw invalid();
             return value;
         } catch (Exception failure) { throw invalid(); }
     }
-    private static Object read(JsonReader reader, int depth) throws Exception {
+    private static Object read(JsonReader reader, int depth, int maxArrayItems) throws Exception {
         if (depth > 32) throw invalid();
         switch (reader.peek()) {
             case BEGIN_OBJECT: {
@@ -30,15 +34,15 @@ final class ConfigJson {
                 while (reader.hasNext()) {
                     String key = reader.nextName();
                     if (!names.add(key) || names.size() > 4096) throw invalid();
-                    result.put(key, read(reader, depth + 1));
+                    result.put(key, read(reader, depth + 1, maxArrayItems));
                 }
                 reader.endObject(); return result;
             }
             case BEGIN_ARRAY: {
                 JSONArray result = new JSONArray(); reader.beginArray();
                 while (reader.hasNext()) {
-                    if (result.length() >= 4096) throw invalid();
-                    result.put(read(reader, depth + 1));
+                    if (result.length() >= maxArrayItems) throw invalid();
+                    result.put(read(reader, depth + 1, maxArrayItems));
                 }
                 reader.endArray(); return result;
             }

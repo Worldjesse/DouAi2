@@ -205,11 +205,30 @@ dm_auto_audio_uploader	message_voice	method	LX/12vM;		LIZIZ	()Ljava/lang/Object;
 comment_reply_notice_fetch	comment_reply	method	LX/0dPQ;		fetchNotice	(JJIILjava/lang/Integer;ILjava/lang/Integer;Ljava/lang/Integer;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;ILjava/lang/String;IILjava/lang/String;IILjava/lang/Integer;I)Lcom/google/common/util/concurrent/ListenableFuture;								
 comment_reply_notice_provider	comment_reply	class	LX/0dU1;											b
 comment_reply_notice_response	comment_reply	class	Lcom/ss/android/ugc/aweme/socialnotice/bean/NoticeResponse;											items|hasMore|maxTime|minTime
-comment_reply_base_notice	comment_reply	class	Lcom/ss/android/ugc/aweme/socialnotice/bean/BaseNotice;											commentNotice|nid|createTime|noticeDisable|itemDisable
+comment_reply_base_notice	comment_reply	class	Lcom/ss/android/ugc/aweme/socialnotice/bean/BaseNotice;											commentNotice|nid|createTime|noticeDisable|itemDisable|interactiveGeneralNoticeStruct
 comment_reply_comment_notice	comment_reply	class	Lcom/ss/android/ugc/aweme/socialnotice/bean/CommentNotice;											comment|replyComment|level1Comment|aweme|commentUnvisible
-comment_reply_comment_model	comment_reply	class	Lcom/ss/android/ugc/aweme/comment/model/Comment;											cid|awemeId|user|text|createTime|replyId|replyToReplyId
+comment_reply_comment_model	comment_reply	class	Lcom/ss/android/ugc/aweme/comment/model/Comment;											cid|awemeId|user|text|createTime|replyId|replyToReplyId|replyToUserId|imageList
 comment_reply_user_model	comment_reply	class	Lcom/ss/android/ugc/aweme/profile/model/User;											uid|nickname
 comment_reply_work_model	comment_reply	class	Lcom/ss/android/ugc/aweme/feed/model/Aweme;											aid
 comment_reply_push_receive	comment_reply	method	Lcom/ss/android/ugc/aweme/socialnotice/innerpush/SocialInteractionInnerPushHandler;		receiveInnerPush	(Lcom/ss/android/ugc/aweme/innerpush/api/model/InnerPushMessage;Z)V								
 comment_reply_push_parse	comment_reply	method	LX/12bE;		LIZ	(Lcom/ss/android/ugc/aweme/innerpush/api/model/InnerPushMessage;)Lcom/ss/android/ugc/aweme/socialnotice/innerpush/SocialInnerPushMessage;								
 comment_reply_push_model	comment_reply	class	Lcom/ss/android/ugc/aweme/socialnotice/innerpush/SocialInnerPushMessage;											aggrNoticeType
+comment_reply_received_group	comment_reply	method	LX/0dFd;		LJIIIIZZ	()I								
+comment_reply_notice_comment_model	comment_reply	method	LX/0dKM;		LIZLLL	(Lcom/ss/android/ugc/aweme/socialnotice/bean/BaseNotice;)Lcom/ss/android/ugc/aweme/socialnotice/bean/CommentNotice;								
+comment_reply_notice_incoming	comment_reply	method	LX/0dKM;		LIZJ	(Lcom/ss/android/ugc/aweme/socialnotice/bean/BaseNotice;)Lcom/ss/android/ugc/aweme/comment/model/Comment;								
+comment_reply_notice_reply_detail	comment_reply	method	LX/0dKM;		LIZ	(Lcom/ss/android/ugc/aweme/socialnotice/bean/BaseNotice;)LX/0dKN;								
+comment_reply_reply_detail_model	comment_reply	class	LX/0dKN;											a|b|d|e|f
+comment_reply_comment_clone	comment_reply	method	Lcom/ss/android/ugc/aweme/comment/model/Comment;		clone	()Ljava/lang/Object;								
+comment_reply_comment_user	comment_reply	method	Lcom/ss/android/ugc/aweme/comment/model/Comment;		LLLLZLL	()Lcom/ss/android/ugc/aweme/profile/model/User;								
+comment_reply_own_fetch	comment_reply	method	LX/0dPP;		getMineComment	(JI)Lio/reactivex/Observable;								
+comment_reply_own_provider	comment_reply	class	LX/0dHa;											b
+comment_reply_own_response	comment_reply	class	Lcom/ss/android/ugc/aweme/socialnotice/bean/MineCommentResponse;											items|hasMore|minTime
+comment_reply_thread_fetch	comment_reply	method	LX/0yTH;		LJIJJ	(LX/0y6l;)Lbolts/Task;								
+comment_reply_thread_builder	comment_reply	class	LX/0y6o;											LIZ|LJII|LJIIIZ|LJIIJJI|LJIIJ|LJJII|LJJIII
+comment_reply_thread_request	comment_reply	class	LX/0y6l;											
+comment_reply_thread_response	comment_reply	class	Lcom/ss/android/ugc/aweme/comment/model/CommentItemList;											items|cursor|hasMore|mergeCursor
+comment_reply_task_wait	comment_reply	method	Lbolts/Task;		LJIJJ	(JLjava/util/concurrent/TimeUnit;)Z								
+comment_reply_task_result	comment_reply	method	Lbolts/Task;		getResult	()Ljava/lang/Object;								
+comment_reply_task_faulted	comment_reply	method	Lbolts/Task;		isFaulted	()Z								
+comment_reply_task_error	comment_reply	method	Lbolts/Task;		LJIIL	()Ljava/lang/Exception;								
+comment_reply_task_cancelled	comment_reply	method	Lbolts/Task;		isCancelled	()Z								

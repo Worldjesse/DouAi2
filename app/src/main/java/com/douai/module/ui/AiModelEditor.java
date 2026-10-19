@@ -256,6 +256,33 @@ final class AiModelEditor implements AutoCloseable {
         protocol.setSelection(protocolIndex(original.protocol));
         addField(form, "接口协议", protocol);
 
+        Spinner responseMode = !useMiuix ? new Spinner(context) : MiuixFormControls.spinner(context);
+        responseMode.setAdapter(new ArrayAdapter<>(context, android.R.layout.simple_spinner_dropdown_item,
+                AiModelConfig.RESPONSE_LABELS));
+        responseMode.setTag("ai.response_mode");
+        responseMode.setSelection(responseModeIndex(original.responseMode));
+        addField(form, "响应方式", responseMode);
+        form.addView(text("同一模型的对话、自动回复、自动评论和本地分析共用此设置；流式接收完成后显示完整结果。",
+                12, MUTED, false), matchWrap());
+
+        Spinner reasoningEffort = !useMiuix ? new Spinner(context) : MiuixFormControls.spinner(context);
+        reasoningEffort.setTag("ai.reasoning_effort");
+        String[][] reasoningValues = {setReasoningChoices(reasoningEffort, original.protocol, original.reasoningEffort)};
+        addField(form, "推理强度", reasoningEffort);
+        form.addView(text("选项使用接口实际参数值，是否支持取决于模型；更高强度可能耗时更久、使用更多 Token。“模型默认”不附加强度参数。",
+                12, MUTED, false), matchWrap());
+
+        int[] lastProtocolSelection = {protocolIndex(original.protocol)};
+        protocol.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                if (position == lastProtocolSelection[0]) return;
+                lastProtocolSelection[0] = position;
+                String selectedEffort = reasoningValues[0][reasoningEffort.getSelectedItemPosition()];
+                reasoningValues[0] = setReasoningChoices(reasoningEffort, AiModelConfig.PROTOCOLS[position], selectedEffort);
+            }
+        });
+
         EditText endpoint = formInput(form, "API 基础地址", original.apiEndpoint, false);
         EditText key = formInput(form, "API 密钥", original.apiKey, true);
         EditText modelName = formInput(form, "模型名称", original.modelName, false);
@@ -307,7 +334,8 @@ final class AiModelEditor implements AutoCloseable {
         form.addView(status, matchWrap());
         Callable<AiModelConfig> readDraft = () -> {
             if (loadingAvatar) throw new IllegalStateException("正在处理头像，请稍候再保存");
-            return buildAiConfig(original.id, name, provider, protocol, endpoint,
+            return buildAiConfig(original.id, name, provider, protocol, responseMode,
+                    reasoningValues[0][reasoningEffort.getSelectedItemPosition()], endpoint,
                     key, modelName, modelsEndpoint, systemPrompt[0], contextRounds, timeout, allowHttp,
                     temperatureEnabled, temperature, maxTokensEnabled, maxTokens,
                     topPEnabled, topP, headers, parameters, messageContact.isChecked(),
@@ -462,7 +490,29 @@ final class AiModelEditor implements AutoCloseable {
         return 0;
     }
 
+    private static int responseModeIndex(String mode) {
+        for (int i = 0; i < AiModelConfig.RESPONSE_MODES.length; i++) {
+            if (AiModelConfig.RESPONSE_MODES[i].equals(mode)) return i;
+        }
+        return 0;
+    }
+
+    private String[] setReasoningChoices(Spinner spinner, String protocol, String selected) {
+        List<String> values = new ArrayList<>(java.util.Arrays.asList(AiModelConfig.reasoningEfforts(protocol)));
+        List<String> labels = new ArrayList<>(java.util.Arrays.asList(AiModelConfig.reasoningLabels(protocol)));
+        int index = values.indexOf(selected);
+        if (index < 0) {
+            index = values.size();
+            values.add(selected);
+            labels.add(selected + "（当前协议不适用）");
+        }
+        spinner.setAdapter(new ArrayAdapter<>(context, android.R.layout.simple_spinner_dropdown_item, labels));
+        spinner.setSelection(index);
+        return values.toArray(new String[0]);
+    }
+
     private AiModelConfig buildAiConfig(String id, EditText name, Spinner provider, Spinner protocol,
+                                       Spinner responseMode, String reasoningEffort,
                                        EditText endpoint, EditText key, EditText model,
                                        EditText modelsEndpoint, String prompt, EditText rounds,
                                        EditText timeout, CheckBox allowHttp, CheckBox temperatureEnabled,
@@ -473,6 +523,8 @@ final class AiModelEditor implements AutoCloseable {
         AiProviderPresets.Preset preset = AiProviderPresets.ALL.get(provider.getSelectedItemPosition());
         return AiModelConfig.fromJson(new JSONObject().put("id", id).put("name", name.getText().toString())
                 .put("provider", preset.id).put("protocol", AiModelConfig.PROTOCOLS[protocol.getSelectedItemPosition()])
+                .put("responseMode", AiModelConfig.RESPONSE_MODES[responseMode.getSelectedItemPosition()])
+                .put("reasoningEffort", reasoningEffort)
                 .put("apiEndpoint", endpoint.getText().toString()).put("apiKey", key.getText().toString())
                 .put("modelName", model.getText().toString()).put("modelsEndpoint", modelsEndpoint.getText().toString())
                 .put("systemPrompt", prompt)

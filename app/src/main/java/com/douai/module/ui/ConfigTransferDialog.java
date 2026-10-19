@@ -16,6 +16,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import com.douai.module.config.ConfigTransfer;
+import com.douai.module.config.ConfigBackup;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
 import com.douai.module.ui.miuix.MiuixFormControls;
@@ -52,6 +53,7 @@ final class ConfigTransferDialog implements AutoCloseable {
     private static final ThreadPoolExecutor WORKER = executor("DouAi-config-files", 8);
     private static final ThreadPoolExecutor CLOSER = executor("DouAi-config-close", 8);
     private final SettingsStore store;
+    private final Context application;
     private final Runnable changed;
     private final Files files;
     private final Picker picker;
@@ -62,6 +64,8 @@ final class ConfigTransferDialog implements AutoCloseable {
     private final TextView status;
     private final TextView previewText;
     private final CheckBox secrets;
+    private final CheckBox includeAnalytics;
+    private final CheckBox restoreAnalytics;
     private final CheckBox replace;
     private final Button exportButton;
     private final Button importButton;
@@ -69,8 +73,9 @@ final class ConfigTransferDialog implements AutoCloseable {
     private final Button cancelButton;
     private volatile boolean closed;
     private AutoCloseable selection;
+    private long selectionGeneration;
     private Operation operation;
-    private ConfigTransfer.Preview preview;
+    private ConfigBackup.Preview preview;
     private String sourceJson;
 
     ConfigTransferDialog(Context context, SettingsStore store, boolean miuix, Runnable changed) {
@@ -83,19 +88,26 @@ final class ConfigTransferDialog implements AutoCloseable {
     ConfigTransferDialog(Context baseContext, SettingsStore store, boolean miuix, Runnable changed,
                          Files files, Picker picker, Executor worker) {
         Context context = ModuleTheme.themedContext(baseContext);
+        Context app = context.getApplicationContext();
+        this.application = app == null ? context : app;
         this.store = store; this.changed = changed; this.files = files; this.picker = picker; this.worker = worker;
         this.activity = activity(context);
         LinearLayout body = new LinearLayout(context);
         body.setOrientation(LinearLayout.VERTICAL);
         int padding = Math.round(16 * context.getResources().getDisplayMetrics().density);
         body.setPadding(padding, 0, padding, padding);
-        TextView note = text(context, "导出为 JSON 文件；导入先预览，确认后写入。备份不含历史记录、发送账本和缓存。", "config.backup.note");
+        TextView note = text(context, "导出为 JSON 文件；导入先预览，确认后写入。默认只备份配置，可选择包含本地分析数据；不包含发送账本和缓存。", "config.backup.note");
         body.addView(note, matchWrap());
         secrets = miuix ? MiuixFormControls.checkbox(context, "导出包含 API 密钥", false) : new CheckBox(context);
         secrets.setText("导出包含 API 密钥"); secrets.setChecked(false); secrets.setTag("config.backup.secrets");
         body.addView(MiuixFormControls.viewFor(secrets), matchWrap());
         TextView secretNote = text(context, "默认省略密钥和可能包含凭据的自定义接口字段，导入后可能需要补填。回复正文、提示词等自由文本原样保存，请检查其中手填的敏感信息。勾选后密钥会以明文保存，请妥善保管备份文件。", "config.backup.secretNote");
         body.addView(secretNote, matchWrap());
+        includeAnalytics = miuix ? MiuixFormControls.checkbox(context, "包含本地分析数据", false) : new CheckBox(context);
+        includeAnalytics.setText("包含本地分析数据"); includeAnalytics.setChecked(false);
+        includeAnalytics.setTag("config.backup.includeAnalytics");
+        body.addView(MiuixFormControls.viewFor(includeAnalytics), matchWrap());
+        body.addView(text(context, "默认不包含。勾选后，浏览记录、作者话题、模块功能使用、使用目的和侧写反馈等本地分析数据会存入你选择的备份文件。", "config.backup.analyticsNote"), matchWrap());
         exportButton = button(context, miuix, body, "导出配置", "config.backup.export", () -> choose(true));
         replace = miuix ? MiuixFormControls.checkbox(context, "覆盖当前配置", false) : new CheckBox(context);
         replace.setText("覆盖当前配置"); replace.setChecked(false); replace.setTag("config.backup.replace");
@@ -108,6 +120,12 @@ final class ConfigTransferDialog implements AutoCloseable {
         previewText = text(context, "", "config.backup.preview");
         previewText.setTextIsSelectable(true);
         body.addView(previewText, matchWrap());
+        restoreAnalytics = miuix ? MiuixFormControls.checkbox(context, "恢复本地分析数据", false) : new CheckBox(context);
+        restoreAnalytics.setText("恢复本地分析数据"); restoreAnalytics.setChecked(false);
+        restoreAnalytics.setTag("config.backup.restoreAnalytics");
+        restoreAnalytics.setVisibility(View.GONE);
+        body.addView(MiuixFormControls.viewFor(restoreAnalytics), matchWrap());
+        restoreAnalytics.setOnCheckedChangeListener((button, checked) -> updatePreview());
         confirmButton = button(context, miuix, body, "确认导入", "config.backup.confirm", this::confirm);
         confirmButton.setEnabled(false);
         cancelButton = button(context, miuix, body, "取消当前操作", "config.backup.cancel", () -> cancel("已取消，配置未更改。"));
@@ -126,17 +144,21 @@ final class ConfigTransferDialog implements AutoCloseable {
     private void choose(boolean export) {
         if (!active() || operation != null || selection != null) return;
         preview = null; sourceJson = null; previewText.setText(""); confirmButton.setEnabled(false);
+        resetAnalyticsRestore();
         boolean includeSecrets = secrets.isChecked();
+        boolean includeLocalAnalytics = includeAnalytics.isChecked();
         ConfigTransfer.Mode mode = mode();
+        long selectedGeneration = ++selectionGeneration;
         busy(true);
         status.setText(export ? "请选择备份文件保存位置。" : "请选择 DouAi 配置备份文件。");
-        selection = picker.launch(activity, export, "DouAi-config-" + System.currentTimeMillis() + ".json", uri -> {
+        AutoCloseable pending = picker.launch(activity, export, "DouAi-config-" + System.currentTimeMillis() + ".json", uri -> {
+            if (!active() || selectedGeneration != selectionGeneration) return;
+            selectionGeneration++; // One selection can deliver at most one result.
             selection = null;
-            if (!active()) return;
             if (uri == null) { busy(false); status.setText("已取消选择，配置未更改。"); return; }
             if (export) run(op -> {
-                byte[] data = ConfigTransfer.export(store, includeSecrets).getBytes(StandardCharsets.UTF_8);
-                if (data.length > ConfigTransfer.MAX_BYTES) throw new IllegalArgumentException();
+                byte[] data = ConfigBackup.export(application, store, includeSecrets, includeLocalAnalytics).getBytes(StandardCharsets.UTF_8);
+                if (data.length > ConfigBackup.MAX_BYTES) throw new IllegalArgumentException();
                 op.check();
                 try (OutputStream stream = op.attach(files.write(uri))) {
                     for (int offset = 0; offset < data.length; offset += 8192) {
@@ -145,7 +167,7 @@ final class ConfigTransferDialog implements AutoCloseable {
                     op.check(); stream.flush();
                 } finally { op.detach(); }
                 return null;
-            }, "正在导出…", "配置已导出。");
+            }, "正在导出…", includeLocalAnalytics ? "配置和本地分析数据已导出。" : "配置已导出。");
             else run(op -> {
                 byte[] data;
                 try (InputStream stream = op.attach(files.read(uri))) {
@@ -154,7 +176,7 @@ final class ConfigTransferDialog implements AutoCloseable {
                     int count;
                     while ((count = stream.read(buffer)) != -1) {
                         op.check();
-                        if (count > ConfigTransfer.MAX_BYTES - output.size()) throw new IllegalArgumentException();
+                        if (count > ConfigBackup.MAX_BYTES - output.size()) throw new IllegalArgumentException();
                         output.write(buffer, 0, count);
                     }
                     data = output.toByteArray();
@@ -163,10 +185,14 @@ final class ConfigTransferDialog implements AutoCloseable {
                 String json = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                         .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(data)).toString();
                 op.importJson = json;
-                return ConfigTransfer.inspect(store, json, mode);
+                return ConfigBackup.inspect(store, json, mode);
             }, "正在读取并校验…", "请核对以下变更，确认后才会写入配置。");
         });
-        if (selection == null && operation == null) {
+        // Some adapters can deliver synchronously before launch returns its handle.
+        if (active() && selectedGeneration == selectionGeneration) selection = pending;
+        else closeSelection(pending);
+        if (selectedGeneration == selectionGeneration && selection == null && operation == null) {
+            selectionGeneration++;
             busy(false); status.setText("无法打开文件选择器，请从抖音内设置重试。");
         }
     }
@@ -179,37 +205,40 @@ final class ConfigTransferDialog implements AutoCloseable {
         preview = null; previewText.setText("");
         run(op -> {
             op.check(); op.importJson = original;
-            return ConfigTransfer.inspect(store, original, selected);
+            return ConfigBackup.inspect(store, original, selected);
         }, "正在重新核对导入方式…", "请核对以下变更，确认后才会写入配置。");
     }
 
     private void confirm() {
         if (!active() || operation != null || preview == null) return;
-        ConfigTransfer.Preview accepted = preview;
+        ConfigBackup.Preview accepted = preview;
+        boolean restoreLocalAnalytics = accepted.includesAnalytics && restoreAnalytics.isChecked();
         preview = null;
         run(op -> {
             op.check();
             // This is the commit boundary. A confirmed atomic settings write may finish after close.
             op.applying = true;
             op.check();
-            ConfigTransfer.apply(store, accepted);
+            ConfigBackup.apply(application, store, accepted, restoreLocalAnalytics);
             op.applied = true;
             return null;
-        }, "正在应用配置…", "配置已导入。需要重新安装 Hook 的项目将在重启抖音后生效。");
+        }, "正在应用备份…", restoreLocalAnalytics
+                ? "配置已导入，本地分析记录已替换，采集开关保持原状态。需要重新安装 Hook 的项目将在重启抖音后生效。"
+                : "配置已导入，本地分析数据保持原样。需要重新安装 Hook 的项目将在重启抖音后生效。");
         cancelButton.setEnabled(false);
     }
 
-    private interface Work { ConfigTransfer.Preview execute(Operation op) throws Exception; }
+    private interface Work { ConfigBackup.Preview execute(Operation op) throws Exception; }
     private void run(Work work, String working, String success) {
         Operation op = new Operation();
         operation = op;
         busy(true); status.setText(working);
         op.future = new FutureTask<>(() -> {
-            ConfigTransfer.Preview result = null;
+            ConfigBackup.Preview result = null;
             boolean succeeded = false;
             try { op.check(); result = work.execute(op); op.check(); succeeded = true; }
             catch (Exception ignored) { /* Never display provider messages, JSON fragments, or secrets. */ }
-            ConfigTransfer.Preview ready = result;
+            ConfigBackup.Preview ready = result;
             boolean done = succeeded;
             main.post(() -> {
                 if (!active() || operation != op || op.cancelled) return;
@@ -217,15 +246,17 @@ final class ConfigTransferDialog implements AutoCloseable {
                 operation = null;
                 busy(false);
                 status.setText(done ? success : op.applying
-                        ? "导入未完成，配置可能已变化。请重新选择文件并核对预览。"
-                        : "操作失败。请检查文件格式（最大 2 MiB）、文件权限和存储空间后重试。");
+                        ? "导入未完成，配置或本地分析数据可能已变化。请重新选择文件并核对预览。"
+                        : "操作失败。请检查文件格式、文件权限和存储空间后重试。配置文件最大 2 MiB，含本地分析数据的备份最大 32 MiB。");
                 if (done && ready != null) {
-                    sourceJson = op.importJson; preview = ready; previewText.setText(describe(ready));
-                    confirmButton.setEnabled(ready.changedCount > 0 || ready.removedCount > 0);
+                    sourceJson = op.importJson; preview = ready;
+                    restoreAnalytics.setVisibility(ready.includesAnalytics ? View.VISIBLE : View.GONE);
+                    updatePreview();
                     cancelButton.setEnabled(true);
                 }
                 if (op.applied) {
                     sourceJson = null;
+                    resetAnalyticsRestore();
                     if (changed != null) changed.run();
                 }
             });
@@ -261,19 +292,42 @@ final class ConfigTransferDialog implements AutoCloseable {
     }
 
     private boolean active() { return !closed && dialog.isShowing(); }
+    private boolean hasChanges() {
+        return preview != null && (preview.config.changedCount > 0 || preview.config.removedCount > 0
+                || preview.includesAnalytics && restoreAnalytics.isChecked());
+    }
+    private void resetAnalyticsRestore() {
+        restoreAnalytics.setChecked(false);
+        restoreAnalytics.setVisibility(View.GONE);
+    }
+    private void updatePreview() {
+        if (preview == null) { confirmButton.setEnabled(false); return; }
+        String value = describe(preview.config);
+        if (preview.includesAnalytics) value += "\n\n本备份包含本地分析数据：\n" + preview.analyticsSummary
+                + (restoreAnalytics.isChecked()
+                    ? "\n已选择恢复：将替换当前全部本地分析记录、自述和反馈；不改变当前采集开关，与配置合并或覆盖方式无关。"
+                    : "\n默认不恢复本地分析数据；当前记录、自述、反馈和采集开关保持原样。勾选下方开关才会替换。");
+        else value += "\n\n本备份不含本地分析数据；导入不会改变当前本地分析数据和采集开关。";
+        previewText.setText(value);
+        restoreAnalytics.setEnabled(operation == null && preview.includesAnalytics);
+        confirmButton.setEnabled(operation == null && hasChanges());
+    }
     private void busy(boolean value) {
         exportButton.setEnabled(!value); importButton.setEnabled(!value); secrets.setEnabled(!value);
+        includeAnalytics.setEnabled(!value);
         replace.setEnabled(!value);
-        confirmButton.setEnabled(!value && preview != null && (preview.changedCount > 0 || preview.removedCount > 0));
+        restoreAnalytics.setEnabled(!value && preview != null && preview.includesAnalytics);
+        confirmButton.setEnabled(!value && hasChanges());
         cancelButton.setEnabled(value);
     }
     private void cancel(String message) {
         if (!active() || operation != null && operation.applying) return;
-        stop(); preview = null; sourceJson = null; previewText.setText(""); busy(false); status.setText(message);
+        stop(); preview = null; sourceJson = null; resetAnalyticsRestore(); previewText.setText(""); busy(false); status.setText(message);
     }
     private void stop() {
+        selectionGeneration++; // A cancelled chooser cannot restart an operation through a late callback.
         AutoCloseable pending = selection; selection = null;
-        if (pending != null) try { pending.close(); } catch (Exception ignored) { }
+        closeSelection(pending);
         Operation old = operation; operation = null;
         if (old != null) main.removeCallbacks(old.timeout);
         if (old != null && !old.applying) {
@@ -305,6 +359,9 @@ final class ConfigTransferDialog implements AutoCloseable {
     }
 
     private static void closeQuietly(Closeable value) { try { value.close(); } catch (Exception ignored) { } }
+    private static void closeSelection(AutoCloseable value) {
+        if (value != null) try { value.close(); } catch (Exception ignored) { }
+    }
     private static Activity activity(Context context) {
         while (context instanceof ContextWrapper) {
             if (context instanceof Activity) return (Activity) context;

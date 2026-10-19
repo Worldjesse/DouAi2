@@ -8,6 +8,8 @@ import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.io.FilterInputStream;
+import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
@@ -19,12 +21,24 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.IntConsumer;
 
 /** Provider-aware text client for module-local model profiles. */
 public final class ChatCompletionClient {
     private static final int MAX_RESPONSE_BYTES = 1024 * 1024;
+    private static final int MAX_REPLY_CHARS = 4000;
+    private static final int MAX_STRUCTURED_REPLY_CHARS = MAX_REPLY_CHARS + 32;
+    private static final ThreadPoolExecutor STREAM_IO = ioWorkers();
+    private static final ThreadPoolExecutor STREAM_CLEANUP = cleanupWorkers();
     public static final int MAX_IMAGES_PER_MESSAGE = 4;
     private static final int MAX_HISTORY_IMAGE_BYTES = 12 * 1024 * 1024;
     private final Map<String, ArrayDeque<HistoryTurn>> history = new LinkedHashMap<>();
@@ -36,11 +50,42 @@ public final class ChatCompletionClient {
     private final TestChatMemory memory;
     private final Consumer<String> diagnostics;
 
+    /** Safe transport metadata only; never retains provider text, URLs, headers or a raw cause. */
+    public static final class ReplyFailure extends IllegalStateException {
+        public enum Kind { HTTP, EMPTY, OVERLONG, FORMAT, INCOMPLETE }
+        private final Kind kind;
+        private final int httpStatus;
+        private final int responseChars;
+        private ReplyFailure(Kind kind, int httpStatus, int responseChars) {
+            super(kind == Kind.HTTP ? "AI 服务 HTTP " + httpStatus + "；请检查地址、协议、密钥和模型权限"
+                    : kind == Kind.EMPTY ? "AI 回复为空" : kind == Kind.OVERLONG ? "AI 回复过长"
+                    : kind == Kind.INCOMPLETE ? "AI 回复未完整结束" : "AI 回复格式无法识别");
+            this.kind = kind; this.httpStatus = httpStatus; this.responseChars = responseChars;
+        }
+        public Kind kind() { return kind; }
+        public int httpStatus() { return httpStatus; }
+        public int responseChars() { return responseChars; }
+    }
+
     public ChatCompletionClient() { this(null, null); }
 
     public ChatCompletionClient(TestChatMemory memory, Consumer<String> diagnostics) {
         this.memory = memory;
         this.diagnostics = diagnostics == null ? ignored -> { } : diagnostics;
+    }
+
+    private static ThreadPoolExecutor ioWorkers() {
+        return new ThreadPoolExecutor(0, 4, 30, TimeUnit.SECONDS, new SynchronousQueue<>(), task -> {
+            Thread thread = new Thread(task, "DouAi-stream-io"); thread.setDaemon(true); return thread;
+        });
+    }
+
+    private static ThreadPoolExecutor cleanupWorkers() {
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(2, 2, 30, TimeUnit.SECONDS, new ArrayBlockingQueue<>(8), task -> {
+            Thread thread = new Thread(task, "DouAi-stream-cleanup"); thread.setDaemon(true); return thread;
+        });
+        executor.allowCoreThreadTimeOut(true);
+        return executor;
     }
 
     public List<TestChatMemory.Turn> savedTurns() {
@@ -75,6 +120,20 @@ public final class ChatCompletionClient {
     public synchronized String reply(String conversation, String prompt, List<ChatImage> images,
                                      AiModelSettings settings, String secondaryPrompt, boolean remember,
                                      String document, IntConsumer requestSent) throws Exception {
+        return replyWithLimit(conversation, prompt, images, settings, secondaryPrompt, remember, document,
+                requestSent, MAX_REPLY_CHARS);
+    }
+
+    /** Only structured analysis may carry bounded fences/whitespace around its 4000-char canonical JSON. */
+    public synchronized String replyStructuredAnalysis(String conversation, String prompt,
+                                     AiModelSettings settings, String secondaryPrompt, String document) throws Exception {
+        return replyWithLimit(conversation, prompt, Collections.emptyList(), settings, secondaryPrompt, false,
+                document, ignored -> { }, MAX_STRUCTURED_REPLY_CHARS);
+    }
+
+    private String replyWithLimit(String conversation, String prompt, List<ChatImage> images,
+                                  AiModelSettings settings, String secondaryPrompt, boolean remember,
+                                   String document, IntConsumer requestSent, int maximumReplyChars) throws Exception {
         AiModelConfig config = settings.selected();
         String secondary = secondaryPrompt == null ? "" : secondaryPrompt;
         List<ChatImage> attachments = images == null ? Collections.emptyList() : new ArrayList<>(images);
@@ -82,9 +141,70 @@ public final class ChatCompletionClient {
         for (ChatImage image : attachments) {
             if (image == null) throw new IllegalArgumentException("图片内容为空");
         }
-        return send(config, conversation == null ? "" : conversation, prompt == null ? "" : prompt,
-                Collections.unmodifiableList(attachments), secondary, remember, document == null ? "" : document,
-                requestSent == null ? ignored -> { } : requestSent);
+        String conversationValue = conversation == null ? "" : conversation;
+        String promptValue = prompt == null ? "" : prompt;
+        String documentValue = document == null ? "" : document;
+        IntConsumer sent = requestSent == null ? ignored -> { } : requestSent;
+        List<ChatImage> fixedAttachments = Collections.unmodifiableList(attachments);
+        config.validate(true);
+        if (config.streaming()) {
+            return sendBoundedStream(config, conversationValue, promptValue, fixedAttachments, secondary,
+                     remember, documentValue, sent, maximumReplyChars);
+        }
+        return send(config, conversationValue, promptValue, fixedAttachments, secondary, remember, documentValue,
+                sent, maximumReplyChars, new ActiveRequest(), null);
+    }
+
+    /** The caller's deadline never waits for a platform socket read or its potentially blocking close. */
+    private String sendBoundedStream(AiModelConfig config, String conversation, String prompt, List<ChatImage> images,
+                                       String secondary, boolean remember, String document, IntConsumer sent,
+                                       int maximumReplyChars) throws Exception {
+        ActiveRequest request = new ActiveRequest();
+        request.asynchronous = true;
+        RequestDeadline deadline = new RequestDeadline(System.nanoTime(), config.timeoutSeconds);
+        FutureTask<String> io = new FutureTask<>(() -> send(config, conversation, prompt, images, secondary, remember,
+                document, sent, maximumReplyChars, request, deadline));
+        request.io = io;
+        synchronized (requestLock) { ensureActive(request); activeRequest = request; }
+        try {
+            if (STREAM_CLEANUP.getQueue().remainingCapacity() == 0) throw new RejectedExecutionException();
+            STREAM_IO.execute(io);
+            String result = io.get(deadline.remainingNanos(), TimeUnit.NANOSECONDS);
+            synchronized (requestLock) {
+                ensureActive(request);
+                deadline.remainingMillis();
+                if (request.commitHistory != null) request.commitHistory.run();
+            }
+            return result;
+        } catch (TimeoutException timeout) {
+            request.timedOut = true;
+            // Fence late results immediately; even interrupt/close work stays off the waiting caller.
+            io.cancel(false);
+            ensureActive(request);
+            throw new java.net.SocketTimeoutException("AI request deadline exceeded");
+        } catch (InterruptedException interrupted) {
+            request.cancelled = true;
+            io.cancel(false);
+            Thread.currentThread().interrupt();
+            throw cancelled();
+        } catch (ExecutionException failed) {
+            ensureActive(request);
+            Throwable cause = failed.getCause();
+            if (cause instanceof Exception) throw (Exception) cause;
+            throw new IllegalStateException("AI request I/O did not complete");
+        } catch (CancellationException cancelled) {
+            ensureActive(request);
+            throw cancelled();
+        } catch (RejectedExecutionException busy) {
+            throw new IllegalStateException("AI 请求繁忙，请稍后重试");
+        } finally {
+            io.cancel(false);
+            synchronized (requestLock) {
+                request.commitHistory = null;
+                if (activeRequest == request) activeRequest = null;
+            }
+            releaseAsync(request, false);
+        }
     }
 
     /** Automatic replies enter model context only after the host acknowledges sending. */
@@ -101,12 +221,19 @@ public final class ChatCompletionClient {
     /** Cancels without waiting for the serialized reply operation. */
     public void cancelCurrentRequest() {
         HttpURLConnection connection;
+        InputStream input;
+        ActiveRequest request;
         synchronized (requestLock) {
             if (activeRequest == null) return;
-            activeRequest.cancelled = true;
-            connection = activeRequest.connection;
+            request = activeRequest;
+            request.cancelled = true;
+            connection = request.connection;
+            input = request.input;
         }
-        if (connection != null) connection.disconnect();
+        if (request.asynchronous) {
+            if (request.io != null) request.io.cancel(false);
+            releaseAsync(request, false);
+        } else release(connection, input);
     }
 
     /** Pending replies cannot restore context after it has been cleared. */
@@ -187,7 +314,12 @@ public final class ChatCompletionClient {
             case AiModelConfig.RESPONSES: return appendSuffix(base, "responses");
             case AiModelConfig.ANTHROPIC: return appendSuffix(base, "messages");
             case AiModelConfig.GEMINI:
-                return appendSuffix(base, "models/" + encodePath(model) + ":generateContent");
+                String operation = config.streaming() ? ":streamGenerateContent" : ":generateContent";
+                // A configured full Gemini operation must switch together with the response mode.
+                if (base.matches(".*/models/[^/]+:(?:streamGenerateContent|generateContent)(?:\\?alt=sse)?$"))
+                    base = stripOperation(base, config.protocol);
+                String endpoint = appendSuffix(base, "models/" + encodePath(model) + operation);
+                return config.streaming() ? endpoint + "?alt=sse" : endpoint;
             default: throw new IllegalArgumentException("不支持的接口协议");
         }
     }
@@ -206,9 +338,10 @@ public final class ChatCompletionClient {
         }
     }
 
-    private synchronized String send(AiModelConfig config, String conversation, String prompt,
+    private String send(AiModelConfig config, String conversation, String prompt,
                                      List<ChatImage> images, String secondaryPrompt, boolean remember,
-                                     String document, IntConsumer requestSent) throws Exception {
+                                     String document, IntConsumer requestSent, int maximumReplyChars,
+                                      ActiveRequest request, RequestDeadline deadline) throws Exception {
         if (Thread.currentThread().isInterrupted()) throw cancelled();
         config.validate(true);
         if (prompt.trim().isEmpty() && images.isEmpty() && document.trim().isEmpty()) throw new IllegalArgumentException("消息不能为空");
@@ -218,10 +351,10 @@ public final class ChatCompletionClient {
         List<HistoryTurn> prior = new ArrayList<>();
         String historyKey = historyKey(conversation, config);
         int rounds = config.contextRounds;
-        ActiveRequest request = new ActiveRequest();
         long epoch;
         long savedEpoch = memory == null ? 0 : memory.epoch();
         synchronized (requestLock) {
+            ensureActive(request);
             epoch = historyEpoch;
             if (memory != null) {
                 for (TestChatMemory.Turn turn : memory.read()) {
@@ -247,9 +380,14 @@ public final class ChatCompletionClient {
                 ensureActive(request);
             }
             configure(connection, config);
+            if (deadline != null) {
+                connection.setConnectTimeout(deadline.remainingMillis());
+                deadline.beforeIo(request, connection);
+            }
             connection.setRequestMethod("POST");
             connection.setDoOutput(true);
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            if (config.streaming()) connection.setRequestProperty("Accept", "text/event-stream");
             setAuthentication(connection, config, url);
             byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
             connection.setFixedLengthStreamingMode(bytes.length);
@@ -259,20 +397,36 @@ public final class ChatCompletionClient {
             catch (RuntimeException ignored) { }
             diagnostic(config, secondaryPrompt, prior.size(), "sent", 0);
             ensureActive(request);
+            if (deadline != null) deadline.beforeIo(request, connection);
             int status = connection.getResponseCode();
             diagnostic(config, secondaryPrompt, prior.size(), "response", status);
-            String response = readResponse(connection, status);
-            ensureActive(request);
             if (status < 200 || status >= 300) throw httpFailure(status);
-            String result = parseReply(config.protocol, response);
-            if (result.isEmpty() || result.length() > 4000) throw new IllegalStateException("AI 回复为空或过长");
+            String result;
+            if (deadline != null) result = readStreamingResponse(config, connection, request, deadline, status, maximumReplyChars);
+            else {
+                String response = readResponse(connection, status);
+                ensureActive(request);
+                try {
+                    validateCompletedJson(config.protocol, response, status);
+                    result = parseReply(config.protocol, response);
+                }
+                catch (ReplyFailure failure) { throw failure; }
+                catch (Exception invalid) { throw new ReplyFailure(ReplyFailure.Kind.FORMAT, status, -1); }
+            }
+            if (result.isEmpty()) throw new ReplyFailure(ReplyFailure.Kind.EMPTY, status, 0);
+            if (result.length() > maximumReplyChars) throw new ReplyFailure(ReplyFailure.Kind.OVERLONG, status, result.length());
             synchronized (requestLock) {
                 ensureActive(request);
-                if (remember && rounds > 0 && epoch == historyEpoch) {
-                    if (memory != null) memory.append(savedEpoch, new TestChatMemory.Turn(prompt, document, images, result));
-                    else rememberTurn(new HistoryTurn(historyKey, prompt, document, images, result), rounds);
-                }
-                activeRequest = null;
+                Runnable commit = () -> {
+                    if (remember && rounds > 0 && epoch == historyEpoch) {
+                        if (memory != null) memory.append(savedEpoch, new TestChatMemory.Turn(prompt, document, images, result));
+                        else rememberTurn(new HistoryTurn(historyKey, prompt, document, images, result), rounds);
+                    }
+                };
+                // Only the waiting caller can publish a streamed turn, after its deadline/cancel check.
+                if (request.asynchronous) request.commitHistory = commit;
+                else commit.run();
+                if (!request.asynchronous && activeRequest == request) activeRequest = null;
             }
             return result;
         } catch (Exception error) {
@@ -281,10 +435,84 @@ public final class ChatCompletionClient {
             throw error;
         } finally {
             synchronized (requestLock) {
-                if (activeRequest == request) activeRequest = null;
+                if (!request.asynchronous && activeRequest == request) activeRequest = null;
             }
-            if (connection != null) connection.disconnect();
+            if (request.asynchronous) releaseAsync(request, true);
+            else release(connection, request.input);
         }
+    }
+
+    private String readStreamingResponse(AiModelConfig config, HttpURLConnection connection, ActiveRequest request, RequestDeadline deadline,
+                                         int status, int maximumReplyChars) throws Exception {
+        deadline.beforeIo(request, connection);
+        InputStream input = connection.getInputStream();
+        synchronized (requestLock) { request.input = input; }
+        deadline.beforeIo(request, connection);
+        String contentType = connection.getContentType();
+        boolean sse = contentType != null && contentType.toLowerCase(java.util.Locale.ROOT).startsWith("text/event-stream");
+        streamDiagnostic(deadline, "transport=" + (sse ? "stream" : "json") + " stage=stream_headers status=" + status);
+        InputStream guarded = new FilterInputStream(input) {
+            @Override public int read() throws IOException {
+                deadline.beforeIo(request, connection); int value = in.read();
+                deadline.beforeIo(request, connection); return value;
+            }
+            @Override public int read(byte[] buffer, int offset, int length) throws IOException {
+                deadline.beforeIo(request, connection); int read = in.read(buffer, offset, length);
+                deadline.beforeIo(request, connection); return read;
+            }
+        };
+        if (sse) {
+            try {
+                return ProtocolResponseStream.read(config.protocol, guarded, maximumReplyChars,
+                        () -> deadline.beforeIo(request, connection), value -> streamDiagnostic(deadline, value));
+            } catch (ResponsesAnalysisStream.Failure failure) {
+                ReplyFailure.Kind kind;
+                switch (failure.kind) {
+                    case INCOMPLETE: kind = ReplyFailure.Kind.INCOMPLETE; break;
+                    case EMPTY: kind = ReplyFailure.Kind.EMPTY; break;
+                    case OVERLONG: kind = ReplyFailure.Kind.OVERLONG; break;
+                    default: kind = ReplyFailure.Kind.FORMAT;
+                }
+                throw new ReplyFailure(kind, status, failure.chars);
+            }
+        }
+        String response = readBounded(guarded, MAX_RESPONSE_BYTES);
+        try {
+            validateCompletedJson(config.protocol, response, status);
+            return parseReply(config.protocol, response);
+        }
+        catch (ReplyFailure failure) { throw failure; }
+        catch (Exception invalid) { throw new ReplyFailure(ReplyFailure.Kind.FORMAT, status, -1); }
+    }
+
+    private void streamDiagnostic(RequestDeadline deadline, String value) {
+        try { diagnostics.accept(value + " elapsedMs=" + deadline.elapsedMillis()); }
+        catch (RuntimeException ignored) { }
+    }
+
+    private void releaseAsync(ActiveRequest request, boolean ioWorker) {
+        HttpURLConnection connection;
+        InputStream input;
+        synchronized (requestLock) {
+            connection = request.connection;
+            input = request.input;
+            if (connection == null && input == null) return;
+            if (request.cleanupConnection == connection && request.cleanupInput == input) return;
+            try {
+                STREAM_CLEANUP.execute(() -> release(connection, input));
+                request.cleanupConnection = connection; request.cleanupInput = input;
+                return;
+            } catch (RejectedExecutionException busy) { /* The I/O worker can make a bounded fallback below. */ }
+        }
+        // Saturation may occupy a bounded I/O worker, never the user-facing waiting thread.
+        if (ioWorker) release(connection, input);
+    }
+
+    private static void release(HttpURLConnection connection, InputStream input) {
+        try { if (connection != null) connection.disconnect(); }
+        catch (RuntimeException ignored) { }
+        try { if (input != null) input.close(); }
+        catch (Exception ignored) { }
     }
 
     private void diagnostic(AiModelConfig config, String secondary, int rounds, String stage, int status) {
@@ -306,15 +534,40 @@ public final class ChatCompletionClient {
                 + memory;
     }
 
-    private static void ensureActive(ActiveRequest request) {
+    private static void ensureActive(ActiveRequest request) throws java.net.SocketTimeoutException {
         if (request.cancelled || Thread.currentThread().isInterrupted()) throw cancelled();
+        if (request.timedOut) throw new java.net.SocketTimeoutException("AI request deadline exceeded");
     }
 
     private static CancellationException cancelled() { return new CancellationException("请求已取消"); }
 
     private static final class ActiveRequest {
         volatile boolean cancelled;
+        volatile boolean timedOut;
+        boolean asynchronous;
         HttpURLConnection connection;
+        InputStream input;
+        FutureTask<String> io;
+        HttpURLConnection cleanupConnection;
+        InputStream cleanupInput;
+        Runnable commitHistory;
+    }
+
+    private static final class RequestDeadline {
+        private final long started;
+        private final long budget;
+        RequestDeadline(long started, int seconds) { this.started = started; this.budget = TimeUnit.SECONDS.toNanos(seconds); }
+        long remainingNanos() { return Math.max(0, budget - (System.nanoTime() - started)); }
+        int remainingMillis() throws java.net.SocketTimeoutException {
+            long remaining = remainingNanos();
+            if (remaining == 0) throw new java.net.SocketTimeoutException("AI request deadline exceeded");
+            return (int) Math.min(Integer.MAX_VALUE, (remaining + 999_999L) / 1_000_000L);
+        }
+        long elapsedMillis() { return TimeUnit.NANOSECONDS.toMillis(Math.max(0, System.nanoTime() - started)); }
+        void beforeIo(ActiveRequest request, HttpURLConnection connection) throws IOException {
+            ensureActive(request);
+            connection.setReadTimeout(remainingMillis());
+        }
     }
 
     private void rememberTurn(HistoryTurn turn, int rounds) {
@@ -389,7 +642,7 @@ public final class ChatCompletionClient {
                         .put("role", "system").put("content", systemPrompt));
                 appendHistory(messages, prior, config.protocol);
                 messages.put(userMessage(config.protocol, currentPrompt, images));
-                body.put("messages", messages).put("stream", false);
+                body.put("messages", messages).put("stream", config.streaming());
                 if (config.temperatureEnabled) body.put("temperature", config.temperature);
                 if (config.topPEnabled) body.put("top_p", config.topP);
                 if (config.maxTokensEnabled) body.put("max_tokens", config.maxTokens);
@@ -399,7 +652,7 @@ public final class ChatCompletionClient {
                 JSONArray input = new JSONArray();
                 appendHistory(input, prior, config.protocol);
                 input.put(userMessage(config.protocol, currentPrompt, images));
-                body.put("input", input).put("stream", false).put("store", false);
+                body.put("input", input).put("stream", config.streaming()).put("store", false);
                 if (!systemPrompt.isEmpty()) body.put("instructions", systemPrompt);
                 if (config.temperatureEnabled) body.put("temperature", config.temperature);
                 if (config.topPEnabled) body.put("top_p", config.topP);
@@ -411,7 +664,7 @@ public final class ChatCompletionClient {
                 appendHistory(messages, prior, config.protocol);
                 messages.put(userMessage(config.protocol, currentPrompt, images));
                 body.put("messages", messages).put("max_tokens",
-                        config.maxTokensEnabled ? config.maxTokens : 1024).put("stream", false);
+                        config.maxTokensEnabled ? config.maxTokens : 1024).put("stream", config.streaming());
                 if (!systemPrompt.isEmpty()) body.put("system", systemPrompt);
                 if (config.temperatureEnabled) body.put("temperature", config.temperature);
                 if (config.topPEnabled) body.put("top_p", config.topP);
@@ -426,7 +679,13 @@ public final class ChatCompletionClient {
                 if (!systemPrompt.isEmpty()) body.put("systemInstruction",
                         new JSONObject().put("parts", new JSONArray()
                                 .put(new JSONObject().put("text", systemPrompt))));
-                JSONObject generation = new JSONObject();
+                JSONObject generation = body.optJSONObject("generationConfig");
+                if (generation == null) {
+                    if (body.has("generationConfig") && (config.temperatureEnabled || config.topPEnabled
+                            || config.maxTokensEnabled || config.hasReasoningEffort()))
+                        throw new IllegalArgumentException("自定义参数 generationConfig 必须是 JSON 对象");
+                    generation = new JSONObject();
+                }
                 if (config.temperatureEnabled) generation.put("temperature", config.temperature);
                 if (config.topPEnabled) generation.put("topP", config.topP);
                 if (config.maxTokensEnabled) generation.put("maxOutputTokens", config.maxTokens);
@@ -435,7 +694,40 @@ public final class ChatCompletionClient {
             }
             default: throw new IllegalArgumentException("不支持的接口协议");
         }
+        applyReasoningEffort(config, body);
         return body;
+    }
+
+    /** Send native effort values; model support is decided by its service, without probing or fallback. */
+    private static void applyReasoningEffort(AiModelConfig config, JSONObject body) throws Exception {
+        if (!config.hasReasoningEffort()) return;
+        switch (config.protocol) {
+            case AiModelConfig.CHAT:
+                body.put("reasoning_effort", config.reasoningEffort);
+                break;
+            case AiModelConfig.RESPONSES:
+                objectField(body, "reasoning").put("effort", config.reasoningEffort);
+                break;
+            case AiModelConfig.ANTHROPIC:
+                objectField(body, "output_config").put("effort", config.reasoningEffort);
+                break;
+            case AiModelConfig.GEMINI:
+                objectField(objectField(body, "generationConfig"), "thinkingConfig")
+                        .put("thinkingLevel", config.reasoningEffort);
+                break;
+            default: throw new IllegalArgumentException("不支持的接口协议");
+        }
+    }
+
+    private static JSONObject objectField(JSONObject parent, String key) throws Exception {
+        if (parent.has(key)) {
+            JSONObject value = parent.optJSONObject(key);
+            if (value == null) throw new IllegalArgumentException("自定义参数 " + key + " 必须是 JSON 对象");
+            return value;
+        }
+        JSONObject value = new JSONObject();
+        parent.put(key, value);
+        return value;
     }
 
     private static String taskPrompt(String prompt, String secondary) {
@@ -518,10 +810,48 @@ public final class ChatCompletionClient {
                 }
                 return text.toString().trim();
             case AiModelConfig.GEMINI:
-                return response.getJSONArray("candidates").getJSONObject(0).getJSONObject("content")
-                        .getJSONArray("parts").getJSONObject(0).getString("text").trim();
+                JSONArray parts = response.getJSONArray("candidates").getJSONObject(0).getJSONObject("content")
+                        .getJSONArray("parts");
+                StringBuilder answer = new StringBuilder();
+                for (int index = 0; index < parts.length(); index++) {
+                    JSONObject part = parts.optJSONObject(index);
+                    if (part != null && !part.optBoolean("thought", false) && part.opt("text") instanceof String)
+                        answer.append(part.getString("text"));
+                }
+                return answer.toString().trim();
             default: throw new IllegalArgumentException("不支持的接口协议");
         }
+    }
+
+    /** A relay may answer a streaming request with JSON on that same connection, never a second POST. */
+    private static void validateCompletedJson(String protocol, String json, int status) throws Exception {
+        JSONObject envelope = new JSONObject(json);
+        if (envelope.has("error") && !envelope.isNull("error"))
+            throw new ReplyFailure(ReplyFailure.Kind.INCOMPLETE, status, -1);
+        boolean incomplete = false;
+        switch (protocol) {
+            case AiModelConfig.RESPONSES:
+                incomplete |= envelope.has("status") && !"completed".equals(envelope.opt("status"));
+                break;
+            case AiModelConfig.CHAT: {
+                JSONObject choice = envelope.getJSONArray("choices").getJSONObject(0);
+                incomplete |= choice.has("finish_reason") && !"stop".equals(choice.opt("finish_reason"));
+                break;
+            }
+            case AiModelConfig.ANTHROPIC:
+                incomplete |= envelope.has("stop_reason") && !"end_turn".equals(envelope.opt("stop_reason"))
+                        && !"stop_sequence".equals(envelope.opt("stop_reason"));
+                break;
+            case AiModelConfig.GEMINI: {
+                JSONObject feedback = envelope.optJSONObject("promptFeedback");
+                incomplete |= feedback != null && feedback.has("blockReason") && !feedback.isNull("blockReason");
+                JSONObject candidate = envelope.getJSONArray("candidates").getJSONObject(0);
+                incomplete |= candidate.has("finishReason") && !"STOP".equals(candidate.opt("finishReason"));
+                break;
+            }
+            default: throw new IllegalArgumentException("不支持的接口协议");
+        }
+        if (incomplete) throw new ReplyFailure(ReplyFailure.Kind.INCOMPLETE, status, -1);
     }
 
     private static List<String> parseModelIds(String protocol, String json) throws Exception {
@@ -583,8 +913,8 @@ public final class ChatCompletionClient {
         try (InputStream input = stream) { return readBounded(input, MAX_RESPONSE_BYTES); }
     }
 
-    private static IllegalStateException httpFailure(int status) {
-        return new IllegalStateException("AI 服务 HTTP " + status + "；请检查地址、协议、密钥和模型权限");
+    private static ReplyFailure httpFailure(int status) {
+        return new ReplyFailure(ReplyFailure.Kind.HTTP, status, -1);
     }
 
     public static String readBounded(InputStream input, int maximumBytes) throws Exception {
@@ -592,7 +922,7 @@ public final class ChatCompletionClient {
         byte[] buffer = new byte[8192];
         int read;
         while ((read = input.read(buffer)) != -1) {
-            if (output.size() + read > maximumBytes) throw new IllegalStateException("响应内容过大");
+            if (output.size() + read > maximumBytes) throw new ReplyFailure(ReplyFailure.Kind.OVERLONG, 0, -1);
             output.write(buffer, 0, read);
         }
         return output.toString(StandardCharsets.UTF_8.name());
@@ -605,6 +935,8 @@ public final class ChatCompletionClient {
 
     private static String stripOperation(String endpoint, String protocol) {
         String base = endpoint.replaceAll("/+$", "");
+        if (AiModelConfig.GEMINI.equals(protocol))
+            base = base.replaceFirst("/models/[^/]+:(?:streamGenerateContent|generateContent)(?:\\?alt=sse)?$", "");
         String[] endings;
         switch (protocol) {
             case AiModelConfig.CHAT: endings = new String[]{"/chat/completions"}; break;

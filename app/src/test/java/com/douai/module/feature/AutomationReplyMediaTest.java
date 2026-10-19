@@ -112,33 +112,32 @@ public final class AutomationReplyMediaTest {
         assertTrue(requests.isEmpty());
     }
 
-    @Test public void workCoverIsOnlyUsedWhenIncomingCommentHasNoImages() throws Exception {
+    @Test public void textCommentDoesNotLoadOriginalWorkCover() throws Exception {
         Work work = work("{\"video\":{\"cover\":{\"url_list\":[\"https://p.byteimg.com/cover.png\"]}}}");
         List<String> requests = new ArrayList<>();
         List<ChatImage> images = AutomationReplyMedia.comment(context, event(new Comment(), work), options(true, false),
                 transport(requests, png(Color.BLUE), null));
-        assertEquals(Collections.singletonList("https://p.byteimg.com/cover.png"), requests);
-        assertColor(Color.BLUE, images.get(0));
-        assertEquals("原作品图片/封面", AutomationReplyMedia.commentSourceLabel(event(new Comment(), work), options(true, false)));
+        assertTrue("a text reply has no incoming image to recognize", images.isEmpty());
+        assertTrue("the original work is outside the reply's visual input", requests.isEmpty());
+        assertEquals("", AutomationReplyMedia.commentSourceLabel(event(new Comment(), work), options(true, false)));
     }
 
-    @Test public void realVideoDownloadFeedsFrameExtractionAndDeletesItsTemporaryFile() throws Exception {
+    @Test public void videoSwitchDoesNotLoadOrLabelOriginalWorkVideo() throws Exception {
         Work work = work("{\"video\":{\"play_addr\":{\"url_list\":[\"https://v.douyinvod.com/video.mp4\"]}}}");
         List<String> requests = new ArrayList<>();
         Set<String> before = videos();
         List<ChatImage> frames = AutomationReplyMedia.comment(context, event(new Comment(), work), options(false, true),
                 transport(requests, new byte[]{1, 2, 3}, () -> registerCachedVideo(4)));
-        assertEquals(Collections.singletonList("https://v.douyinvod.com/video.mp4"), requests);
-        assertEquals(4, frames.size());
-        for (int index = 0; index < frames.size(); index++) assertColor(new int[]{Color.RED, Color.GREEN, Color.BLUE, Color.YELLOW}[index], frames.get(index));
+        assertTrue(frames.isEmpty());
+        assertTrue("recognizing reply videos must not fetch the work's video", requests.isEmpty());
         assertEquals(before, videos());
-        assertEquals("原作品视频帧（不含音频）", AutomationReplyMedia.commentSourceLabel(event(new Comment(), work), options(false, true)));
-        assertThrows(UnsupportedOperationException.class, frames::clear);
+        assertEquals("", AutomationReplyMedia.commentSourceLabel(event(new Comment(), work), options(false, true)));
     }
 
-    @Test public void workCoverAndVideoFramesShareTheFourImageBudget() throws Exception {
+    @Test public void bothSwitchesIgnoreOriginalWorkImagesAndVideoForTextComment() throws Exception {
         Work work = work("""
-                {"video":{"cover":{"url_list":["https://p.byteimg.com/cover.png"]},
+                {"images":[{"url_list":["https://p.byteimg.com/work.png"]}],
+                 "video":{"cover":{"url_list":["https://p.byteimg.com/cover.png"]},
                   "play_addr":{"url_list":["https://v.douyinvod.com/video.mp4"]}}}
                 """);
         List<String> requests = new ArrayList<>();
@@ -148,10 +147,55 @@ public final class AutomationReplyMediaTest {
                     uri.getPath().endsWith(".mp4") ? () -> registerCachedVideo(3) : null);
         });
         List<ChatImage> images = AutomationReplyMedia.comment(context, event(new Comment(), work), options(true, true), cancellation);
-        assertEquals(4, images.size());
-        assertEquals(2, requests.size());
-        assertColor(Color.MAGENTA, images.get(0));
-        assertEquals("原作品图片/封面与视频帧", AutomationReplyMedia.commentSourceLabel(event(new Comment(), work), options(true, true)));
+        assertTrue(images.isEmpty());
+        assertTrue("neither enabled switch permits using original-work media", requests.isEmpty());
+        assertEquals("", AutomationReplyMedia.commentSourceLabel(event(new Comment(), work), options(true, true)));
+    }
+
+    @Test public void sparseWorkVideoDoesNotBlockTextCommentWhenBothSwitchesAreOn() throws Exception {
+        Work work = work("{\"video\":{}}");
+        List<String> requests = new ArrayList<>();
+        assertTrue(AutomationReplyMedia.comment(context, event(new Comment(), work), options(true, true),
+                transport(requests, new byte[0], null)).isEmpty());
+        assertEquals("", AutomationReplyMedia.commentSourceLabel(event(new Comment(), work), options(true, true)));
+        assertTrue(requests.isEmpty());
+    }
+
+    @Test public void disabledIncomingImagesStayDisabledWhenVideoAndOriginalWorkMediaAreAvailable() throws Exception {
+        Comment incoming = comment("{\"image_list\":[{\"origin_url\":{\"url_list\":[\"https://unrelated.test/incoming.png\"]}}]}");
+        Work work = work("""
+                {"images":[{"url_list":["https://p.byteimg.com/work.png"]}],
+                 "video":{"play_addr":{"url_list":["https://v.douyinvod.com/video.mp4"]}}}
+                """);
+        List<String> requests = new ArrayList<>();
+        assertTrue(AutomationReplyMedia.comment(context, event(incoming, work), options(false, true),
+                transport(requests, new byte[]{1}, () -> registerCachedVideo(4))).isEmpty());
+        assertEquals("", AutomationReplyMedia.commentSourceLabel(event(incoming, work), options(false, true)));
+        assertTrue(requests.isEmpty());
+    }
+
+    @Test public void commentReplyNeverTraversesOriginalWorkMediaFields() throws Exception {
+        Object work = new UnreadWork();
+        for (LocalOptions flags : new LocalOptions[]{options(true, false), options(false, true), options(true, true)}) {
+            List<String> requests = new ArrayList<>();
+            assertTrue(AutomationReplyMedia.comment(context, event(new Comment(), work), flags,
+                    transport(requests, new byte[0], null)).isEmpty());
+            assertEquals("", AutomationReplyMedia.commentSourceLabel(event(new Comment(), work), flags));
+            assertTrue(requests.isEmpty());
+        }
+    }
+
+    @Test public void explicitIncomingVideoStillFeedsFrameExtractionAndDeletesItsTemporaryFile() throws Exception {
+        List<String> requests = new ArrayList<>();
+        Set<String> before = videos();
+        List<ChatImage> frames = AutomationReplyMedia.loadIncoming(context, Collections.emptyList(),
+                "https://v.douyinvod.com/video.mp4", options(false, true),
+                transport(requests, new byte[]{1, 2, 3}, () -> registerCachedVideo(4)));
+        assertEquals(Collections.singletonList("https://v.douyinvod.com/video.mp4"), requests);
+        assertEquals(4, frames.size());
+        for (int index = 0; index < frames.size(); index++) assertColor(new int[]{Color.RED, Color.GREEN, Color.BLUE, Color.YELLOW}[index], frames.get(index));
+        assertEquals(before, videos());
+        assertThrows(UnsupportedOperationException.class, frames::clear);
     }
 
     @Test public void malformedIncomingImageFailsInsteadOfSubstitutingUnrelatedWorkMedia() throws Exception {
@@ -287,6 +331,20 @@ public final class AutomationReplyMediaTest {
     static final class Work { @SerializedName("images") List<Address> pictures; @SerializedName("video") Video media; }
     static final class Video { @SerializedName("cover") Address cover; @SerializedName("play_addr") Address playback; }
     static final class Address { @SerializedName("url_list") List<String> values; }
+    static final class UnreadWork {
+        @SerializedName("images") final Iterable<Object> pictures = () -> {
+            throw new AssertionError("Original work images were traversed");
+        };
+        @SerializedName("video") final UnreadVideo video = new UnreadVideo();
+    }
+    static final class UnreadVideo {
+        @SerializedName("play_addr") final UnreadAddress playback = new UnreadAddress();
+    }
+    static final class UnreadAddress {
+        @SerializedName("url_list") final Iterable<String> values = () -> {
+            throw new AssertionError("Original work video was traversed");
+        };
+    }
     static class FixtureConnection extends HttpURLConnection {
         final byte[] bytes;
         final Runnable beforeBody;

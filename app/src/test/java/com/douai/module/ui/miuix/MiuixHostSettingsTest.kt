@@ -10,6 +10,9 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -27,13 +30,18 @@ import com.douai.module.config.HostSettingsStore
 import com.douai.module.config.AiModelConfig
 import com.douai.module.config.AiModelSettings
 import com.douai.module.config.ThirdPartyDownloadSettings
+import com.douai.module.analytics.LocalAnalytics
+import com.douai.module.analytics.LocalPortraitContext
 import org.json.JSONObject
 import com.douai.module.ui.ModuleSettingsScreen
 import java.io.File
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -172,6 +180,173 @@ class MiuixHostSettingsTest {
         compose.onNodeWithText("下载相关").assertIsDisplayed()
         compose.onNodeWithTag("settings.search").performTextReplacement("不存在的分类")
         compose.onNodeWithText("没有匹配的设置分类").assertIsDisplayed()
+    }
+
+    @Test
+    @Config(sdk = [28], qualifiers = "w320dp-h640dp-notnight-mdpi")
+    fun localAnalyticsUsesMiuixControlsAndReturnsToExtensionsInLightMode() {
+        verifyLocalAnalyticsMiuixPage("light")
+    }
+
+    @Test
+    @Config(sdk = [28], qualifiers = "w320dp-h640dp-night-mdpi")
+    fun localAnalyticsUsesMiuixControlsAndReturnsToExtensionsInDarkMode() {
+        verifyLocalAnalyticsMiuixPage("dark")
+    }
+
+    private fun verifyLocalAnalyticsMiuixPage(theme: String) {
+        val hostActivity = compose.activity
+        val analytics = LocalAnalytics.get(hostActivity)
+        runAnalyticsIo {
+            analytics.setEnabled(false)
+            analytics.clear()
+            LocalPortraitContext.clear(hostActivity)
+        }
+        try {
+            compose.onNodeWithTag("settings.search").performTextReplacement("本地数据分析")
+            compose.onNodeWithText("扩展功能").assertIsDisplayed().performClick()
+            val extensions = ShadowDialog.getLatestDialog()
+            compose.onNodeWithTag("settings.option.本地数据分析").assertIsDisplayed().performClick()
+            val report = ShadowDialog.getLatestDialog()
+            waitForAnalyticsLoad(report, "记录已关闭")
+            compose.runOnIdle {
+                val decor = report.window!!.decorView
+                assertTrue(report.isShowing)
+                assertTrue("The extension page stays open beneath its report", extensions.isShowing)
+                assertNotNull(decor.findViewWithTag<View>("miuix.dialog.root"))
+                assertNull("The report must use the shared dialog header", decor.findViewWithTag<View>("analytics.back"))
+                assertNotNull(decor.findViewWithTag<View>("analytics.empty"))
+            }
+            compose.onAllNodesWithTag("miuix.dialog.title").onLast().assertTextEquals("本地数据分析")
+            compose.onNodeWithTag("analytics.recording").assertIsDisplayed().assertIsEnabled().assertIsOff()
+            saveDialogPreview("host-local-analytics-$theme")
+            compose.onNodeWithTag("analytics.recording").performClick()
+            waitForAnalyticsLoad(report, "正在本地记录")
+            compose.onNodeWithTag("analytics.recording").assertIsOn()
+            assertTrue("The visible Miuix switch updates the local recorder", analytics.isEnabled)
+
+            val populated = runAnalyticsIo {
+                val types = listOf("short_video", "image", "live_photo", "long_video")
+                for (index in 0 until 12) {
+                    val workId = "miuix-ui-synthetic-work-$index"
+                    analytics.recordView(workId, types[index % types.size], "synthetic-author-${index % 3}",
+                        "测试作者 ${index % 3 + 1}", listOf("测试话题：摄影", "测试话题：${if (index % 2 == 0) "旅行" else "做饭"}"),
+                        false, if (index % 4 == 3) 360_000L else 20_000L)
+                    if (index % 3 == 0) analytics.recordAction(analytics.generation(), workId,
+                        "copy_text", "测试复制文案", "manual", "success")
+                }
+                analytics.snapshot(7)
+            }
+            assertEquals(12L, populated.totalViews)
+            assertEquals(4L, populated.totalFeatureUses)
+            scrollAnalyticsViewIntoView(report, "analytics.refresh")
+            compose.onNodeWithTag("analytics.refresh").assertIsDisplayed().performClick()
+            waitForAnalyticsLoad(report, "正在本地记录")
+            compose.runOnIdle {
+                assertNull("Refreshing the real page must replace its empty state", report.window!!.decorView
+                    .findViewWithTag<View>("analytics.empty"))
+                assertNotNull(report.window!!.decorView.findViewWithTag<View>("analytics.portrait.types.chart"))
+                for (section in listOf("types", "topics", "settings")) {
+                    assertEquals("Long report details initially stay collapsed", View.GONE,
+                        report.window!!.decorView.findViewWithTag<View>("analytics.section.body.$section").visibility)
+                }
+            }
+            expandAnalyticsSection(report, "types")
+            scrollAnalyticsViewIntoView(report, "analytics.portrait.types.selection")
+            saveDialogPreview("host-local-analytics-content-$theme")
+            expandAnalyticsSection(report, "topics")
+            scrollAnalyticsViewIntoView(report, "analytics.portrait.topics.selection")
+            saveDialogPreview("host-local-analytics-topics-$theme")
+            expandAnalyticsSection(report, "settings")
+            scrollAnalyticsViewIntoView(report, "analytics.purpose")
+            compose.onNodeWithTag("analytics.purpose").assertIsDisplayed().performClick()
+            compose.onNodeWithTag("analytics.purpose.input").assertIsDisplayed()
+                .performTextReplacement("测试数据：摄影、旅行与做饭灵感")
+            saveDialogPreview("host-local-analytics-purpose-$theme")
+            compose.onAllNodesWithTag("miuix.dialog.button.${Dialog.BUTTON_POSITIVE}").onLast().performClick()
+            waitForAnalyticsLoad(report, "正在本地记录")
+            assertEquals("测试数据：摄影、旅行与做饭灵感", LocalPortraitContext.current(hostActivity).purpose)
+
+            scrollAnalyticsViewIntoView(report, "analytics.range.selector")
+            compose.onNodeWithTag("analytics.range.selector").assertIsDisplayed().performClick()
+            compose.onNodeWithTag("miuix.dialog.choice.2").assertIsDisplayed().performClick()
+            waitForAnalyticsLoad(report, "最近 30 天")
+            compose.runOnIdle {
+                assertTrue(report.window!!.decorView.findViewWithTag<android.widget.TextView>("analytics.status")
+                    .text.toString().contains("最近 30 天"))
+            }
+
+            compose.onAllNodesWithTag("miuix.dialog.button.${Dialog.BUTTON_NEGATIVE}").onLast().performClick()
+            compose.runOnIdle {
+                assertFalse(report.isShowing)
+                assertTrue(extensions.isShowing)
+            }
+            compose.onNodeWithTag("settings.option.本地数据分析").assertIsDisplayed().performClick()
+            val reopened = ShadowDialog.getLatestDialog()
+            waitForAnalyticsLoad(reopened, "正在本地记录")
+            compose.onNodeWithTag("analytics.recording").assertIsOn()
+            compose.runOnUiThread {
+                screen.close()
+                assertFalse("Closing settings also closes the active analytics page", reopened.isShowing)
+                assertFalse(extensions.isShowing)
+            }
+        } finally {
+            runAnalyticsIo {
+                analytics.setEnabled(false)
+                analytics.clear()
+                LocalPortraitContext.clear(hostActivity)
+            }
+        }
+    }
+
+    private fun waitForAnalyticsLoad(dialog: Dialog, expectedStatus: String) {
+        try {
+            compose.waitUntil(10_000) {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                dialog.window!!.decorView.findViewWithTag<android.widget.TextView>("analytics.status")
+                    ?.text?.toString()?.contains(expectedStatus) == true
+            }
+        } catch (failure: androidx.compose.ui.test.ComposeTimeoutException) {
+            val decor = dialog.window!!.decorView
+            val status = decor.findViewWithTag<android.widget.TextView>("analytics.status")?.text
+            throw AssertionError("Expected analytics status '$expectedStatus'; actual='$status'; " +
+                "showing=${dialog.isShowing}; sharedRoot=${decor.findViewWithTag<View>("miuix.dialog.root") != null}; " +
+                "analyticsRoot=${decor.findViewWithTag<View>("analytics.root") != null}; " +
+                "latestIsReport=${ShadowDialog.getLatestDialog() === dialog}", failure)
+        }
+        compose.waitForIdle()
+    }
+
+    private fun <T> runAnalyticsIo(action: () -> T): T {
+        val executor = Executors.newSingleThreadExecutor()
+        return try {
+            executor.submit<T> { action() }.get(10, TimeUnit.SECONDS)
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    private fun expandAnalyticsSection(dialog: Dialog, key: String) {
+        val tag = "analytics.section.toggle.$key"
+        scrollAnalyticsViewIntoView(dialog, tag)
+        compose.onNodeWithTag(tag).assertIsDisplayed().performClick()
+        compose.runOnIdle {
+            assertEquals(View.VISIBLE, dialog.window!!.decorView
+                .findViewWithTag<View>("analytics.section.body.$key").visibility)
+        }
+    }
+
+    private fun scrollAnalyticsViewIntoView(dialog: Dialog, tag: String) {
+        compose.runOnUiThread {
+            val decor = dialog.window!!.decorView
+            val scroll = decor.findViewWithTag<android.widget.ScrollView>("analytics.scroll")
+            var control = decor.findViewWithTag<View>(tag)
+            while (control.width == 0 || control.height == 0) control = control.parent as View
+            val bounds = android.graphics.Rect(0, 0, control.width, control.height)
+            scroll.offsetDescendantRectToMyCoords(control, bounds)
+            scroll.scrollTo(0, (bounds.top - 32 * compose.activity.resources.displayMetrics.density).toInt().coerceAtLeast(0))
+        }
+        compose.waitForIdle()
     }
 
     @Test

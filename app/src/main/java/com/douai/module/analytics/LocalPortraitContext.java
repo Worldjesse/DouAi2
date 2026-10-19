@@ -12,7 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** Optional self-description of this installation's user; excluded from settings/cloud backups. */
+/** Optional local self-description; included only in an explicitly selected analytics backup. */
 public final class LocalPortraitContext {
     private static final Map<String, State> STATES = new LinkedHashMap<>();
     private LocalPortraitContext() { }
@@ -56,6 +56,18 @@ public final class LocalPortraitContext {
             }
             STATES.put(root.getAbsolutePath(), new State("", ""));
         }
+    }
+
+    static <T> T withState(Context context, java.util.function.Function<State, T> operation) {
+        synchronized (STATES) { return operation.apply(current(context)); }
+    }
+
+    static State backupState(String purpose, String feedback) {
+        return new State(purpose(purpose), feedback(feedback));
+    }
+
+    static void replaceFromBackup(Context context, State state) {
+        synchronized (STATES) { save(context, state); }
     }
 
     private static File root(Context context) {

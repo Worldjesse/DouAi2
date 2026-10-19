@@ -255,7 +255,12 @@ final class NativeCommentPublisher implements AutoCloseable {
                 || event.incomingId == null || event.incomingId.isEmpty() || event.rootId == null || event.rootId.isEmpty()
                 || event.aid == null || event.aid.isEmpty()
                 || !event.incomingId.equals(HostTargets.read(event.targetComment, "cid"))
-                || !event.aid.equals(HostTargets.read(event.targetComment, "awemeId"))) return false;
+                || !event.aid.equals(HostTargets.read(event.work, "aid"))) return false;
+        Object targetAid = HostTargets.read(event.targetComment, "awemeId");
+        // The unified native notice binds its work separately from current_comment.
+        // Only that verified binding may omit the repeated ID; a conflicting ID always fails.
+        if (!event.aid.equals(targetAid)
+                && !(event.nativeWorkBound && (targetAid == null || "".equals(targetAid)))) return false;
         Object parent = HostTargets.read(event.targetComment, "replyId");
         String root = parent instanceof String && !((String) parent).isEmpty() && !"0".equals(parent)
                 ? (String) parent : event.incomingId;

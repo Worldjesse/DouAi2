@@ -30,6 +30,29 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class ChatCompletionClientTest {
+    @Test public void structuredWrapperAllowanceDoesNotRaiseTheOrdinaryChatReplyLimit() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            for (int chars : new int[]{4001, 4032, 4033}) server.enqueue(json(new JSONObject()
+                    .put("choices", new JSONArray().put(new JSONObject().put("message", new JSONObject()
+                            .put("content", "x".repeat(chars))))).toString()));
+            AiModelSettings profile = settings(config(server, AiModelConfig.CHAT, true));
+            ChatCompletionClient client = new ChatCompletionClient();
+            try { client.reply("ordinary", "ping", profile); fail("ordinary replies remain bounded at 4000"); }
+            catch (ChatCompletionClient.ReplyFailure failure) {
+                assertEquals(ChatCompletionClient.ReplyFailure.Kind.OVERLONG, failure.kind());
+                assertEquals(4001, failure.responseChars());
+            }
+            assertEquals(4032, client.replyStructuredAnalysis("analysis", "ping", profile, "task", "{}").length());
+            try { client.replyStructuredAnalysis("analysis", "ping", profile, "task", "{}"); fail("structured allowance is bounded"); }
+            catch (ChatCompletionClient.ReplyFailure failure) {
+                assertEquals(ChatCompletionClient.ReplyFailure.Kind.OVERLONG, failure.kind());
+                assertEquals(4033, failure.responseChars());
+                assertNull(failure.getCause());
+            }
+        }
+    }
+
     @Test public void chatCompletionsProfileSendsBearerHeadersAndEnabledParameters() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(json("{\"choices\":[{\"message\":{\"content\":\"pong\"}}]}"));
@@ -66,7 +89,157 @@ public final class ChatCompletionClientTest {
             assertEquals("user", body.getJSONArray("input").getJSONObject(0).getString("role"));
             assertEquals(73, body.getInt("max_output_tokens"));
             assertFalse(body.has("messages"));
+            assertFalse("Ordinary Responses chat remains non-streaming", body.getBoolean("stream"));
         }
+    }
+
+    @Test public void responseModeAppliesToBothStructuredAndOrdinaryRepliesWithoutAnalysisHistory() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            server.enqueue(new MockResponse().setHeader("Content-Type", "text/event-stream")
+                    .setBody(streamCompleted("streamed")));
+            server.enqueue(json("{\"output_text\":\"ordinary\"}"));
+            ChatCompletionClient client = new ChatCompletionClient();
+            AiModelSettings profile = settings(config(server, AiModelConfig.RESPONSES, true).put("responseMode", "streaming"));
+            assertEquals("streamed", client.replyStructuredAnalysis("same", "analysis", profile, "task", "{}"));
+            JSONObject streamed = new JSONObject(server.takeRequest().getBody().readUtf8());
+            assertTrue(streamed.getBoolean("stream"));
+            assertFalse(streamed.getBoolean("store"));
+            assertEquals("Reply concisely", streamed.getString("instructions"));
+            assertEquals("ordinary", client.reply("same", "chat", profile));
+            JSONObject ordinary = new JSONObject(server.takeRequest().getBody().readUtf8());
+            assertTrue(ordinary.getBoolean("stream"));
+            assertEquals("Analysis never enters ordinary chat context", 1, ordinary.getJSONArray("input").length());
+        }
+    }
+
+    @Test public void incompleteResponsesStreamFailsOnceWithSafeTypedMetadata() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            server.enqueue(new MockResponse().setHeader("Content-Type", "text/event-stream")
+                    .setBody(streamDelta("PRIVATE_PARTIAL_REPLY") + "data: [DONE]\n\n"));
+            try {
+                new ChatCompletionClient().replyStructuredAnalysis("analysis", "ping",
+                        settings(config(server, AiModelConfig.RESPONSES, true).put("responseMode", "streaming")), "task", "{}");
+                fail("A DONE marker without response.completed cannot commit analysis");
+            } catch (ChatCompletionClient.ReplyFailure failure) {
+                assertEquals(ChatCompletionClient.ReplyFailure.Kind.INCOMPLETE, failure.kind());
+                assertEquals(200, failure.httpStatus());
+                assertFalse(failure.getMessage().contains("PRIVATE_"));
+                assertNull(failure.getCause());
+            }
+            assertEquals("Never resend a failed stream automatically", 1, server.getRequestCount());
+        }
+    }
+
+    @Test public void responsesJsonRejectsExplicitUnfinishedStatusButKeepsLegacyCompleteReplies() throws Exception {
+        JSONObject fields = new JSONObject();
+        for (String key : new String[]{"overview", "trend", "types", "authors", "topics", "features", "hours",
+                "portraitTitle", "portrait", "contrasts", "questions"}) fields.put(key, "analysis");
+        String fullText = fields.toString();
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            AiModelSettings profile = settings(config(server, AiModelConfig.RESPONSES, true).put("responseMode", "streaming"));
+            ChatCompletionClient client = new ChatCompletionClient();
+            for (String status : new String[]{"incomplete", "failed", "in_progress", "queued", "cancelled"}) {
+                server.enqueue(json(new JSONObject().put("status", status).put("output_text", fullText).toString()));
+                try { client.replyStructuredAnalysis("analysis", "ping", profile, "task", "{}"); fail("Unfinished JSON must not commit analysis"); }
+                catch (ChatCompletionClient.ReplyFailure failure) {
+                    assertEquals(ChatCompletionClient.ReplyFailure.Kind.INCOMPLETE, failure.kind());
+                    assertNull(failure.getCause());
+                }
+            }
+            server.enqueue(json(new JSONObject().put("status", "completed").put("output_text", fullText)
+                    .put("error", new JSONObject().put("message", "PRIVATE_SERVER_ERROR")).toString()));
+            try { client.replyStructuredAnalysis("analysis", "ping", profile, "task", "{}"); fail("Explicit provider error must not commit analysis"); }
+            catch (ChatCompletionClient.ReplyFailure failure) {
+                assertEquals(ChatCompletionClient.ReplyFailure.Kind.INCOMPLETE, failure.kind());
+                assertFalse(failure.getMessage().contains("PRIVATE_"));
+            }
+            server.enqueue(json(new JSONObject().put("output_text", fullText).toString()));
+            assertEquals(fullText, client.replyStructuredAnalysis("analysis", "ping", profile, "task", "{}"));
+            server.enqueue(json(new JSONObject().put("status", "incomplete").put("output_text", fullText).toString()));
+            try { client.reply("ordinary", "ping", settings(config(server, AiModelConfig.RESPONSES, true))); fail("Ordinary replies must reject explicit incomplete status too"); }
+            catch (ChatCompletionClient.ReplyFailure failure) {
+                assertEquals(ChatCompletionClient.ReplyFailure.Kind.INCOMPLETE, failure.kind());
+            }
+            assertEquals(8, server.getRequestCount());
+        }
+    }
+
+    @Test public void cancellingAfterStreamingHeadersUnblocksBodyAndAllowsAnotherRequest() throws Exception {
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        CountDownLatch headers = new CountDownLatch(1);
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            server.enqueue(new MockResponse().setHeader("Content-Type", "text/event-stream")
+                    .setBodyDelay(2, TimeUnit.SECONDS).setBody(streamCompleted("late")));
+            server.enqueue(json("{\"output_text\":\"next\"}"));
+            AiModelSettings profile = settings(config(server, AiModelConfig.RESPONSES, true).put("responseMode", "streaming").put("timeoutSeconds", 5));
+            ChatCompletionClient client = new ChatCompletionClient(null, value -> {
+                if (value.contains("stage=stream_headers")) headers.countDown();
+            });
+            Future<String> pending = worker.submit(() -> client.replyStructuredAnalysis("analysis", "ping", profile, "task", "{}"));
+            assertTrue(headers.await(3, TimeUnit.SECONDS));
+            client.cancelCurrentRequest();
+            try { pending.get(3, TimeUnit.SECONDS); fail("Cancelled body read must not return its late result"); }
+            catch (ExecutionException expected) { assertTrue(expected.getCause() instanceof CancellationException); }
+            assertEquals("next", worker.submit(() -> client.replyStructuredAnalysis("analysis", "ping", profile, "task", "{}"))
+                    .get(3, TimeUnit.SECONDS));
+            assertEquals(2, server.getRequestCount());
+        } finally { worker.shutdownNow(); }
+    }
+
+    @Test public void absoluteAnalysisBudgetClosesAStreamThatStallsNearItsDeadline() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            server.enqueue(new MockResponse().setHeader("Content-Type", "text/event-stream")
+                    .setBodyDelay(4, TimeUnit.SECONDS).setBody(streamDelta("partial"))
+                    .setHeader("Content-Length", 1_000_000));
+            server.enqueue(json("{\"output_text\":\"after timeout\"}"));
+            AiModelSettings profile = settings(config(server, AiModelConfig.RESPONSES, true).put("responseMode", "streaming").put("timeoutSeconds", 5));
+            ChatCompletionClient client = new ChatCompletionClient();
+            long started = System.nanoTime();
+            try { client.replyStructuredAnalysis("analysis", "ping", profile, "task", "{}"); fail("The total budget must expire"); }
+            catch (java.net.SocketTimeoutException expected) {
+                long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                assertTrue("The configured five-second budget must be observed", elapsed >= 4500);
+                assertTrue("A late body read must not receive a fresh five-second budget: " + elapsed, elapsed < 8000);
+            }
+            assertEquals("after timeout", client.replyStructuredAnalysis("analysis", "ping", profile, "task", "{}"));
+            assertEquals(2, server.getRequestCount());
+        }
+    }
+
+    @Test public void cancellationAtStreamingCompletionCannotCommitAndDoesNotCancelTheNextRequest() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            server.enqueue(new MockResponse().setHeader("Content-Type", "text/event-stream")
+                    .setBody(streamCompleted("cancel before commit")));
+            server.enqueue(json("{\"output_text\":\"next\"}"));
+            java.util.concurrent.atomic.AtomicReference<ChatCompletionClient> owner = new java.util.concurrent.atomic.AtomicReference<>();
+            java.util.concurrent.atomic.AtomicBoolean cancelOnce = new java.util.concurrent.atomic.AtomicBoolean(true);
+            ChatCompletionClient client = new ChatCompletionClient(null, value -> {
+                if (value.contains("stage=stream_complete") && cancelOnce.getAndSet(false)) owner.get().cancelCurrentRequest();
+            });
+            owner.set(client);
+            AiModelSettings profile = settings(config(server, AiModelConfig.RESPONSES, true).put("responseMode", "streaming"));
+            try { client.replyStructuredAnalysis("analysis", "ping", profile, "task", "{}"); fail("Cancellation before commit must win"); }
+            catch (CancellationException expected) { assertFalse(cancelOnce.get()); }
+            assertEquals("next", client.replyStructuredAnalysis("analysis", "ping", profile, "task", "{}"));
+            assertEquals(2, server.getRequestCount());
+        }
+    }
+
+    private static String streamDelta(String text) throws Exception {
+        return "data: " + new JSONObject().put("type", "response.output_text.delta").put("delta", text) + "\n\n";
+    }
+
+    private static String streamCompleted(String text) throws Exception {
+        JSONObject block = new JSONObject().put("type", "output_text").put("text", text);
+        JSONObject message = new JSONObject().put("type", "message").put("content", new JSONArray().put(block));
+        JSONObject response = new JSONObject().put("status", "completed").put("output", new JSONArray().put(message));
+        return "data: " + new JSONObject().put("type", "response.completed").put("response", response) + "\n\n";
     }
 
     @Test public void anthropicProtocolUsesMessagesAuthenticationAndRequiredMaxTokens() throws Exception {

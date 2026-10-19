@@ -28,6 +28,12 @@ import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowLooper;
 import static org.junit.Assert.*;
+import static com.douai.module.feature.NativeCommentReplyInboxTest.notice;
+import static com.douai.module.feature.NativeCommentReplyInboxTest.nestedNotice;
+import static com.douai.module.feature.NativeCommentReplyInboxTest.detailedNotice;
+import static com.douai.module.feature.NativeCommentReplyInboxTest.parentlessDirectedNotice;
+import static com.douai.module.feature.NativeCommentReplyInboxTest.page;
+import static com.douai.module.feature.NativeCommentReplyInboxTest.report;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35, packageName = "com.douai.module")
@@ -43,6 +49,9 @@ public final class CommentReplyHookTest {
     private final Map<String, Object> values = new HashMap<>();
 
     @Before public void setup() {
+        NativeCommentReplyInboxTest.FakeGroupResolver.group = 44;
+        NativeCommentReplyInboxTest.FakeGroupResolver.failure = null;
+        NativeCommentReplyInboxTest.FakeGroupResolver.calls = 0;
         for (String file : new String[]{"douai_comment_reply_ledger", "douai_automation_limits", "douai_automation_history"}) {
             RuntimeEnvironment.getApplication().getSharedPreferences(file, Context.MODE_PRIVATE).edit().clear().commit();
         }
@@ -96,6 +105,418 @@ public final class CommentReplyHookTest {
         advanceMillis(1000);
         assertEquals(List.of("new-in-same-second"), sender.sent);
         assertEquals(1, history().size());
+    }
+
+    @Test public void rawNativeNoticeCursorsEstablishBaselineAndDeliverTheNextReply() throws Exception {
+        NativeCommentReplyInboxTest.Api nativeApi = new NativeCommentReplyInboxTest.Api();
+        NativeCommentReplyInboxTest.Provider.b = nativeApi;
+        NativeCommentReplyInboxTest.AccountFactory.service = new NativeCommentReplyInboxTest.Account();
+        NativeCommentReplyInboxTest.AccountFactory.service.user = new NativeCommentReplyInboxTest.User("100");
+        NativeCommentReplyInboxTest.Notice existingHead = notice("old-head", "existing-head", "200", "101", 1000);
+        NativeCommentReplyInboxTest.Notice existingBoundary = notice("old-boundary", "existing-boundary", "201", "101", 1000);
+        nativeApi.pages.add(page(true, 0, 1000, existingHead));
+        nativeApi.pages.add(page(false, 0, 999, existingBoundary));
+        NativeCommentReplyInbox inbox = new NativeCommentReplyInbox(report(), getClass().getClassLoader(), ignored -> { });
+        hook.close();
+        createHook(new CommentReplyHook.Source() {
+            @Override public long baseline(long account, BooleanSupplier valid) throws Exception {
+                return inbox.baseline(account, valid);
+            }
+            @Override public List<String> baselineIds() { return inbox.baselineCommentIds(); }
+            @Override public long scannedThrough() { return inbox.scannedThrough(); }
+            @Override public List<CommentReplyEvent> scan(long account, long since, BooleanSupplier valid) throws Exception {
+                return inbox.scan(account, since, valid);
+            }
+            @Override public void close() { inbox.close(); }
+        });
+
+        open();
+        assertEquals("The raw native cursors must allow the entire baseline second to be collected",
+                1000, ledger().baseline(100));
+        assertTrue(ledger().contains(100, "existing-head"));
+        assertTrue(ledger().contains(100, "existing-boundary"));
+        assertEquals(2, nativeApi.calls.size());
+        assertEquals(0L, nativeApi.calls.get(1)[0]);
+        assertEquals(1000L, nativeApi.calls.get(1)[1]);
+        assertTrue(generator.ids.isEmpty());
+        assertTrue(sender.sent.isEmpty());
+
+        NativeCommentReplyInboxTest.Notice nextReply = notice("next-notice", "next-reply", "202", "101", 1001);
+        nativeApi.pages.add(page(true, 0, 1000, nextReply, existingHead));
+        nativeApi.pages.add(page(false, 0, 999, existingBoundary));
+        hook.requestScan();
+        processReplies();
+
+        assertEquals(4, nativeApi.calls.size());
+        assertEquals(0L, nativeApi.calls.get(3)[0]);
+        assertEquals(1000L, nativeApi.calls.get(3)[1]);
+        assertEquals(List.of("next-reply"), generator.ids);
+        assertEquals(List.of("next-reply"), sender.sent);
+        assertEquals(1001, inbox.scannedThrough());
+        assertEquals("sent", history().get(0).status);
+    }
+
+    @Test public void resolvedNativeReceivedGroupReachesAutomaticSendingExactlyOnce() throws Exception {
+        NativeCommentReplyInboxTest.Api nativeApi = new NativeCommentReplyInboxTest.Api();
+        nativeApi.expectedGroup = 44;
+        NativeCommentReplyInboxTest.Notice existing = notice("existing-notice", "existing-id", "200", "101", 1000);
+        nativeApi.pages.add(page(false, 0, 0, existing));
+        NativeCommentReplyInbox inbox = useNativeInbox(nativeApi);
+
+        open();
+
+        assertTrue(ledger().initialized(100));
+        assertEquals("The native received-comment route must establish the known server baseline",
+                1000, ledger().baseline(100));
+        assertEquals(List.of("existing-id"), inbox.baselineCommentIds());
+        assertTrue(ledger().contains(100, "existing-id"));
+        assertTrue(generator.ids.isEmpty());
+        assertTrue(sender.sent.isEmpty());
+
+        NativeCommentReplyInboxTest.Notice fresh = notice("fresh-notice", "fresh-id", "201", "101", 1001);
+        nativeApi.pages.add(page(false, 0, 0, existing, fresh));
+        hook.requestScan();
+        processReplies();
+
+        assertEquals(List.of("fresh-id"), generator.ids);
+        assertEquals(List.of("fresh-id"), sender.sent);
+        assertEquals(1, history().size());
+        assertEquals("sent", history().get(0).status);
+
+        nativeApi.pages.add(page(false, 0, 0, existing, fresh));
+        hook.requestScan();
+        pump();
+        assertTrue("An acknowledged reply must not queue another generation on rescan",
+                ((Map<?, ?>) HostTargets.read(hook, "tasks")).isEmpty());
+        assertEquals(List.of("fresh-id"), generator.ids);
+        assertEquals(List.of("fresh-id"), sender.sent);
+        assertEquals(1, history().size());
+        assertEquals(3, nativeApi.calls.size());
+        assertEquals(3, NativeCommentReplyInboxTest.FakeGroupResolver.calls);
+        for (Object[] arguments : nativeApi.calls) {
+            assertEquals(44, arguments[3]);
+            assertEquals(0, arguments[5]);
+        }
+    }
+
+    @Test public void sparseNoticeReplaysPastAnOldWatermarkThroughRealThreadLookupAndSendsOnlyOnce() throws Exception {
+        values.put(LocalOptions.REPLY_RECOGNIZE_IMAGES, true);
+        values.put(LocalOptions.REPLY_RECOGNIZE_VIDEO, true);
+        CommentReplyLedger prior = ledger();
+        assertTrue(prior.initialize(100, 1000, Collections.emptyList()));
+        prior.advance(100, 5000);
+        android.content.SharedPreferences records = activity.getSharedPreferences("douai_comment_reply_ledger", Context.MODE_PRIVATE);
+        assertTrue(records.edit().putInt("inbox_model.100", 3).commit());
+
+        NativeCommentThreadLookupTest.LookupHarness host = NativeCommentThreadLookupTest.harness("101", "thread-reply", 900);
+        host.incoming.replyToReplyId = "101";
+        host.incoming.createTime = 1500;
+        NativeCommentReplyInboxTest.Notice sparse = NativeCommentReplyInboxTest.sparseNotice(
+                "sparse-notice", "thread-reply", "200", 2000);
+        NativeCommentReplyInboxTest.Comment raw = sparse.interactiveGeneralNoticeStruct.additionalInfo.comment.a;
+        NativeCommentReplyInboxTest.Api nativeApi = new NativeCommentReplyInboxTest.Api();
+        nativeApi.expectedGroup = 44;
+        nativeApi.pages.add(page(false, 0, 0, sparse));
+        useNativeInbox(nativeApi, host.lookup);
+
+        open();
+
+        assertEquals("A schema upgrade must replay from the original baseline before scanning the sparse notice",
+                1000, ledger().watermark(100));
+        assertEquals(1000, ledger().baseline(100));
+        assertEquals(CommentReplyLedger.INBOX_MODEL_VERSION, records.getInt("inbox_model.100", 0));
+        processReplies();
+        assertEquals(List.of("thread-reply"), generator.ids);
+        assertEquals(List.of("thread-reply"), sender.sent);
+        assertEquals(1, generator.generatedImages.size());
+        assertTrue("The real default loader must not substitute work media for a text comment", generator.generatedImages.get(0).isEmpty());
+        assertTrue(generator.prompts.get(0).contains("我的原评论：my original"));
+        assertTrue(generator.prompts.get(0).contains("对方的回复：" + host.incoming.text));
+        assertFalse(generator.prompts.get(0).contains("作品："));
+        assertEquals(1, sender.submittedEvents.size());
+        CommentReplyEvent event = sender.submittedEvents.get(0);
+        assertSame("The server thread's complete target must survive generation and dispatch", host.incoming, event.targetComment);
+        assertSame(host.work, event.work);
+        assertEquals("101", event.rootId);
+        assertEquals(2000, event.createdAt);
+        assertEquals("my original", event.originalText);
+        assertEquals(900, host.original.createTime);
+        assertEquals("101", host.incoming.replyId);
+        assertEquals("101", host.incoming.replyToReplyId);
+        assertEquals("0", raw.replyId);
+        assertEquals("", raw.replyToReplyId);
+        assertEquals(1, history().size());
+        assertEquals("sent", history().get(0).status);
+        assertEquals("The submitted task defers progress until the next completed scan", 1000, ledger().watermark(100));
+
+        nativeApi.pages.add(page(false, 0, 0, sparse));
+        nativeApi.pages.add(page(false, 0, 0, sparse)); // Completion also schedules an automatic recheck.
+        hook.requestScan();
+        processReplies();
+
+        assertEquals("Rescanning the same recovered notice must preserve the incoming CID claim", List.of("thread-reply"), sender.sent);
+        assertEquals(List.of("thread-reply"), generator.ids);
+        assertEquals(1, history().size());
+        assertTrue(nativeApi.calls.size() >= 2);
+        assertEquals("Every repeated notice scan must reach the real lookup", nativeApi.calls.size(), host.own.starts.size());
+        assertEquals(2000, ledger().watermark(100));
+    }
+
+    @Test public void aLaterAlreadyHandledCanonicalReplyCannotLiftTheUnresolvedNativeWatermarkCeiling() throws Exception {
+        CommentReplyLedger prior = ledger();
+        assertTrue(prior.initialize(100, 100, List.of()));
+        assertTrue(prior.claim(100, "already-sent", "102", 0));
+        assertTrue(prior.submitted(100, "already-sent"));
+        prior.finish(100, "already-sent", "sent");
+        NativeCommentReplyInboxTest.Api api = new NativeCommentReplyInboxTest.Api();
+        api.pages.add(page(false, 0, 0,
+                NativeCommentReplyInboxTest.sparseNotice("unresolved", "pending", "200", 210),
+                notice("later", "already-sent", "201", "102", 1000)));
+        useNativeInbox(api, new NativeCommentReplyInboxTest.ThreadProbe());
+
+        open();
+        processReplies();
+
+        assertEquals("The older sparse arrival must remain inside the next scan range", 209, ledger().watermark(100));
+        assertTrue(sender.sent.isEmpty());
+        assertTrue(prior.contains(100, "already-sent"));
+    }
+
+    @Test public void nestedAndDetailedNativeRepliesReachSendingOnceAfterTheirSharedBaseline() throws Exception {
+        NativeCommentReplyInboxTest.Api nativeApi = new NativeCommentReplyInboxTest.Api();
+        nativeApi.expectedGroup = 44;
+        NativeCommentReplyInboxTest.Notice oldNested = nestedNotice("old-f-notice", "old-f-id", "200", "101", 1000);
+        NativeCommentReplyInboxTest.Notice oldDetailed = detailedNotice("old-q-notice", "old-q-id", "201", "102", 1000);
+        nativeApi.pages.add(page(false, 0, 0, oldNested, oldDetailed));
+        NativeCommentReplyInbox inbox = useNativeInbox(nativeApi);
+
+        open();
+
+        assertEquals(1000, ledger().baseline(100));
+        assertEquals(List.of("old-f-id", "old-q-id"), inbox.baselineCommentIds());
+        assertTrue(ledger().contains(100, "old-f-id"));
+        assertTrue(ledger().contains(100, "old-q-id"));
+        assertTrue(generator.ids.isEmpty());
+        assertTrue(sender.sent.isEmpty());
+
+        NativeCommentReplyInboxTest.Notice sameNested = nestedNotice("new-f-same-notice", "new-f-same", "202", "110", 1000);
+        NativeCommentReplyInboxTest.Notice sameDetailed = detailedNotice("new-q-same-notice", "new-q-same", "203", "111", 1000);
+        NativeCommentReplyInboxTest.Notice laterNested = nestedNotice("new-f-later-notice", "new-f-later", "204", "120", 1001);
+        NativeCommentReplyInboxTest.Notice laterDetailed = detailedNotice("new-q-later-notice", "new-q-later", "205", "121", 1002);
+        nativeApi.pages.add(page(false, 0, 0, oldNested, oldDetailed, sameNested, sameDetailed, laterNested, laterDetailed));
+        hook.requestScan();
+        processReplies();
+
+        List<String> expected = List.of("new-f-same", "new-q-same", "new-f-later", "new-q-later");
+        assertEquals(expected, generator.ids);
+        assertEquals(expected, sender.sent);
+        assertEquals(4, history().size());
+        assertTrue(history().stream().allMatch(entry -> "sent".equals(entry.status)));
+
+        nativeApi.pages.add(page(false, 0, 0, oldNested, oldDetailed, sameNested, sameDetailed, laterNested, laterDetailed));
+        hook.requestScan();
+        pump();
+        assertTrue(((Map<?, ?>) HostTargets.read(hook, "tasks")).isEmpty());
+        assertEquals(expected, generator.ids);
+        assertEquals(expected, sender.sent);
+        assertEquals(4, history().size());
+        assertEquals(1002, ledger().watermark(100));
+    }
+
+    @Test public void directedParentlessNativeReplySendsItsNormalizedCloneOnceAndPreservesTheNotice() throws Exception {
+        NativeCommentReplyInboxTest.Api nativeApi = new NativeCommentReplyInboxTest.Api();
+        nativeApi.expectedGroup = 44;
+        NativeCommentReplyInboxTest.Notice existing = nestedNotice("existing-notice", "existing-id", "201", "102", 1000);
+        nativeApi.pages.add(page(false, 0, 0, existing));
+        useNativeInbox(nativeApi);
+        open();
+        assertEquals(1000, ledger().baseline(100));
+        assertTrue(sender.sent.isEmpty());
+
+        NativeCommentReplyInboxTest.Notice fresh = parentlessDirectedNotice("directed-notice", "402", "200", "101", 1001);
+        NativeCommentReplyInboxTest.Comment original = fresh.interactiveGeneralNoticeStruct.additionalInfo.comment.a;
+        nativeApi.pages.add(page(false, 0, 0, existing, fresh));
+        hook.requestScan();
+        processReplies();
+
+        assertEquals(List.of("402"), generator.ids);
+        assertEquals(List.of("402"), sender.sent);
+        assertEquals(1, sender.submittedEvents.size());
+        CommentReplyEvent submitted = sender.submittedEvents.get(0);
+        assertEquals("402", submitted.incomingId);
+        assertEquals("101", submitted.rootId);
+        assertEquals("own original", submitted.originalText);
+        assertNotSame(original, submitted.targetComment);
+        NativeCommentReplyInboxTest.Comment normalized = (NativeCommentReplyInboxTest.Comment) submitted.targetComment;
+        assertEquals("402", normalized.cid);
+        assertEquals("101", normalized.replyId);
+        assertEquals("0", normalized.replyToReplyId);
+        assertEquals("0", original.replyId);
+        assertEquals("", original.replyToReplyId);
+        assertSame(original, fresh.interactiveGeneralNoticeStruct.additionalInfo.comment.a);
+        assertEquals(1, history().size());
+        assertEquals("sent", history().get(0).status);
+
+        nativeApi.pages.add(page(false, 0, 0, existing, fresh));
+        hook.requestScan();
+        pump();
+        assertTrue(((Map<?, ?>) HostTargets.read(hook, "tasks")).isEmpty());
+        assertEquals(List.of("402"), generator.ids);
+        assertEquals(List.of("402"), sender.sent);
+        assertEquals(1, sender.submittedEvents.size());
+        assertEquals(1, history().size());
+        assertEquals("0", original.replyId);
+        assertEquals("", original.replyToReplyId);
+        assertSame(original, fresh.interactiveGeneralNoticeStruct.additionalInfo.comment.a);
+    }
+
+    @Test public void legacyModelWatermarkIsReplayedOnceWithoutReleasingPriorNativeSendClaims() throws Exception {
+        CommentReplyLedger prior = ledger();
+        assertTrue(prior.initialize(100, 1000, List.of("old-f-id", "old-q-id")));
+        android.content.SharedPreferences records = activity.getSharedPreferences("douai_comment_reply_ledger", Context.MODE_PRIVATE);
+        Map<String, String> protectedClaims = new HashMap<>();
+        for (String status : List.of("sent", "submitted", "unknown")) {
+            String id = "preserved-" + status;
+            assertTrue(prior.claim(100, id, "root-" + status, 0));
+            assertTrue(prior.submitted(100, id));
+            if (!"submitted".equals(status)) prior.finish(100, id, status);
+            String key = "incoming.100." + id;
+            protectedClaims.put(key, records.getString(key, null));
+        }
+        prior.advance(100, 10000);
+        assertTrue(records.edit().remove("inbox_model.100").commit());
+        assertEquals(10000, prior.watermark(100));
+
+        NativeCommentReplyInboxTest.Api nativeApi = new NativeCommentReplyInboxTest.Api();
+        nativeApi.expectedGroup = 44;
+        NativeCommentReplyInboxTest.Notice missedNested = nestedNotice("missed-f-notice", "missed-f-id", "200", "110", 1600);
+        NativeCommentReplyInboxTest.Notice missedDetailed = detailedNotice("missed-q-notice", "missed-q-id", "201", "111", 1700);
+        NativeCommentReplyInboxTest.Notice beforeBaseline = nestedNotice("before-baseline", "older-id", "202", "112", 999);
+        NativeCommentReplyInboxTest.Notice alreadySent = nestedNotice("sent-notice", "preserved-sent", "203", "root-sent", 1500);
+        NativeCommentReplyInboxTest.Notice alreadySubmitted = detailedNotice("submitted-notice", "preserved-submitted", "204", "root-submitted", 1501);
+        NativeCommentReplyInboxTest.Notice unknown = nestedNotice("unknown-notice", "preserved-unknown", "205", "root-unknown", 1502);
+        nativeApi.pages.add(page(false, 0, 0, missedNested, missedDetailed, beforeBaseline, alreadySent, alreadySubmitted, unknown));
+        useNativeInbox(nativeApi);
+
+        open();
+
+        assertEquals("The upgraded model must replay from the original server baseline", 1000, ledger().watermark(100));
+        assertEquals(1000, ledger().baseline(100));
+        assertEquals(CommentReplyLedger.INBOX_MODEL_VERSION, records.getInt("inbox_model.100", 0));
+        processReplies();
+        assertEquals(List.of("missed-f-id", "missed-q-id"), generator.ids);
+        assertEquals(List.of("missed-f-id", "missed-q-id"), sender.sent);
+        assertFalse(ledger().contains(100, "older-id"));
+        assertTrue(ledger().contains(100, "old-f-id"));
+        assertTrue(ledger().contains(100, "old-q-id"));
+        assertEquals(2, history().size());
+        for (Map.Entry<String, String> entry : protectedClaims.entrySet()) {
+            assertEquals(entry.getValue(), records.getString(entry.getKey(), null));
+        }
+        for (String status : List.of("sent", "submitted", "unknown")) {
+            assertFalse(ledger().retryable(100, "preserved-" + status));
+        }
+
+        nativeApi.pages.add(page(false, 0, 0, missedNested, missedDetailed, beforeBaseline, alreadySent, alreadySubmitted, unknown));
+        hook.requestScan();
+        pump();
+        assertTrue(((Map<?, ?>) HostTargets.read(hook, "tasks")).isEmpty());
+        assertEquals(List.of("missed-f-id", "missed-q-id"), sender.sent);
+        assertEquals(1700, ledger().watermark(100));
+
+        nativeApi.pages.add(page(false, 0, 0));
+        hook.requestScan();
+        pump();
+        assertEquals("The current schema must not rewind a later successful scan again", 1700, ledger().watermark(100));
+        assertEquals(1000, ledger().baseline(100));
+        assertEquals(CommentReplyLedger.INBOX_MODEL_VERSION, records.getInt("inbox_model.100", 0));
+        assertEquals(List.of("missed-f-id", "missed-q-id"), generator.ids);
+        assertEquals(List.of("missed-f-id", "missed-q-id"), sender.sent);
+        assertEquals(2, history().size());
+    }
+
+    @Test public void emptyAndZeroMinNativePagesEstablishBaselineWithoutLosingNewSameSecondReplies() throws Exception {
+        NativeCommentReplyInboxTest.Api nativeApi = new NativeCommentReplyInboxTest.Api();
+        NativeCommentReplyInboxTest.Notice oldHead = notice("old-head", "old-head-id", "200", "101", 1000);
+        NativeCommentReplyInboxTest.Notice oldMiddle = notice("old-middle", "old-middle-id", "201", "101", 1000);
+        NativeCommentReplyInboxTest.Notice oldTail = notice("old-tail", "old-tail-id", "202", "101", 1000);
+        nativeApi.pages.add(page(true, 0, 0));
+        nativeApi.pages.add(page(true, 230, 0, oldHead));
+        nativeApi.pages.add(page(true, 230, 0, oldMiddle));
+        nativeApi.pages.add(page(false, 230, 0, oldTail));
+        NativeCommentReplyInbox inbox = useNativeInbox(nativeApi);
+
+        open();
+
+        assertTrue("Transient empty pages and an absent min cursor must not leave the account uninitialized",
+                ledger().initialized(100));
+        assertEquals(1000, ledger().baseline(100));
+        assertEquals(List.of("old-head-id", "old-middle-id", "old-tail-id"), inbox.baselineCommentIds());
+        for (String id : inbox.baselineCommentIds()) assertTrue(ledger().contains(100, id));
+        assertEquals(4, nativeApi.calls.size());
+        assertEquals(0L, nativeApi.calls.get(1)[0]);
+        assertEquals(0L, nativeApi.calls.get(1)[1]);
+        assertEquals(230L, nativeApi.calls.get(3)[0]);
+        assertEquals(0L, nativeApi.calls.get(3)[1]);
+        assertTrue(generator.ids.isEmpty());
+        assertTrue(sender.sent.isEmpty());
+
+        NativeCommentReplyInboxTest.Notice sameSecond = notice("same-second-new", "same-second-new-id", "203", "101", 1000);
+        NativeCommentReplyInboxTest.Notice later = notice("later-new", "later-new-id", "204", "101", 1001);
+        nativeApi.pages.add(page(true, 0, 0));
+        nativeApi.pages.add(page(true, 240, 0, sameSecond, later, oldHead));
+        nativeApi.pages.add(page(true, 240, 0, oldMiddle));
+        nativeApi.pages.add(page(false, 240, 0, oldTail));
+        hook.requestScan();
+        processReplies();
+
+        assertEquals(List.of("same-second-new-id", "later-new-id"), generator.ids);
+        assertEquals(List.of("same-second-new-id", "later-new-id"), sender.sent);
+        assertEquals(1001, inbox.scannedThrough());
+        assertEquals(2, history().size());
+        assertTrue(history().stream().allMatch(entry -> "sent".equals(entry.status)));
+
+        nativeApi.pages.add(page(false, 0, 0, oldHead, oldMiddle, oldTail, sameSecond, later));
+        hook.requestScan();
+        processReplies();
+        assertEquals(List.of("same-second-new-id", "later-new-id"), generator.ids);
+        assertEquals(List.of("same-second-new-id", "later-new-id"), sender.sent);
+        assertEquals(2, history().size());
+    }
+
+    @Test public void stalledNativeBaselineStaysUninitializedAndTheNextCompleteReadRecovers() throws Exception {
+        NativeCommentReplyInboxTest.Api nativeApi = new NativeCommentReplyInboxTest.Api();
+        for (int index = 0; index < 3; index++) nativeApi.pages.add(page(true, 0, 0));
+        NativeCommentReplyInbox inbox = useNativeInbox(nativeApi);
+
+        open();
+
+        assertEquals("A stalled read must stop after its bounded retries", 3, nativeApi.calls.size());
+        assertFalse(ledger().initialized(100));
+        assertEquals(0, ledger().baseline(100));
+        assertTrue(inbox.baselineCommentIds().isEmpty());
+        assertEquals("扫描暂未完成，稍后重试", hook.diagnostic());
+        assertTrue(generator.ids.isEmpty());
+        assertTrue(sender.sent.isEmpty());
+        assertTrue(history().isEmpty());
+
+        NativeCommentReplyInboxTest.Notice existing = notice("recovered-old", "recovered-old-id", "200", "101", 1000);
+        nativeApi.pages.add(page(false, 0, 0, existing));
+        hook.requestScan();
+        pump();
+        assertTrue(ledger().initialized(100));
+        assertEquals(1000, ledger().baseline(100));
+        assertTrue(ledger().contains(100, "recovered-old-id"));
+        assertTrue(generator.ids.isEmpty());
+        assertTrue(sender.sent.isEmpty());
+
+        NativeCommentReplyInboxTest.Notice fresh = notice("recovered-new", "recovered-new-id", "201", "101", 1001);
+        nativeApi.pages.add(page(false, 0, 0, existing, fresh));
+        hook.requestScan();
+        processReplies();
+        assertEquals(List.of("recovered-new-id"), generator.ids);
+        assertEquals(List.of("recovered-new-id"), sender.sent);
+        assertEquals("sent", history().get(0).status);
     }
 
     @Test public void realtimeSignalsCoalesceAndInternalActivityTransitionsDoNotRescanTheInbox() {
@@ -248,6 +669,34 @@ public final class CommentReplyHookTest {
         pump();
         assertEquals(1400, ledger().watermark(100));
         assertEquals(List.of(1000L, 1000L), source.since);
+    }
+
+    @Test public void aScanFailureLogsASafeReasonWithoutHostPayload() {
+        List<String> diagnostics = new ArrayList<>();
+        hook.close();
+        createHook(source, diagnostics::add);
+        open();
+        source.through = 1400;
+        source.scanFailure = new NativeCommentReplyInbox.ScanFailure(
+                NativeCommentReplyInbox.FailureReason.PAGINATION_NO_PROGRESS,
+                new IllegalStateException("uid=998877; token=fixture-host-token; reply=private-comment-text"));
+
+        hook.requestScan();
+        pump();
+
+        assertEquals(1000, ledger().watermark(100));
+        assertEquals("扫描暂未完成，稍后重试", hook.diagnostic());
+        assertEquals(1, diagnostics.size());
+        String failure = diagnostics.get(0);
+        assertTrue(failure.contains("Comment reply scan failed:"));
+        assertTrue(failure.contains("reason=pagination_no_progress"));
+        assertTrue(failure.contains("type=ScanFailure"));
+        assertTrue(failure.contains("cause=IllegalStateException"));
+        assertFalse(failure.contains("998877"));
+        assertFalse(failure.contains("fixture-host-token"));
+        assertFalse(failure.contains("private-comment-text"));
+        assertTrue(generator.ids.isEmpty());
+        assertTrue(sender.sent.isEmpty());
     }
 
     @Test public void aLateSuccessResolvesUnknownHistoryWithoutAnotherNativeSubmission() {
@@ -835,6 +1284,134 @@ public final class CommentReplyHookTest {
         assertEquals(2, failed.requestImageCount);
     }
 
+    @Test public void aMediaFailureRecordsItsStageBeforeAnyModelRequestWithoutLeakingPayload() throws Exception {
+        List<String> diagnostics = new ArrayList<>();
+        hook.close();
+        createHook(source, diagnostics::add);
+        useMediaLoader((context, event, options, cancellation) -> {
+            throw privateGenerationFailure();
+        });
+        open();
+        source.events.put(100L, List.of(imageEvent("media-diagnostic", "说明", 1001)));
+
+        hook.requestScan();
+        processReplies();
+
+        assertTrue(generator.ids.isEmpty());
+        assertTrue(sender.sent.isEmpty());
+        AutomationHistoryStore.Entry failed = history().get(0);
+        assertEquals("failed", failed.status);
+        assertFalse(failed.modelRequestSent);
+        assertEquals("", failed.output);
+        assertGenerationFailureDiagnostics(diagnostics, "media", false, false, 0);
+    }
+
+    @Test public void aModelFailureRecordsThatARequestWasSentButNoReplyWasGenerated() throws Exception {
+        List<String> diagnostics = new ArrayList<>();
+        hook.close();
+        createHook(source, diagnostics::add);
+        generator.failureAfterRequest = privateGenerationFailure();
+        useMediaLoader((context, event, options, cancellation) -> List.of(testImage()));
+        open();
+        source.events.put(100L, List.of(imageEvent("model-diagnostic", "说明", 1001)));
+
+        hook.requestScan();
+        processReplies();
+
+        assertEquals(List.of("model-diagnostic"), generator.ids);
+        assertTrue(sender.sent.isEmpty());
+        AutomationHistoryStore.Entry failed = history().get(0);
+        assertEquals("failed", failed.status);
+        assertTrue(failed.modelRequestSent);
+        assertEquals(1, failed.requestImageCount);
+        assertEquals("", failed.output);
+        assertGenerationFailureDiagnostics(diagnostics, "model", true, false, 0);
+    }
+
+    @Test public void aSpeechFailureRecordsGeneratedTextWithoutClaimingANativeSubmission() throws Exception {
+        List<String> diagnostics = new ArrayList<>();
+        configure(LocalOptions.REPLY_VOICE, true);
+        hook.close();
+        createHook(source, diagnostics::add);
+        HostTargets.field(CommentReplyHook.class, "speechPreparer").set(hook, (SpeechPreparation.Preparer)
+                (context, text, options, maximum, valid) -> { throw privateGenerationFailure(); });
+        open();
+        source.events.put(100L, List.of(event("speech-diagnostic", "root", "200", 1001)));
+
+        hook.requestScan();
+        processReplies();
+
+        assertEquals(List.of("speech-diagnostic"), generator.ids);
+        assertTrue(sender.sent.isEmpty());
+        AutomationHistoryStore.Entry failed = history().get(0);
+        assertEquals("failed", failed.status);
+        assertTrue(failed.modelRequestSent);
+        assertEquals("AI 正文 speech-diagnostic", failed.output);
+        assertEquals("model-fixture", failed.modelName);
+        assertGenerationFailureDiagnostics(diagnostics, "speech", true, true, failed.output.length());
+    }
+
+    @Test public void incompleteWorkVideoMetadataNeverBlocksTextCommentGenerationOrSending() throws Exception {
+        List<String> diagnostics = new ArrayList<>();
+        values.put(LocalOptions.REPLY_RECOGNIZE_IMAGES, true);
+        values.put(LocalOptions.REPLY_RECOGNIZE_VIDEO, true);
+        hook.close();
+        createHook(source, diagnostics::add);
+        open();
+        IncompleteVideoWork work = new IncompleteVideoWork();
+        Object target = new Object();
+        source.events.put(100L, List.of(new CommentReplyEvent("notice-sparse-video", "work", "sparse-video", "root",
+                "200", "对方", "来评", "我的原评论", 1001, work, target)));
+
+        hook.requestScan();
+        processReplies();
+
+        assertEquals(List.of("sparse-video"), generator.ids);
+        assertEquals(List.of("sparse-video"), sender.sent);
+        assertTrue(generator.generatedImages.get(0).isEmpty());
+        assertTrue(generator.prompts.get(0).contains("我的原评论：我的原评论"));
+        assertTrue(generator.prompts.get(0).contains("对方的回复：来评"));
+        assertFalse(generator.prompts.get(0).contains("作品："));
+        assertEquals("Reply generation must never inspect the original work description", 0, work.descriptionReads);
+        assertEquals("Reply generation must never inspect the original work's media", 0, work.mediaReads);
+        assertSame(work, sender.submittedEvents.get(0).work);
+        assertSame(target, sender.submittedEvents.get(0).targetComment);
+        assertEquals("sent", history().get(0).status);
+        assertTrue(history().get(0).modelRequestSent);
+        assertFalse(diagnostics.stream().anyMatch(value -> value.startsWith("Comment reply generation failed:")));
+    }
+
+    public static final class IncompleteVideoWork {
+        int descriptionReads, mediaReads;
+        public Object video = new Object();
+        public String getDesc() { descriptionReads++; return "必须忽略的原作品描述"; }
+        public Object getVideo() { mediaReads++; return video; }
+        public List<Object> getImages() { mediaReads++; return Collections.emptyList(); }
+    }
+
+    private static IllegalArgumentException privateGenerationFailure() {
+        return new IllegalArgumentException("uid=998877; token=fixture-generation-token; reply=private-generation-text",
+                new IllegalStateException("https://private-generation.example/api?key=fixture-generation-key"));
+    }
+
+    private static void assertGenerationFailureDiagnostics(List<String> diagnostics, String stage,
+                                                           boolean aiSent, boolean generated, int chars) {
+        List<String> failures = diagnostics.stream()
+                .filter(message -> message.startsWith("Comment reply generation failed:")).toList();
+        assertEquals("Each failed generation must have one safe diagnostic", 1, failures.size());
+        String failure = failures.get(0);
+        assertTrue(failure, failure.contains("IllegalArgumentException"));
+        assertTrue(failure, failure.contains("stage=" + stage));
+        assertTrue(failure, failure.contains("ai_sent=" + (aiSent ? 1 : 0)));
+        assertTrue(failure, failure.contains("generated=" + (generated ? 1 : 0)));
+        assertTrue(failure, failure.contains("submitted=0"));
+        assertTrue(failure, failure.contains("chars=" + chars));
+        for (String secret : List.of("998877", "fixture-generation-token", "private-generation-text",
+                "private-generation.example", "fixture-generation-key", "AI 正文")) {
+            assertFalse("Diagnostics must not include payload: " + failure, failure.contains(secret));
+        }
+    }
+
     @Test public void changingTheImageFlagDisconnectsABlockedMediaRead() throws Exception { assertBlockedMediaCancelled("images"); }
     @Test public void changingTheVideoFlagDisconnectsABlockedMediaRead() throws Exception { assertBlockedMediaCancelled("video"); }
     @Test public void leavingTheForegroundDisconnectsABlockedMediaRead() throws Exception { assertBlockedMediaCancelled("background"); }
@@ -908,11 +1485,45 @@ public final class CommentReplyHookTest {
         public List<String> url_list = List.of("https://p.byteimg.com/comment.png");
     }
 
+    private NativeCommentReplyInbox useNativeInbox(NativeCommentReplyInboxTest.Api nativeApi) throws Exception {
+        return useNativeInbox(nativeApi, null);
+    }
+
+    private NativeCommentReplyInbox useNativeInbox(NativeCommentReplyInboxTest.Api nativeApi,
+                                                  NativeCommentReplyInbox.ThreadLookup threadLookup) throws Exception {
+        NativeCommentReplyInboxTest.Provider.b = nativeApi;
+        NativeCommentReplyInboxTest.AccountFactory.service = new NativeCommentReplyInboxTest.Account();
+        NativeCommentReplyInboxTest.AccountFactory.service.user = new NativeCommentReplyInboxTest.User("100");
+        NativeCommentReplyInbox inbox = new NativeCommentReplyInbox(report(), getClass().getClassLoader(), ignored -> { }, threadLookup);
+        hook.close();
+        createHook(new CommentReplyHook.Source() {
+            @Override public long baseline(long account, BooleanSupplier valid) throws Exception {
+                return inbox.baseline(account, valid);
+            }
+            @Override public List<String> baselineIds() { return inbox.baselineCommentIds(); }
+            @Override public long scannedThrough() { return inbox.scannedThrough(); }
+            @Override public long watermarkCeiling() { return inbox.scannedThrough(); }
+            @Override public List<CommentReplyEvent> scan(long account, long since, BooleanSupplier valid) throws Exception {
+                return inbox.scan(account, since, valid);
+            }
+            @Override public void close() { inbox.close(); }
+        });
+        return inbox;
+    }
+
     private void createHook() {
+        createHook(source);
+    }
+
+    private void createHook(CommentReplyHook.Source replySource) {
+        createHook(replySource, ignored -> { });
+    }
+
+    private void createHook(CommentReplyHook.Source replySource, Consumer<String> diagnostics) {
         scanner = new ManualExecutor();
         generatorWorker = new ManualExecutor();
-        hook = new CommentReplyHook(activity, new LocalOptions(values), dispatcher, source, sender, generator,
-                account::get, scanner, generatorWorker, ignored -> { });
+        hook = new CommentReplyHook(activity, new LocalOptions(values), dispatcher, replySource, sender, generator,
+                account::get, scanner, generatorWorker, diagnostics);
     }
 
     private void configure(String key, Object value) {
@@ -968,6 +1579,7 @@ public final class CommentReplyHookTest {
         List<String> baselineIds = Collections.emptyList();
         long through;
         boolean failScan;
+        Exception scanFailure;
         Runnable duringScan;
         @Override public long baseline(long account, BooleanSupplier valid) {
             assertTrue(valid.getAsBoolean());
@@ -983,6 +1595,7 @@ public final class CommentReplyHookTest {
             Runnable interruptedScan = duringScan;
             duringScan = null;
             if (interruptedScan != null) interruptedScan.run();
+            if (scanFailure != null) throw scanFailure;
             if (failScan) throw new java.io.IOException("fixture failure");
             return new ArrayList<>(events.getOrDefault(account, Collections.emptyList()));
         }
@@ -990,6 +1603,7 @@ public final class CommentReplyHookTest {
 
     private static final class FakeSender implements CommentReplyHook.Sender {
         final List<String> sent = new ArrayList<>();
+        final List<CommentReplyEvent> submittedEvents = new ArrayList<>();
         final List<SpeechPreparation.Audio> audios = new ArrayList<>();
         final List<Consumer<String>> callbacks = new ArrayList<>();
         final List<BooleanSupplier> boundaries = new ArrayList<>();
@@ -1007,6 +1621,7 @@ public final class CommentReplyHookTest {
             Runnable submit = () -> {
                 if (!valid.getAsBoolean() || !beforeSend.getAsBoolean()) { result.accept("cancelled"); return; }
                 sent.add(event.incomingId);
+                submittedEvents.add(event);
                 audios.add(audio);
                 callbacks.add(result);
                 if (!omitAccepted) accepted.run();
@@ -1025,12 +1640,14 @@ public final class CommentReplyHookTest {
         Runnable duringGenerate;
         int cancels;
         boolean failAfterRequest;
+        Exception failureAfterRequest;
         @Override public CommentReplyHook.Generated generate(long account, CommentReplyEvent event, LocalOptions options,
                 List<ChatImage> images, String prompt, java.util.function.IntConsumer sent) throws Exception {
             generatedImages.add(images);
             prompts.add(prompt);
             if ("ai".equals(options.text("reply_mode", "fixed"))) sent.accept(images.size());
             CommentReplyHook.Generated result = generate(account, event, options);
+            if (failureAfterRequest != null) throw failureAfterRequest;
             if (failAfterRequest) throw new java.io.IOException("fixture failure after request was sent");
             return result;
         }

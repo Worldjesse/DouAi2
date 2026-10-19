@@ -367,6 +367,32 @@ public final class HostUiControllerTest {
         }
     }
 
+    @Test public void hostSettingsFactoryForwardsAnalyticsDiagnosticsToTheHostLogger() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        java.util.List<String> logs = new java.util.ArrayList<>();
+        HostUiController controller = new HostUiController(RuntimeEnvironment.getApplication(), logs::add);
+        ModuleSettingsScreen screen = controller.createSettingsScreen(activity, () -> { });
+        try {
+            View settings = screen.createView(); activity.setContentView(settings);
+            settings.findViewWithTag("settings.category.EXTENSION").performClick();
+            Dialog extension = ShadowDialog.getLatestDialog();
+            extension.getWindow().getDecorView().findViewWithTag("settings.option.本地数据分析").performClick();
+            idleMainLooper();
+            Dialog analytics = ShadowDialog.getLatestDialog();
+            assertTrue(analytics.isShowing());
+            assertNotNull(analytics.getWindow().getDecorView().findViewWithTag("analytics.root"));
+            assertTrue("The same logger used by the LSPosed host entry must receive analysis diagnostics",
+                    logs.contains("[analytics] stage=ui_open kind=NONE status=0 chars=0"));
+            for (String value : logs) if (value.startsWith("[analytics]")) {
+                assertFalse(value.contains("http://")); assertFalse(value.contains("https://"));
+                assertFalse(value.contains("apiKey")); assertFalse(value.contains("request-body"));
+            }
+            screen.close(); assertFalse(analytics.isShowing());
+        } finally {
+            screen.close(); controller.close(); activity.finish(); idleMainLooper();
+        }
+    }
+
     @Test
     public void firstScanDialogStillAppearsWithoutAnySettingsOverlay() throws Exception {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();

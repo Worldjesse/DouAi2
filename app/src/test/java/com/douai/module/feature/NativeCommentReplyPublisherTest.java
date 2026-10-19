@@ -74,6 +74,205 @@ public final class NativeCommentReplyPublisherTest {
         assertFalse(publisher.ownsPublish(model));
     }
 
+    @Test public void legacyTargetsWithoutARepeatedWorkIdStillFailBeforeNativeSubmission() {
+        for (String missingAid : new String[]{null, ""}) {
+            CommentReplyEvent event = event("incoming", "root");
+            assertFalse(event.nativeWorkBound);
+            ((Comment) event.targetComment).awemeId = missingAid;
+            List<String> outcomes = new ArrayList<>();
+            publisher.sendReply(event, "正文", () -> true,
+                    () -> { fail("A legacy target without its work ID cannot reserve a send"); return true; },
+                    () -> fail("A legacy target without its work ID cannot be accepted"), outcomes::add);
+            ShadowLooper.idleMainLooper();
+            assertEquals(Collections.singletonList("failed"), outcomes);
+        }
+        assertTrue(Request.models.isEmpty());
+    }
+
+    @Test public void nativeWorkBoundTargetsWithoutARepeatedWorkIdUseCapturedWorkAndRequireAnExactAck() throws Throwable {
+        int index = 0;
+        for (String missingAid : new String[]{null, ""}) {
+            CommentReplyEvent event = nativeWorkBoundEvent("incoming-" + index, "root");
+            ((Comment) event.targetComment).awemeId = missingAid;
+            List<String> outcomes = new ArrayList<>();
+            AtomicInteger accepted = new AtomicInteger();
+            publisher.sendReply(event, "正文", () -> true, () -> true, accepted::incrementAndGet, outcomes::add);
+            ShadowLooper.idleMainLooper();
+            assertEquals("The verified native work binding must permit a missing repeated target work ID", 1, accepted.get());
+            assertTrue(outcomes.isEmpty());
+            Model model = Request.models.get(index);
+            assertSame(event.targetComment, model.p);
+            assertSame(event.work, model.y.work);
+            assertEquals(missingAid, ((Comment) event.targetComment).awemeId);
+            complete(index, response("work", "root", event.incomingId));
+            assertEquals(Collections.singletonList("sent"), outcomes);
+            index++;
+        }
+        CommentReplyEvent wrongAck = nativeWorkBoundEvent("incoming-wrong-ack", "root");
+        List<String> outcomes = new ArrayList<>();
+        AtomicInteger accepted = new AtomicInteger();
+        publisher.sendReply(wrongAck, "正文", () -> true, () -> true, accepted::incrementAndGet, outcomes::add);
+        ShadowLooper.idleMainLooper();
+        assertEquals(1, accepted.get());
+        assertTrue(outcomes.isEmpty());
+        complete(index, response("work", "root", "different-incoming"));
+        assertEquals(Collections.singletonList("submitted"), outcomes);
+    }
+
+    @Test public void aStrictlyConvertedParentlessInboxReplyPublishesItsPrivateTargetAndChecksTheExactAck() throws Throwable {
+        try (NativeCommentReplyInbox inbox = new NativeCommentReplyInbox(NativeCommentReplyInboxTest.report(),
+                getClass().getClassLoader(), ignored -> { })) {
+            int index = 0;
+            for (boolean exactAck : new boolean[]{true, false}) {
+                String incomingId = "directed-incoming-" + index;
+                NativeCommentReplyInboxTest.Notice notice = NativeCommentReplyInboxTest.parentlessDirectedNotice(
+                        "directed-notice-" + index, incomingId, "200", "101", 210);
+                notice.interactiveGeneralNoticeStruct.aweme = new Work();
+                NativeCommentReplyInboxTest.ReplyDetail detail = notice.interactiveGeneralNoticeStruct.additionalInfo.comment;
+                detail.d = false;
+                detail.f = "unrelated-ui-metadata";
+                NativeCommentReplyInboxTest.Comment raw = detail.a;
+                raw.awemeId = null;
+
+                CommentReplyEvent event = inbox.extract(notice, 100);
+
+                assertNotNull(event);
+                assertTrue(event.nativeWorkBound);
+                assertEquals(incomingId, event.incomingId);
+                assertEquals("101", event.rootId);
+                assertNotSame(raw, event.targetComment);
+                NativeCommentReplyInboxTest.Comment captured = (NativeCommentReplyInboxTest.Comment) event.targetComment;
+                assertEquals(incomingId, captured.cid);
+                assertEquals("101", captured.replyId);
+                assertEquals("0", captured.replyToReplyId);
+                assertNull(captured.awemeId);
+                assertSame(raw, detail.a);
+                assertEquals("0", raw.replyId);
+                assertEquals("", raw.replyToReplyId);
+
+                List<String> outcomes = new ArrayList<>();
+                AtomicInteger accepted = new AtomicInteger();
+                publisher.sendReply(event, "正文", () -> true, () -> true, accepted::incrementAndGet, outcomes::add);
+                ShadowLooper.idleMainLooper();
+
+                assertEquals(1, accepted.get());
+                assertTrue(outcomes.isEmpty());
+                Model model = Request.models.get(index);
+                assertSame(captured, model.p);
+                assertSame(event.work, model.y.work);
+                assertEquals("101", model.p.replyId);
+                assertEquals("0", model.p.replyToReplyId);
+                assertEquals(incomingId, model.p.cid);
+                assertEquals("0", raw.replyId);
+                assertEquals("", raw.replyToReplyId);
+                complete(index, response("work", "101", exactAck ? incomingId : "different-incoming"));
+                assertEquals(Collections.singletonList(exactAck ? "sent" : "submitted"), outcomes);
+                index++;
+            }
+            assertEquals(2, Request.models.size());
+        }
+    }
+
+    @Test public void realThreadLookupRecoveredInboxEventsKeepTheServerTargetAndRequireExactPublishAcks() throws Throwable {
+        NativeCommentReplyInboxTest.FakeGroupResolver.group = 44;
+        NativeCommentReplyInboxTest.FakeGroupResolver.failure = null;
+        NativeCommentReplyInboxTest.AccountFactory.service = new NativeCommentReplyInboxTest.Account();
+        NativeCommentReplyInboxTest.AccountFactory.service.user = new NativeCommentReplyInboxTest.User("100");
+        for (int index = 0; index < 2; index++) {
+            String incomingId = "thread-publish-" + index;
+            NativeCommentThreadLookupTest.LookupHarness host = NativeCommentThreadLookupTest.harness("101", incomingId, 900);
+            host.incoming.replyToReplyId = "101";
+            NativeCommentReplyInboxTest.Notice sparse = NativeCommentReplyInboxTest.sparseNotice(
+                    "thread-notice-" + index, incomingId, "200", 2000);
+            NativeCommentReplyInboxTest.Comment raw = sparse.interactiveGeneralNoticeStruct.additionalInfo.comment.a;
+            raw.awemeId = null;
+            NativeCommentReplyInboxTest.Api api = new NativeCommentReplyInboxTest.Api();
+            NativeCommentReplyInboxTest.Provider.b = api;
+            api.pages.add(NativeCommentReplyInboxTest.page(false, 0, 0, sparse));
+            try (NativeCommentReplyInbox inbox = new NativeCommentReplyInbox(NativeCommentReplyInboxTest.report(),
+                    getClass().getClassLoader(), ignored -> { }, host.lookup)) {
+                List<CommentReplyEvent> events = inbox.scan(100, 1000, () -> true);
+                assertEquals(1, events.size());
+                CommentReplyEvent event = events.get(0);
+                assertSame(host.incoming, event.targetComment);
+                assertSame(host.work, event.work);
+                assertTrue(event.nativeWorkBound);
+                assertEquals("101", event.rootId);
+                assertEquals(2000, event.createdAt);
+                assertNotSame(raw, event.targetComment);
+                assertEquals("0", raw.replyId);
+                assertEquals("", raw.replyToReplyId);
+                assertNull(raw.awemeId);
+
+                AtomicInteger accepted = new AtomicInteger();
+                List<String> outcomes = new ArrayList<>();
+                publisher.sendReply(event, "正文", () -> true, () -> true, accepted::incrementAndGet, outcomes::add);
+                ShadowLooper.idleMainLooper();
+
+                assertEquals(1, accepted.get());
+                assertTrue(outcomes.isEmpty());
+                Model model = Request.models.get(index);
+                assertSame("Publishing must use the complete raw server comment, without reconstructing it", host.incoming, model.p);
+                assertSame(host.work, model.y.work);
+                assertEquals(incomingId, model.p.cid);
+                assertEquals("101", model.p.replyId);
+                assertEquals("101", model.p.replyToReplyId);
+                assertEquals("0", raw.replyId);
+                assertEquals("", raw.replyToReplyId);
+                assertNull(raw.awemeId);
+                complete(index, response("work", "101", index == 0 ? incomingId : "unrelated-incoming"));
+                assertEquals(Collections.singletonList(index == 0 ? "sent" : "submitted"), outcomes);
+            }
+        }
+        assertEquals(2, Request.models.size());
+    }
+
+    @Test public void nativeWorkBindingCannotOverrideConflictingOrChangedWorkCommentAndRootIdentity() {
+        List<CommentReplyEvent> events = new ArrayList<>();
+        CommentReplyEvent conflictingAid = nativeWorkBoundEvent("incoming", "root");
+        ((Comment) conflictingAid.targetComment).awemeId = "another-work";
+        events.add(conflictingAid);
+        CommentReplyEvent changedWork = nativeWorkBoundEvent("incoming", "root");
+        ((Work) changedWork.work).aid = "another-work";
+        events.add(changedWork);
+        CommentReplyEvent changedComment = nativeWorkBoundEvent("incoming", "root");
+        ((Comment) changedComment.targetComment).cid = "another-comment";
+        events.add(changedComment);
+        CommentReplyEvent changedRoot = nativeWorkBoundEvent("incoming", "root");
+        ((Comment) changedRoot.targetComment).replyId = "another-root";
+        events.add(changedRoot);
+        events.add(new CommentReplyEvent("notice", "work", "incoming", "root", "2", "对方", "回复", "原评",
+                1000, new Work(), new Object(), true));
+        for (CommentReplyEvent event : events) {
+            List<String> outcomes = new ArrayList<>();
+            publisher.sendReply(event, "正文", () -> true,
+                    () -> { fail("Changed identity cannot reserve a native send"); return true; },
+                    () -> fail("Changed identity cannot be accepted"), outcomes::add);
+            ShadowLooper.idleMainLooper();
+            assertEquals(Collections.singletonList("failed"), outcomes);
+        }
+        assertTrue(Request.models.isEmpty());
+    }
+
+    @Test public void nativeWorkBoundIdentityIsRecheckedAfterTheNativeReservation() {
+        for (String change : new String[]{"work", "comment", "root"}) {
+            CommentReplyEvent event = nativeWorkBoundEvent("incoming", "root");
+            List<String> outcomes = new ArrayList<>();
+            AtomicInteger reservations = new AtomicInteger();
+            publisher.sendReply(event, "正文", () -> true, () -> {
+                reservations.incrementAndGet();
+                if ("work".equals(change)) ((Work) event.work).aid = "changed-work";
+                if ("comment".equals(change)) ((Comment) event.targetComment).cid = "changed-comment";
+                if ("root".equals(change)) ((Comment) event.targetComment).replyId = "changed-root";
+                return true;
+            }, () -> fail("Identity changed during reservation cannot be accepted"), outcomes::add);
+            ShadowLooper.idleMainLooper();
+            assertEquals("The initially verified native target should reach reservation", 1, reservations.get());
+            assertEquals(Collections.singletonList("failed"), outcomes);
+        }
+        assertTrue(Request.models.isEmpty());
+    }
+
     @Test public void voiceAttachmentAndCapturedNestedReplyTargetCoexistAndCallbackStillChecksTheTarget() throws Throwable {
         SpeechPreparation.Audio audio = audio();
         CommentReplyEvent event = event("incoming", "root");
@@ -236,6 +435,14 @@ public final class NativeCommentReplyPublisherTest {
                 1000, new Work(), target);
     }
 
+    private static CommentReplyEvent nativeWorkBoundEvent(String incoming, String root) {
+        Comment target = new Comment();
+        target.cid = incoming;
+        target.replyId = incoming.equals(root) ? "0" : root;
+        return new CommentReplyEvent("notice-" + incoming, "work", incoming, root, "2", "对方", "收到回复", "我的原评论",
+                1000, new Work(), target, true);
+    }
+
     private static Response response(String aid, String root, String incoming) {
         Response response = new Response();
         response.comment.awemeId = aid;
@@ -244,17 +451,25 @@ public final class NativeCommentReplyPublisherTest {
         return response;
     }
 
-    public static final class Work { public String aid = "work"; public String getAid() { return aid; } }
-    public static final class Comment {
-        public String cid = "published", awemeId, replyId, replyToReplyId;
+    public static final class Work extends NativeCommentReplyInboxTest.Work {
+        public String getAid() { return aid; }
+    }
+    public static final class Comment extends NativeCommentReplyInboxTest.Comment {
+        public Comment() { cid = "published"; }
     }
     public static final class Response { public int status_code; public Comment comment = new Comment(); }
-    public static final class State { public Work work; }
+    public static final class State { public NativeCommentReplyInboxTest.Work work; }
     public static final class Resolver {
-        public static State context(Work work) { State state = new State(); state.work = work; return state; }
-        public static Work work(State state) { return state.work; }
+        public static State context(NativeCommentReplyInboxTest.Work work) { State state = new State(); state.work = work; return state; }
+        public static NativeCommentReplyInboxTest.Work work(State state) { return state.work; }
     }
-    public static final class Model { public String a, n; public State y; public Attachment A; public Comment p; public List<?> d; }
+    public static final class Model {
+        public String a, n;
+        public State y;
+        public Attachment A;
+        public NativeCommentReplyInboxTest.Comment p;
+        public List<?> d;
+    }
     public static final class Attachment { public Audio audio; public CharSequence text; }
     public static final class Audio {
         public final File localFile;
@@ -288,7 +503,7 @@ public final class NativeCommentReplyPublisherTest {
     private static HostScanReport report() throws Exception {
         List<RuleScanResult> rules = new ArrayList<>();
         add(rules, "portrait_comment_aweme_resolver", Resolver.class.getMethod("work", State.class));
-        add(rules, "auto_comment_work_context", Resolver.class.getMethod("context", Work.class));
+        add(rules, "auto_comment_work_context", Resolver.class.getMethod("context", NativeCommentReplyInboxTest.Work.class));
         add(rules, "auto_comment_checked_request", Request.class.getMethod("checked", Model.class));
         add(rules, "auto_comment_publish_success", Request.class.getMethod("success", Response.class));
         add(rules, "auto_comment_publish_failure", Request.class.getMethod("failed", Exception.class));

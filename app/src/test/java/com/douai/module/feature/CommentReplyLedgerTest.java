@@ -14,7 +14,9 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -50,6 +52,192 @@ public final class CommentReplyLedgerTest {
         assertEquals(2000, restarted.watermark(100));
         assertFalse(restarted.initialized(101));
         assertEquals(0, restarted.watermark(101));
+    }
+
+    @Test public void legacyInboxModelRewindsOnlyWatermarkOnceAndPreservesEveryClaim() {
+        assertTrue(ledger.initialize(100, 1000, List.of("ignored")));
+        for (String status : List.of("sent", "submitted", "unknown", "deferred", "failed", "cancelled")) {
+            assertTrue(ledger.claim(100, status, "root-" + status, 0));
+            if (List.of("sent", "submitted", "unknown").contains(status)) {
+                assertTrue(ledger.submitted(100, status));
+            }
+            if ("deferred".equals(status)) ledger.defer(100, status);
+            else if (!"submitted".equals(status)) ledger.finish(100, status, status);
+        }
+        ledger.advance(100, 5000);
+        ledger.initialize(101, 2000);
+        ledger.advance(101, 9000);
+        assertTrue(preferences.edit().remove("inbox_model.100").remove("inbox_model.101").commit());
+        Map<String, Object> before = storedClaims();
+
+        assertTrue(ledger.ensureInboxModelVersion(100));
+        assertEquals(1000, ledger.baseline(100));
+        assertEquals(1000, ledger.watermark(100));
+        assertEquals(CommentReplyLedger.INBOX_MODEL_VERSION, preferences.getInt("inbox_model.100", 0));
+        assertEquals(before, storedClaims());
+        assertEquals(2000, ledger.baseline(101));
+        assertEquals(9000, ledger.watermark(101));
+        assertFalse(preferences.contains("inbox_model.101"));
+        for (String status : List.of("sent", "submitted", "unknown", "ignored", "cancelled")) {
+            assertFalse(ledger.claim(100, status, "root-" + status, 0));
+            assertFalse(ledger.retryable(100, status));
+        }
+        assertTrue(ledger.retryable(100, "deferred"));
+        assertTrue(ledger.retryable(100, "failed"));
+
+        ledger.advance(100, 6000);
+        assertTrue(ledger.ensureInboxModelVersion(100));
+        assertEquals(6000, ledger.watermark(100));
+        CommentReplyLedger restarted = recreate();
+        assertTrue(restarted.ensureInboxModelVersion(100));
+        assertEquals(6000, restarted.watermark(100));
+        assertEquals(1000, restarted.baseline(100));
+        assertEquals(before, storedClaims());
+        assertTrue(restarted.ensureInboxModelVersion(101));
+        assertEquals(2000, restarted.watermark(101));
+        assertEquals(6000, restarted.watermark(100));
+    }
+
+    @Test public void olderInboxModelVersionRequiresTheSameOneTimeRewind() {
+        seedInboxModel(100, 1000, 5000, 1);
+        assertTrue(ledger.ensureInboxModelVersion(100));
+        assertEquals(1000, ledger.watermark(100));
+        assertEquals(1000, ledger.baseline(100));
+        assertEquals(CommentReplyLedger.INBOX_MODEL_VERSION, preferences.getInt("inbox_model.100", 0));
+    }
+
+    @Test public void versionThreeReplaysTheOriginalRangeForThreadBackfillAndKeepsClaims() {
+        assertTrue(ledger.initialize(100, 1000, List.of("baseline-existing")));
+        assertTrue(ledger.claim(100, "already-submitted", "root", 0));
+        assertTrue(ledger.submitted(100, "already-submitted"));
+        ledger.advance(100, 5000);
+        assertTrue(preferences.edit().putInt("inbox_model.100", 3).commit());
+        Map<String, Object> claims = storedClaims();
+
+        assertTrue(ledger.ensureInboxModelVersion(100));
+        assertEquals(1000, ledger.watermark(100));
+        assertEquals(1000, ledger.baseline(100));
+        assertEquals(4, preferences.getInt("inbox_model.100", 0));
+        assertEquals(claims, storedClaims());
+        assertFalse(ledger.claim(100, "already-submitted", "root", 0));
+        ledger.advance(100, 6000);
+        assertTrue(recreate().ensureInboxModelVersion(100));
+        assertEquals(6000, recreate().watermark(100));
+    }
+
+    @Test public void versionTwoInboxModelReplaysTheOriginalBaselineOnceWithoutReleasingSubmittedClaims() {
+        assertTrue(ledger.initialize(100, 1000, List.of("ignored")));
+        for (String status : List.of("submitted", "unknown", "sent")) {
+            assertTrue(ledger.claim(100, status, "root-" + status, 0));
+            assertTrue(ledger.submitted(100, status));
+            if (!"submitted".equals(status)) ledger.finish(100, status, status);
+        }
+        ledger.advance(100, 5000);
+        assertTrue(preferences.edit().putInt("inbox_model.100", 2).commit());
+        Map<String, Object> before = storedClaims();
+
+        assertTrue(ledger.ensureInboxModelVersion(100));
+        assertEquals(1000, ledger.baseline(100));
+        assertEquals(1000, ledger.watermark(100));
+        assertEquals(CommentReplyLedger.INBOX_MODEL_VERSION, preferences.getInt("inbox_model.100", 0));
+        assertEquals(before, storedClaims());
+        for (String status : List.of("submitted", "unknown", "sent", "ignored")) {
+            assertFalse(ledger.claim(100, status, "root-" + status, 0));
+        }
+
+        ledger.advance(100, 6000);
+        assertTrue(ledger.ensureInboxModelVersion(100));
+        assertEquals(6000, ledger.watermark(100));
+        CommentReplyLedger restarted = recreate();
+        assertTrue(restarted.ensureInboxModelVersion(100));
+        assertEquals(6000, restarted.watermark(100));
+        assertEquals(1000, restarted.baseline(100));
+        assertEquals(before, storedClaims());
+    }
+
+    @Test public void currentAndFutureInboxModelVersionsNeverRewindOrCommit() {
+        for (int version : List.of(CommentReplyLedger.INBOX_MODEL_VERSION, CommentReplyLedger.INBOX_MODEL_VERSION + 1)) {
+            seedInboxModel(100, 1000, 5000, version);
+            int[] commits = {0};
+            CommentReplyLedger current = new CommentReplyLedger(preferences, clock, editor -> {
+                commits[0]++;
+                return editor.commit();
+            });
+            assertTrue(current.ensureInboxModelVersion(100));
+            assertEquals(5000, current.watermark(100));
+            assertEquals(version, preferences.getInt("inbox_model.100", 0));
+            assertEquals(0, commits[0]);
+        }
+    }
+
+    @Test public void freshInboxModelVersionIsCommittedWithInitializationAndDoesNotRewindLater() {
+        int[] commits = {0};
+        CommentReplyLedger fresh = new CommentReplyLedger(preferences, clock, editor -> {
+            commits[0]++;
+            return editor.commit();
+        });
+        assertTrue(fresh.initialize(100, 1000, List.of("ignored")));
+        assertEquals(1, commits[0]);
+        assertEquals(CommentReplyLedger.INBOX_MODEL_VERSION, preferences.getInt("inbox_model.100", 0));
+        fresh.advance(100, 5000);
+        assertTrue(fresh.ensureInboxModelVersion(100));
+        assertEquals(5000, fresh.watermark(100));
+        assertEquals(2, commits[0]);
+        assertTrue(recreate().ensureInboxModelVersion(100));
+        assertEquals(5000, recreate().watermark(100));
+    }
+
+    @Test public void inboxModelMigrationRejectsInvalidAndUninitializedAccountsWithoutWriting() {
+        assertFalse(ledger.ensureInboxModelVersion(0));
+        assertFalse(ledger.ensureInboxModelVersion(-1));
+        assertFalse(ledger.ensureInboxModelVersion(100));
+        assertTrue(preferences.getAll().isEmpty());
+    }
+
+    @Test public void failedInboxModelMigrationNeverAuthorizesScanningOrFurtherClaims() {
+        seedInboxModel(100, 1000, 5000, 1);
+        CommentReplyLedger failing = new CommentReplyLedger(preferences, clock, editor -> false);
+        assertFalse(failing.ensureInboxModelVersion(100));
+        assertEquals(1, preferences.getInt("inbox_model.100", 0));
+        assertEquals(5000, preferences.getLong("watermark.100", 0));
+        assertEquals(1000, preferences.getLong("baseline.100", 0));
+        assertFalse(failing.initialized(100));
+        assertFalse(failing.ensureInboxModelVersion(100));
+        assertFalse(failing.claim(100, "new", "root", 0));
+        assertTrue(recreate().ensureInboxModelVersion(100));
+        assertEquals(1000, recreate().watermark(100));
+    }
+
+    @Test public void throwingInboxModelMigrationFailsClosedWithoutAcknowledgingTheSchema() {
+        seedInboxModel(100, 1000, 5000, 1);
+        CommentReplyLedger failing = new CommentReplyLedger(preferences, clock, editor -> {
+            throw new IllegalStateException("disk unavailable");
+        });
+        assertFalse(failing.ensureInboxModelVersion(100));
+        assertEquals(1, preferences.getInt("inbox_model.100", 0));
+        assertEquals(5000, preferences.getLong("watermark.100", 0));
+        assertFalse(failing.initialized(100));
+        assertFalse(failing.claim(100, "new", "root", 0));
+    }
+
+    @Test public void corruptInboxModelVersionFailsClosedWithoutRewritingOrAuthorizingScanning() {
+        seedInboxModel(100, 1000, 5000, 1);
+        assertTrue(preferences.edit().putString("inbox_model.100", "broken").commit());
+        assertFalse(ledger.ensureInboxModelVersion(100));
+        assertEquals("broken", preferences.getString("inbox_model.100", ""));
+        assertEquals(5000, preferences.getLong("watermark.100", 0));
+        assertFalse(ledger.initialized(100));
+        assertFalse(ledger.claim(100, "new", "root", 0));
+    }
+
+    @Test public void corruptInboxModelBoundsCannotAuthorizeAReadOrExpandItsOriginalBaseline() {
+        seedInboxModel(100, 1000, 5000, 1);
+        assertTrue(preferences.edit().putString("baseline.100", "broken").commit());
+        assertFalse(ledger.ensureInboxModelVersion(100));
+        assertEquals("broken", preferences.getString("baseline.100", ""));
+        assertEquals(5000, preferences.getLong("watermark.100", 0));
+        assertEquals(1, preferences.getInt("inbox_model.100", 0));
+        assertFalse(ledger.claim(100, "new", "root", 0));
     }
 
     @Test public void pendingClaimsRecoverAsImmediatelyRetryableBecauseNothingWasSubmitted() {
@@ -322,6 +510,19 @@ public final class CommentReplyLedgerTest {
 
     private CommentReplyLedger recreate() {
         return new CommentReplyLedger(preferences, clock, SharedPreferences.Editor::commit);
+    }
+
+    private void seedInboxModel(long account, long baseline, long watermark, int version) {
+        assertTrue(preferences.edit().putLong("baseline." + account, baseline)
+                .putLong("watermark." + account, watermark).putInt("inbox_model." + account, version).commit());
+    }
+
+    private Map<String, Object> storedClaims() {
+        Map<String, Object> claims = new HashMap<>();
+        for (Map.Entry<String, ?> entry : preferences.getAll().entrySet()) {
+            if (entry.getKey().startsWith("incoming.")) claims.put(entry.getKey(), entry.getValue());
+        }
+        return claims;
     }
 
     private static final class MutableClock extends Clock {

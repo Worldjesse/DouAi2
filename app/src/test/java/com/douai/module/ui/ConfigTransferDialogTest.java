@@ -8,8 +8,11 @@ import android.view.ViewGroup;
 import android.widget.CheckBox;
 import android.widget.TextView;
 import com.douai.module.config.ConfigTransfer;
+import com.douai.module.config.ConfigBackup;
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.SettingsStore;
+import com.douai.module.analytics.LocalAnalytics;
+import com.douai.module.analytics.LocalPortraitContext;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -27,6 +30,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.Executor;
 import java.util.concurrent.CountDownLatch;
@@ -71,6 +75,85 @@ public final class ConfigTransferDialogTest {
         assertFalse(allText(page.dialog().getWindow().getDecorView()).contains("private-export-key"));
     }
 
+    @Test public void localAnalysisIsExcludedByDefaultAndIncludedOnlyForTheSelectedExport() throws Exception {
+        LocalAnalytics analytics = LocalAnalytics.get(activity);
+        try {
+            seedAnalytics(analytics, "export-source", 4, "备份测试自述");
+            assertFalse(((CheckBox) view("includeAnalytics")).isChecked());
+            assertEquals(View.GONE, view("restoreAnalytics").getVisibility());
+            view("export").performClick(); picker.select(); finishOffMain();
+            String configOnly = files.output.toString("UTF-8");
+            assertFalse(ConfigBackup.inspect(store, configOnly, ConfigTransfer.Mode.MERGE).includesAnalytics);
+            assertFalse(configOnly.contains("备份测试自述"));
+
+            ((CheckBox) view("includeAnalytics")).setChecked(true);
+            view("export").performClick(); picker.select(); finishOffMain();
+            String bundle = files.output.toString("UTF-8");
+            ConfigBackup.Preview selected = ConfigBackup.inspect(store, bundle, ConfigTransfer.Mode.MERGE);
+            assertTrue(selected.includesAnalytics);
+            assertTrue(selected.analyticsRows > 0);
+            assertTrue(bundle.contains("备份测试自述"));
+            assertTrue(((TextView) view("status")).getText().toString().contains("本地分析数据已导出"));
+            assertEquals(0, store.applies);
+        } finally { clearAnalytics(analytics); }
+    }
+
+    @Test public void bundledAnalysisRequiresItsOwnOptInAndRestoresEvenWhenConfigurationIsUnchanged() throws Exception {
+        LocalAnalytics analytics = LocalAnalytics.get(activity);
+        try {
+            seedAnalytics(analytics, "restore-source", 4, "备份中的测试自述");
+            MemoryStore source = new MemoryStore(); source.values.put("native_auto_reply", true);
+            String bundle = runIo(() -> ConfigBackup.export(activity, source, false, true));
+            seedAnalytics(analytics, "current-local", 2, "当前的测试自述");
+            analytics.setEnabled(false);
+            files.input = bundle.getBytes(StandardCharsets.UTF_8);
+            view("import").performClick(); picker.select(); finishOffMain();
+            CheckBox restore = (CheckBox) view("restoreAnalytics");
+            assertEquals(View.VISIBLE, restore.getVisibility());
+            assertFalse(restore.isChecked());
+            assertTrue(((TextView) view("preview")).getText().toString().contains("默认不恢复本地分析数据"));
+            assertTrue(view("confirm").isEnabled());
+            view("confirm").performClick(); finishOffMain();
+            assertEquals(2, snapshotViews(analytics));
+            assertEquals("当前的测试自述", LocalPortraitContext.current(activity).purpose);
+            assertFalse(analytics.isEnabled());
+
+            view("import").performClick(); picker.select(); finishOffMain();
+            assertFalse("The restore choice resets for every new file selection", restore.isChecked());
+            assertFalse("Equal configuration alone has nothing to apply", view("confirm").isEnabled());
+            restore.setChecked(true);
+            assertTrue("Explicit analysis restoration is meaningful without configuration changes", view("confirm").isEnabled());
+            ((CheckBox) view("replace")).setChecked(true); finishOffMain();
+            assertTrue("Configuration mode does not reset the independent restore choice", restore.isChecked());
+            String preview = ((TextView) view("preview")).getText().toString();
+            assertTrue(preview.contains("将替换当前全部本地分析记录"));
+            assertTrue(preview.contains("导入方式：覆盖"));
+            view("confirm").performClick(); finishOffMain();
+            assertEquals(4, snapshotViews(analytics));
+            assertEquals("备份中的测试自述", LocalPortraitContext.current(activity).purpose);
+            assertFalse("Restore must preserve the current recording switch", analytics.isEnabled());
+            assertEquals(2, changes);
+        } finally { clearAnalytics(analytics); }
+    }
+
+    @Test public void cancellingBundledPreviewNeverRestoresItsAnalysis() throws Exception {
+        LocalAnalytics analytics = LocalAnalytics.get(activity);
+        try {
+            seedAnalytics(analytics, "cancel-source", 3, "不应恢复的自述");
+            files.input = runIo(() -> ConfigBackup.export(activity, store, false, true)).getBytes(StandardCharsets.UTF_8);
+            seedAnalytics(analytics, "cancel-current", 1, "保留的自述");
+            view("import").performClick(); picker.select(); finishOffMain();
+            ((CheckBox) view("restoreAnalytics")).setChecked(true);
+            view("cancel").performClick();
+            assertFalse(view("confirm").isEnabled());
+            assertFalse(((CheckBox) view("restoreAnalytics")).isChecked());
+            assertEquals(View.GONE, view("restoreAnalytics").getVisibility());
+            assertEquals(1, snapshotViews(analytics));
+            assertEquals("保留的自述", LocalPortraitContext.current(activity).purpose);
+            assertEquals(0, store.applies);
+        } finally { clearAnalytics(analytics); }
+    }
+
     @Test public void previewIsReadOnlyAndExplicitConfirmationAppliesWithoutDisplayingValues() throws Exception {
         MemoryStore source = new MemoryStore();
         source.values.put("native_auto_reply", true);
@@ -84,6 +167,8 @@ public final class ConfigTransferDialogTest {
         assertTrue(preview.contains("格式版本"));
         assertTrue(preview.contains("native_auto_reply"));
         assertTrue(preview.contains("立即生效"));
+        assertEquals("Old configuration backups do not offer analysis restoration", View.GONE,
+                view("restoreAnalytics").getVisibility());
         assertFalse(preview.contains("private-import-key"));
         view("confirm").performClick();
         assertEquals(0, store.applies); finish();
@@ -112,6 +197,52 @@ public final class ConfigTransferDialogTest {
         assertTrue(picker.closed);
         late.accept(Uri.parse("content://backup/late")); finish();
         assertEquals(0, files.reads); assertEquals(0, store.applies);
+    }
+
+    @Test public void cancelledAnalyticsExportRejectsLatePickerResultsWhileThePageStaysOpen() {
+        ((CheckBox) view("includeAnalytics")).setChecked(true);
+        view("export").performClick();
+        Consumer<Uri> late = picker.callback;
+        view("cancel").performClick();
+        assertTrue(page.dialog().isShowing());
+        assertTrue(picker.closed);
+        late.accept(Uri.parse("content://backup/cancelled-analysis.json")); finish();
+        assertEquals("A cancelled optional analysis export must not write any file", 0, files.writes);
+        assertEquals(0, files.reads); assertEquals(0, store.applies);
+        assertFalse(view("confirm").isEnabled());
+        assertTrue(((TextView) view("status")).getText().toString().startsWith("已取消"));
+    }
+
+    @Test public void oldCancelledPickerCannotReplaceANewerSelectionAndDuplicateResultsAreIgnored() {
+        view("import").performClick();
+        Consumer<Uri> stale = picker.callback;
+        view("cancel").performClick();
+        view("export").performClick();
+        Consumer<Uri> current = picker.callback;
+        stale.accept(Uri.parse("content://backup/stale.json")); finish();
+        assertFalse("The newer chooser must remain active", picker.closed);
+        assertEquals(0, files.reads); assertEquals(0, files.writes);
+        current.accept(Uri.parse("content://backup/current.json")); finish();
+        assertEquals(1, files.writes);
+        current.accept(Uri.parse("content://backup/duplicate.json")); finish();
+        assertEquals("Each picker result is consumed once", 1, files.writes);
+        assertEquals(0, files.reads); assertEquals(0, store.applies);
+    }
+
+    @Test public void synchronousPickerResultClosesItsReturnedHandleAndAllowsTheNextExport() {
+        page.close(); page.dialog().dismiss();
+        java.util.concurrent.atomic.AtomicInteger closedHandles = new java.util.concurrent.atomic.AtomicInteger();
+        ConfigTransferDialog.Picker synchronous = (owner, export, name, callback) -> {
+            callback.accept(Uri.parse("content://backup/synchronous.json"));
+            return () -> closedHandles.incrementAndGet();
+        };
+        page = new ConfigTransferDialog(activity, store, false, () -> changes++, files, synchronous, executor);
+        page.dialog().show(); ShadowLooper.idleMainLooper();
+        view("export").performClick(); finish();
+        assertEquals(1, files.writes); assertEquals(1, closedHandles.get());
+        assertEquals("配置已导出。", ((TextView) view("status")).getText().toString());
+        view("export").performClick(); finish();
+        assertEquals(2, files.writes); assertEquals(2, closedHandles.get());
     }
 
     @Test public void cancellingBlockedReadClosesProviderOnBackgroundThreadAndIgnoresItsLateData() throws Exception {
@@ -228,6 +359,30 @@ public final class ConfigTransferDialogTest {
 
     private View view(String tag) { return page.dialog().getWindow().getDecorView().findViewWithTag("config.backup." + tag); }
     private void finish() { executor.runAll(); ShadowLooper.idleMainLooper(); }
+    private void finishOffMain() throws Exception {
+        runIo(() -> { executor.runAll(); return null; }); ShadowLooper.idleMainLooper();
+    }
+    private static <T> T runIo(java.util.concurrent.Callable<T> action) throws Exception {
+        java.util.concurrent.FutureTask<T> completed = new java.util.concurrent.FutureTask<>(action);
+        new Thread(completed, "config-backup-ui-test").start();
+        return completed.get(10, TimeUnit.SECONDS);
+    }
+    private static long snapshotViews(LocalAnalytics analytics) throws Exception {
+        return runIo(() -> analytics.snapshot(7).totalViews);
+    }
+    private void seedAnalytics(LocalAnalytics analytics, String prefix, int count, String purpose) throws Exception {
+        runIo(() -> {
+            analytics.setEnabled(false); analytics.clear(); LocalPortraitContext.clear(activity); analytics.setEnabled(true);
+            for (int index = 0; index < count; index++) analytics.recordView(prefix + index,
+                    index % 2 == 0 ? "short_video" : "image", "test-author", "测试作者",
+                    List.of("测试话题"), false, 20_000);
+            assertEquals(count, analytics.snapshot(7).totalViews);
+            LocalPortraitContext.setPurpose(activity, purpose); return null;
+        });
+    }
+    private void clearAnalytics(LocalAnalytics analytics) throws Exception {
+        runIo(() -> { analytics.setEnabled(false); analytics.clear(); LocalPortraitContext.clear(activity); return null; });
+    }
     private static String allText(View view) {
         StringBuilder value = new StringBuilder(view instanceof TextView ? ((TextView) view).getText() : "");
         if (view instanceof ViewGroup) for (int index = 0; index < ((ViewGroup) view).getChildCount(); index++) {

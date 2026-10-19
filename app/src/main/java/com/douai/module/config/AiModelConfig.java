@@ -18,11 +18,20 @@ public final class AiModelConfig {
     public static final String[] PROTOCOLS = {CHAT, RESPONSES, ANTHROPIC, GEMINI};
     public static final String[] PROTOCOL_LABELS = {
             "OpenAI Chat Completions", "OpenAI Responses", "Claude Messages", "Gemini"};
+    public static final String RESPONSE_SYNC = "non_streaming";
+    public static final String RESPONSE_STREAM = "streaming";
+    public static final String[] RESPONSE_MODES = {RESPONSE_SYNC, RESPONSE_STREAM};
+    public static final String[] RESPONSE_LABELS = {"非流式", "流式"};
+    public static final String REASONING_DEFAULT = "default";
+    public static final String[] REASONING_EFFORTS = {REASONING_DEFAULT, "none", "minimal", "low", "medium", "high", "xhigh", "max"};
+    public static final String[] REASONING_LABELS = {"模型默认", "none", "minimal", "low", "medium", "high", "xhigh", "max"};
 
     public final String id;
     public final String name;
     public final String provider;
     public final String protocol;
+    public final String responseMode;
+    public final String reasoningEffort;
     public final String apiEndpoint;
     public final String apiKey;
     public final String modelName;
@@ -49,6 +58,8 @@ public final class AiModelConfig {
         name = json.optString("name", "").trim();
         provider = json.optString("provider", "custom").trim();
         protocol = json.optString("protocol", CHAT).trim();
+        responseMode = json.has("responseMode") ? json.optString("responseMode", "").trim() : RESPONSE_SYNC;
+        reasoningEffort = json.has("reasoningEffort") ? json.optString("reasoningEffort", "").trim() : REASONING_DEFAULT;
         apiEndpoint = json.optString("apiEndpoint", "").trim();
         apiKey = json.optString("apiKey", "").trim();
         modelName = json.optString("modelName", "").trim();
@@ -78,7 +89,9 @@ public final class AiModelConfig {
     public JSONObject toJson() {
         try {
             return new JSONObject().put("id", id).put("name", name).put("provider", provider)
-                    .put("protocol", protocol).put("apiEndpoint", apiEndpoint).put("apiKey", apiKey)
+                    .put("protocol", protocol).put("responseMode", responseMode)
+                    .put("reasoningEffort", reasoningEffort)
+                    .put("apiEndpoint", apiEndpoint).put("apiKey", apiKey)
                     .put("modelName", modelName).put("modelsEndpoint", modelsEndpoint)
                     .put("systemPrompt", systemPrompt).put("contextRounds", contextRounds)
                     .put("timeoutSeconds", timeoutSeconds).put("allowInsecureHttp", allowInsecureHttp)
@@ -101,6 +114,15 @@ public final class AiModelConfig {
         boolean recognized = false;
         for (String value : PROTOCOLS) recognized |= value.equals(protocol);
         if (!recognized) throw new IllegalArgumentException("接口协议无效");
+        if (!RESPONSE_SYNC.equals(responseMode) && !RESPONSE_STREAM.equals(responseMode)) {
+            throw new IllegalArgumentException("响应方式无效");
+        }
+        boolean validEffort = false;
+        for (String value : REASONING_EFFORTS) validEffort |= value.equals(reasoningEffort);
+        if (!validEffort) throw new IllegalArgumentException("推理强度无效");
+        boolean applicableEffort = false;
+        for (String value : reasoningEfforts(protocol)) applicableEffort |= value.equals(reasoningEffort);
+        if (!applicableEffort) throw new IllegalArgumentException("当前接口协议不适用推理强度：" + reasoningEffort);
         validateAddress(apiEndpoint, allowInsecureHttp);
         if (!modelsEndpoint.isEmpty()) validateAddress(modelsEndpoint, allowInsecureHttp);
         if (requireModel && modelName.isEmpty()) throw new IllegalArgumentException("请填写或获取模型名称");
@@ -128,6 +150,26 @@ public final class AiModelConfig {
 
     public String messageContactDisplayName() {
         return messageContactName.isEmpty() ? name : messageContactName;
+    }
+
+    public boolean streaming() { return RESPONSE_STREAM.equals(responseMode); }
+    public boolean hasReasoningEffort() { return !REASONING_DEFAULT.equals(reasoningEffort); }
+
+    /** Protocol-level candidates; actual support still depends on the selected model service. */
+    public static String[] reasoningEfforts(String protocol) {
+        switch (protocol) {
+            case CHAT:
+            case RESPONSES: return REASONING_EFFORTS.clone();
+            case ANTHROPIC: return new String[]{REASONING_DEFAULT, "low", "medium", "high", "xhigh", "max"};
+            case GEMINI: return new String[]{REASONING_DEFAULT, "minimal", "low", "medium", "high"};
+            default: return new String[]{REASONING_DEFAULT};
+        }
+    }
+
+    public static String[] reasoningLabels(String protocol) {
+        String[] labels = reasoningEfforts(protocol);
+        labels[0] = "模型默认";
+        return labels;
     }
 
     /** Decode only bounded inline image data; never resolve remote or content URIs. */
@@ -197,7 +239,39 @@ public final class AiModelConfig {
                 "system", "systemInstruction", "instructions", "store"}) {
             if (json.has(key)) throw new IllegalArgumentException("自定义参数不能覆盖协议字段：" + key);
         }
+        if (hasReasoningEffort()) {
+            switch (protocol) {
+                case CHAT: rejectReasoningParameter(json, "reasoning_effort"); break;
+                case RESPONSES: rejectReasoningParameter(json, "reasoning", "effort"); break;
+                case ANTHROPIC: rejectReasoningParameter(json, "output_config", "effort"); break;
+                case GEMINI:
+                    rejectReasoningParameter(json, "generationConfig", "thinkingConfig", "thinkingLevel");
+                    rejectReasoningParameter(json, "generationConfig", "thinkingConfig", "thinkingBudget");
+                    break;
+                default: break;
+            }
+        }
         return json;
+    }
+
+    private static void rejectReasoningParameter(JSONObject json, String... path) {
+        JSONObject current = json;
+        StringBuilder label = new StringBuilder();
+        for (int index = 0; index < path.length; index++) {
+            if (index > 0) label.append('.');
+            label.append(path[index]);
+            if (!current.has(path[index])) return;
+            if (index == path.length - 1) {
+                throw new IllegalArgumentException("推理强度与自定义参数 " + label
+                        + " 冲突，请移除该参数或将推理强度设为“模型默认”");
+            }
+            Object nested = current.opt(path[index]);
+            if (!(nested instanceof JSONObject)) {
+                throw new IllegalArgumentException("自定义参数 " + label
+                        + " 必须是 JSON 对象，或将推理强度设为“模型默认”");
+            }
+            current = (JSONObject) nested;
+        }
     }
 
     private static JSONObject object(String text, String label) {

@@ -344,6 +344,76 @@ public final class LocalAnalytics implements AutoCloseable {
         } catch (Exception ignored) { throw new IllegalStateException("无法读取本地统计数据"); }
     }
 
+    /** Worker only. A logical snapshot, including settled queued writes; never copies SQLite files. */
+    org.json.JSONObject exportBackup() {
+        if (closed) throw new IllegalStateException("本地分析存储已关闭");
+        FutureTask<org.json.JSONObject> task = new FutureTask<>(() -> {
+            synchronized (databaseLock) {
+                if (closed) throw new IllegalStateException("本地分析存储已关闭");
+                SQLiteDatabase db = database == null && !new File(directory, "usage.db").exists()
+                        ? null : openDatabase();
+                if (db == null) return AnalyticsBackup.capture(null, clock.millis(), queueDropped.get());
+                db.beginTransaction();
+                try {
+                    prune(db, today());
+                    org.json.JSONObject snapshot = AnalyticsBackup.capture(db, clock.millis(), queueDropped.get());
+                    db.setTransactionSuccessful(); return snapshot;
+                } finally { db.endTransaction(); }
+            }
+        });
+        if (!enqueue(task)) throw new IllegalStateException("本地分析写入繁忙，请稍后重试备份");
+        try { return task.get(); }
+        catch (InterruptedException failure) {
+            Thread.currentThread().interrupt(); throw new IllegalStateException("本地分析备份已中断", failure);
+        } catch (java.util.concurrent.ExecutionException failure) {
+            Throwable cause = failure.getCause();
+            if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+            throw new IllegalStateException("无法备份本地分析数据", cause);
+        }
+    }
+
+    /** All imported rows were validated against fixed columns before this transaction starts. */
+    void replaceBackup(AnalyticsBackup.Snapshot snapshot, Runnable beforeCommit) {
+        fenceBackup();
+        synchronized (databaseLock) {
+            boolean committed = false;
+            try {
+                if (closed) throw new IllegalStateException("本地分析存储已关闭");
+                SQLiteDatabase db = openDatabase();
+                db.beginTransaction();
+                try {
+                    AnalyticsBackup.replaceTables(db, snapshot);
+                    lastPrunedDay = null;
+                    prune(db, today());
+                    beforeCommit.run();
+                    synchronized (stateLock) {
+                        // The short continuation boundary also fences observations collected while
+                        // replacement was being prepared. Later switch changes retain this epoch.
+                        fenceBackup();
+                        db.execSQL("INSERT INTO collection_boundaries(ts,enabled) VALUES (?,?)",
+                                new Object[]{clock.millis(), enabled ? 1 : 0});
+                        db.setTransactionSuccessful();
+                    }
+                } finally { db.endTransaction(); }
+                committed = true;
+                queueDropped.set(0);
+            } finally {
+                // Reject every observation accepted before or while replacement was in progress.
+                // The local collection flag is deliberately neither read from nor changed by a backup.
+                if (!committed) fenceBackup();
+                lastPrunedDay = null;
+            }
+        }
+    }
+
+    private void fenceBackup() {
+        synchronized (stateLock) {
+            generation++; storageEpoch++;
+            lastWorkHash = null; lastWorkDay = null; currentVisit = null;
+            cancelAutomaticAdvance();
+        }
+    }
+
     /** Off-main only. Returns after deletion; stale queued events cannot repopulate the database. */
     public void clear() {
         synchronized (stateLock) {
