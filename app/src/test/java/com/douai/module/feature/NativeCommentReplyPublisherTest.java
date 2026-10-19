@@ -43,6 +43,9 @@ public final class NativeCommentReplyPublisherTest {
         Request.framework = framework;
         Request.uploadAudio = false;
         Request.foreignUpload = false;
+        Resolver.wrongRoot = false;
+        Resolver.wrongDirect = false;
+        Resolver.latestModel = null;
         publisher = NativeCommentPublisher.install(framework.api, report(), getClass().getClassLoader(),
                 ignored -> { }, "DouAi.CommentReply");
         publishers.add(publisher);
@@ -68,7 +71,8 @@ public final class NativeCommentReplyPublisherTest {
         assertEquals("正文", model.a);
         assertEquals("douai_comment_reply", model.n);
         assertTrue(publisher.ownsPublish(model));
-        complete(0, response("work", "root", "incoming"));
+        assertWireTarget(0, "root", "incoming");
+        complete(0, wireResponse(0));
         assertEquals(Collections.singletonList("sent"), outcomes);
         model.a = "已被更改";
         assertFalse(publisher.ownsPublish(model));
@@ -104,7 +108,8 @@ public final class NativeCommentReplyPublisherTest {
             assertSame(event.targetComment, model.p);
             assertSame(event.work, model.y.work);
             assertEquals(missingAid, ((Comment) event.targetComment).awemeId);
-            complete(index, response("work", "root", event.incomingId));
+            assertWireTarget(index, "root", event.incomingId);
+            complete(index, wireResponse(index));
             assertEquals(Collections.singletonList("sent"), outcomes);
             index++;
         }
@@ -115,7 +120,9 @@ public final class NativeCommentReplyPublisherTest {
         ShadowLooper.idleMainLooper();
         assertEquals(1, accepted.get());
         assertTrue(outcomes.isEmpty());
-        complete(index, response("work", "root", "different-incoming"));
+        Response mismatch = wireResponse(index);
+        mismatch.comment.replyToReplyId = "different-incoming";
+        complete(index, mismatch);
         assertEquals(Collections.singletonList("submitted"), outcomes);
     }
 
@@ -165,7 +172,10 @@ public final class NativeCommentReplyPublisherTest {
                 assertEquals(incomingId, model.p.cid);
                 assertEquals("0", raw.replyId);
                 assertEquals("", raw.replyToReplyId);
-                complete(index, response("work", "101", exactAck ? incomingId : "different-incoming"));
+                assertWireTarget(index, "101", incomingId);
+                Response response = wireResponse(index);
+                if (!exactAck) response.comment.replyToReplyId = "different-incoming";
+                complete(index, response);
                 assertEquals(Collections.singletonList(exactAck ? "sent" : "submitted"), outcomes);
                 index++;
             }
@@ -220,7 +230,10 @@ public final class NativeCommentReplyPublisherTest {
                 assertEquals("0", raw.replyId);
                 assertEquals("", raw.replyToReplyId);
                 assertNull(raw.awemeId);
-                complete(index, response("work", "101", index == 0 ? incomingId : "unrelated-incoming"));
+                assertWireTarget(index, "101", incomingId);
+                Response response = wireResponse(index);
+                if (index != 0) response.comment.replyToReplyId = "unrelated-incoming";
+                complete(index, response);
                 assertEquals(Collections.singletonList(index == 0 ? "sent" : "submitted"), outcomes);
             }
         }
@@ -293,7 +306,10 @@ public final class NativeCommentReplyPublisherTest {
         assertEquals(Collections.emptyList(), model.d);
         assertEquals("douai_comment_reply", model.n);
         assertTrue(publisher.ownsPublish(model));
-        complete(0, response("work", "different-root", "incoming"));
+        assertWireTarget(0, "root", "incoming");
+        Response response = wireResponse(0);
+        response.comment.replyId = "different-root";
+        complete(0, response);
         assertEquals(Collections.singletonList("submitted"), outcomes);
     }
 
@@ -312,7 +328,8 @@ public final class NativeCommentReplyPublisherTest {
         ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(31));
         assertEquals(Collections.singletonList("submitted"), outcomes);
         assertEquals(1, Request.models.size());
-        complete(0, response("work", "root", "incoming"));
+        assertWireTarget(0, "root", "incoming");
+        complete(0, wireResponse(0));
         assertEquals(Arrays.asList("submitted", "sent"), outcomes);
     }
 
@@ -343,7 +360,7 @@ public final class NativeCommentReplyPublisherTest {
             List<String> outcomes = new ArrayList<>();
             publisher.sendReply(event("incoming", "root"), "正文", () -> true, () -> true, () -> { }, outcomes::add);
             ShadowLooper.idleMainLooper();
-            Response response = response("work", "root", "incoming");
+            Response response = wireResponse(index);
             if (index == 0) response.comment.replyId = "other-root";
             if (index == 1) response.comment.replyToReplyId = null;
             if (index == 2) response.comment.awemeId = null;
@@ -394,6 +411,38 @@ public final class NativeCommentReplyPublisherTest {
         assertTrue(Request.models.isEmpty());
     }
 
+    @Test public void rejectsNativeWireResolversThatDisagreeWithTheExactReplyTargetBeforeSubmission() {
+        for (boolean wrongRoot : new boolean[]{true, false}) {
+            Resolver.wrongRoot = wrongRoot;
+            Resolver.wrongDirect = !wrongRoot;
+            List<String> outcomes = new ArrayList<>();
+            publisher.sendReply(event("incoming", "root"), "正文", () -> true, () -> true,
+                    () -> fail("A mismatched native wire target cannot be accepted"), outcomes::add);
+            ShadowLooper.idleMainLooper();
+            assertEquals(Collections.singletonList("failed"), outcomes);
+            assertTrue("A resolver mismatch must fail before the checked native publisher runs", Request.models.isEmpty());
+        }
+    }
+
+    @Test public void rechecksInheritedNativeReplyIdsAfterReservationBeforeTheHostCanSend() {
+        for (boolean changeRoot : new boolean[]{true, false}) {
+            List<String> outcomes = new ArrayList<>();
+            AtomicInteger reservations = new AtomicInteger();
+            publisher.sendReply(event("incoming", "root"), "正文", () -> true, () -> {
+                reservations.incrementAndGet();
+                assertNotNull("The initial native helper check must observe the prepared model", Resolver.latestModel);
+                if (changeRoot) Resolver.latestModel.b = "changed-root";
+                else Resolver.latestModel.e = "changed-incoming";
+                return true;
+            }, () -> fail("A reply whose wire target changed during reservation cannot be accepted"), outcomes::add);
+            ShadowLooper.idleMainLooper();
+            assertEquals(1, reservations.get());
+            assertEquals(Collections.singletonList("failed"), outcomes);
+            assertTrue("Changed inherited IDs must not reach the native publisher", Request.models.isEmpty());
+            Resolver.latestModel = null;
+        }
+    }
+
     @Test public void independentNamespacesKeepOldWorkCommentsAndRepliesOwnedByTheirSenders() throws Throwable {
         NativeCommentPublisher old = NativeCommentPublisher.install(framework.api, report(), getClass().getClassLoader(), ignored -> { });
         publishers.add(old);
@@ -406,10 +455,12 @@ public final class NativeCommentReplyPublisherTest {
         ShadowLooper.idleMainLooper();
         assertNull(Request.models.get(0).p);
         assertEquals("douai_auto", Request.models.get(0).n);
-        complete(1, response("work", "root", null));
+        assertWireTarget(0, null, null);
+        assertWireTarget(1, "root", "0");
+        complete(1, wireResponse(1));
         assertTrue(oldResults.isEmpty());
         assertEquals(Collections.singletonList("sent"), replyResults);
-        complete(0, response("work", null, null));
+        complete(0, wireResponse(0));
         assertEquals(Collections.singletonList("sent"), oldResults);
         assertEquals(Collections.singletonList("sent"), replyResults);
     }
@@ -417,6 +468,17 @@ public final class NativeCommentReplyPublisherTest {
     private void complete(int index, Response response) throws Throwable {
         framework.invoke(Request.class.getMethod("success", Response.class), Request.instances.get(index), response);
         ShadowLooper.idleMainLooper();
+    }
+
+    private static void assertWireTarget(int index, String root, String direct) {
+        Request request = Request.instances.get(index);
+        assertEquals("The native ordinary publish branch reads the inherited root field, not model.p", root, request.wireRoot);
+        assertEquals("The native ordinary publish branch reads the inherited direct target field, not model.p", direct, request.wireDirect);
+    }
+
+    private static Response wireResponse(int index) {
+        Request request = Request.instances.get(index);
+        return response(request.wireAid, request.wireRoot, request.wireDirect);
     }
 
     private SpeechPreparation.Audio audio() throws Exception {
@@ -460,10 +522,25 @@ public final class NativeCommentReplyPublisherTest {
     public static final class Response { public int status_code; public Comment comment = new Comment(); }
     public static final class State { public NativeCommentReplyInboxTest.Work work; }
     public static final class Resolver {
+        static boolean wrongRoot, wrongDirect;
+        static Model latestModel;
         public static State context(NativeCommentReplyInboxTest.Work work) { State state = new State(); state.work = work; return state; }
         public static NativeCommentReplyInboxTest.Work work(State state) { return state.work; }
+        public static String replyRoot(NativeCommentReplyInboxTest.Comment comment, Model model) {
+            if (comment == null) throw new IllegalArgumentException("Only reply publishing requires native reply helpers");
+            latestModel = model;
+            return wrongRoot ? "different-root" : model.b;
+        }
+        public static String replyDirect(NativeCommentReplyInboxTest.Comment comment, Model model) {
+            if (comment == null) throw new IllegalArgumentException("Only reply publishing requires native reply helpers");
+            latestModel = model;
+            return wrongDirect ? "different-direct" : model.e;
+        }
     }
-    public static final class Model {
+    public static class BaseModel {
+        public String b, e;
+    }
+    public static final class Model extends BaseModel {
         public String a, n;
         public State y;
         public Attachment A;
@@ -487,9 +564,15 @@ public final class NativeCommentReplyPublisherTest {
         static final List<Request> instances = new ArrayList<>();
         static Framework framework;
         static boolean uploadAudio, foreignUpload;
+        String wireAid, wireRoot, wireDirect;
         public boolean checked(Model model) throws Throwable {
             models.add(model);
             instances.add(this);
+            // The ordinary host publisher obtains its wire IDs through 0y6L.LJ/LJFF.
+            // Both read inherited request fields; assigning only the Comment at p has no effect.
+            wireAid = model.y.work.aid;
+            wireRoot = model.b;
+            wireDirect = model.e;
             if (!uploadAudio) return true;
             framework.invoke(Uploader.class.getMethod("upload", Object.class, String.class, Object.class, Object.class), null,
                     model.y, model.A.audio.localFile.getAbsolutePath(),
@@ -504,6 +587,8 @@ public final class NativeCommentReplyPublisherTest {
         List<RuleScanResult> rules = new ArrayList<>();
         add(rules, "portrait_comment_aweme_resolver", Resolver.class.getMethod("work", State.class));
         add(rules, "auto_comment_work_context", Resolver.class.getMethod("context", NativeCommentReplyInboxTest.Work.class));
+        add(rules, "comment_reply_publish_root", Resolver.class.getMethod("replyRoot", NativeCommentReplyInboxTest.Comment.class, Model.class));
+        add(rules, "comment_reply_publish_direct", Resolver.class.getMethod("replyDirect", NativeCommentReplyInboxTest.Comment.class, Model.class));
         add(rules, "auto_comment_checked_request", Request.class.getMethod("checked", Model.class));
         add(rules, "auto_comment_publish_success", Request.class.getMethod("success", Response.class));
         add(rules, "auto_comment_publish_failure", Request.class.getMethod("failed", Exception.class));

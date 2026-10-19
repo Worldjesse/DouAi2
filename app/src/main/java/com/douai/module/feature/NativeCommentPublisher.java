@@ -9,6 +9,7 @@ import io.github.libxposed.api.XposedInterface;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -35,9 +36,14 @@ final class NativeCommentPublisher implements AutoCloseable {
     private final Field attachment;
     private final Constructor<?> attachmentConstructor;
     private final Constructor<?> audioConstructor;
+    private final HostScanReport report;
+    private final ClassLoader loader;
+    private ReplyBinding replyBinding;
     private volatile boolean closed;
 
     private NativeCommentPublisher(HostScanReport report, ClassLoader loader, Consumer<String> log) throws Exception {
+        this.report = report;
+        this.loader = loader;
         submit = HostTargets.method(report, "auto_comment_checked_request", loader);
         requestConstructor = submit.getDeclaringClass().getConstructor();
         modelConstructor = submit.getParameterTypes()[0].getConstructor();
@@ -144,17 +150,20 @@ final class NativeCommentPublisher implements AutoCloseable {
             Object request = null;
             Pending pending = null;
             boolean accepted = false;
+            boolean nativeInvoked = false;
             try {
                 Object state = contextFactory.invoke(null, work);
                 Object origin = state == null ? null : resolveAweme.invoke(null, state);
                 if (!aid.equals(HostTargets.invoke(origin, "getAid"))) throw new IllegalStateException("Origin work changed");
                 Object model = modelConstructor.newInstance();
-                Field replyTarget = reply == null ? null : HostTargets.field(model.getClass(), "p");
+                ReplyBinding binding = reply == null ? null : replyBinding();
                 if (reply != null) {
-                    if ((audio == null && (text == null || text.trim().isEmpty())) || !validReplyTarget(reply, replyTarget)) {
+                    if ((audio == null && (text == null || text.trim().isEmpty())) || !validReplyTarget(reply, binding.target)) {
                         throw new IllegalStateException("Comment reply target unavailable or changed");
                     }
-                    replyTarget.set(model, reply.targetComment);
+                    binding.target.set(model, reply.targetComment);
+                    binding.root.set(model, reply.rootId);
+                    binding.direct.set(model, reply.rootId.equals(reply.incomingId) ? "0" : reply.incomingId);
                 }
                 String outputText = audio == null ? text : "";
                 modelText.set(model, outputText);
@@ -172,6 +181,9 @@ final class NativeCommentPublisher implements AutoCloseable {
                     HostTargets.field(model.getClass(), "d").set(model, java.util.Collections.emptyList());
                 }
                 HostTargets.field(model.getClass(), "n").set(model, reply == null ? "douai_auto" : "douai_comment_reply");
+                if (reply != null && !binding.matches(model, reply)) {
+                    throw new IllegalStateException("Comment reply native target does not match");
+                }
                 ownedModels.put(model, outputText);
                 request = requestConstructor.newInstance();
                 pending = new Pending(aid, request, model, audio == null ? null : audio.file.getAbsolutePath(),
@@ -181,15 +193,20 @@ final class NativeCommentPublisher implements AutoCloseable {
                     received(request, "cancelled");
                     return;
                 }
-                if (reply != null && (replyTarget.get(model) != reply.targetComment || !validReplyTarget(reply, replyTarget))) {
+                if (reply != null && !binding.matches(model, reply)) {
                     throw new IllegalStateException("Comment reply target changed before submission");
                 }
+                if (reply != null) safeLog("Comment reply native target verified: root_match=1; direct_match=1; nested="
+                        + (reply.rootId.equals(reply.incomingId) ? 0 : 1));
                 safeLog("Automatic comment native submission; media=" + (audio == null ? "text" : "audio")
                         + "; audioMillis=" + (audio == null ? 0 : audio.duration)
                         + "; audioBytes=" + (audio == null ? 0 : audio.file.length()));
                 boolean directSubmission;
                 submitting.set(pending);
-                try { directSubmission = Boolean.TRUE.equals(submit.invoke(request, model)); }
+                try {
+                    nativeInvoked = true;
+                    directSubmission = Boolean.TRUE.equals(submit.invoke(request, model));
+                }
                 finally { submitting.remove(); }
                 accepted = directSubmission || pending.uploadStarted || pending.callbackSeen;
                 if (!accepted) { received(request, "failed"); return; }
@@ -203,10 +220,10 @@ final class NativeCommentPublisher implements AutoCloseable {
                     token.result.accept("submitted");
                 }, 30_000);
                 main.postDelayed(() -> requests.remove(owner, token), 120_000);
-            } catch (ReflectiveOperationException | RuntimeException failure) {
+            } catch (Exception failure) {
                 // An invoked host method can throw after it has already sent the request.
                 if (request != null && pending != null
-                        && (accepted || failure instanceof java.lang.reflect.InvocationTargetException)) {
+                        && (accepted || nativeInvoked && failure instanceof java.lang.reflect.InvocationTargetException)) {
                     Object owner = request;
                     Pending token = pending;
                     main.postDelayed(() -> requests.remove(owner, token), 120_000);
@@ -219,6 +236,44 @@ final class NativeCommentPublisher implements AutoCloseable {
                 result.accept("failed");
             }
         });
+    }
+
+    /** Reply-only binding: ordinary work comments do not depend on these host helpers. */
+    private ReplyBinding replyBinding() throws Exception {
+        if (replyBinding == null) replyBinding = new ReplyBinding();
+        return replyBinding;
+    }
+
+    private final class ReplyBinding {
+        final Field target = HostTargets.field(modelConstructor.getDeclaringClass(), "p");
+        final Field root = HostTargets.field(modelConstructor.getDeclaringClass(), "b");
+        final Field direct = HostTargets.field(modelConstructor.getDeclaringClass(), "e");
+        final Method rootResolver = HostTargets.method(report, "comment_reply_publish_root", loader);
+        final Method directResolver = HostTargets.method(report, "comment_reply_publish_direct", loader);
+
+        ReplyBinding() throws Exception {
+            Class<?>[] parameters = {target.getType(), modelConstructor.getDeclaringClass()};
+            if (root.getType() != String.class || direct.getType() != String.class
+                    || Modifier.isStatic(target.getModifiers()) || Modifier.isStatic(root.getModifiers())
+                    || Modifier.isStatic(direct.getModifiers())
+                    || !Modifier.isStatic(rootResolver.getModifiers()) || !Modifier.isStatic(directResolver.getModifiers())
+                    || rootResolver.getReturnType() != String.class || directResolver.getReturnType() != String.class
+                    || !java.util.Arrays.equals(rootResolver.getParameterTypes(), parameters)
+                    || !java.util.Arrays.equals(directResolver.getParameterTypes(), parameters)) {
+                throw new IllegalStateException("Comment reply native target contract changed");
+            }
+        }
+
+        boolean matches(Object model, CommentReplyEvent event) throws Exception {
+            String expectedDirect = event.rootId.equals(event.incomingId) ? "0" : event.incomingId;
+            if (target.get(model) != event.targetComment || !validReplyTarget(event, target)
+                    || !event.rootId.equals(root.get(model)) || !expectedDirect.equals(direct.get(model))) return false;
+            Object resolvedRoot = rootResolver.invoke(null, event.targetComment, model);
+            Object resolvedDirect = directResolver.invoke(null, event.targetComment, model);
+            return event.rootId.equals(resolvedRoot) && (event.rootId.equals(event.incomingId)
+                    ? resolvedDirect == null || "".equals(resolvedDirect) || "0".equals(resolvedDirect)
+                    : event.incomingId.equals(resolvedDirect));
+        }
     }
 
     private void received(Object request, String status) {

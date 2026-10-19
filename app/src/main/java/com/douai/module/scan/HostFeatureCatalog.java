@@ -53,6 +53,7 @@ public final class HostFeatureCatalog {
                     "comment_reply_thread_request", "comment_reply_thread_response",
                     "comment_reply_task_wait", "comment_reply_task_result", "comment_reply_task_faulted",
                     "comment_reply_task_error", "comment_reply_task_cancelled",
+                      "comment_reply_publish_root", "comment_reply_publish_direct",
                     "comment_reply_user_model", "comment_reply_work_model", "comment_reply_push_receive",
                     "comment_reply_push_parse", "comment_reply_push_model",
                     "auto_comment_checked_request", "auto_comment_work_context", "portrait_comment_aweme_resolver",

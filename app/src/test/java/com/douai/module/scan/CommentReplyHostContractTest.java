@@ -67,6 +67,14 @@ public final class CommentReplyHostContractTest {
     private static final String REPLY_ARGS = "LX/0y6l;";
     private static final String WORK_CONTEXT = "LX/0yAS;";
     private static final String TASK = "Lbolts/Task;";
+    private static final String PUBLISH_MODEL = "LX/0yFs;";
+    private static final String PUBLISH_BASE = "LX/0yH0;";
+    private static final String PUBLISH_BUILDER = "LX/0yFq;";
+    private static final String PUBLISH_BUILDER_BASE = "LX/0yH8;";
+    private static final String PUBLISH_PRESENTER =
+            "Lcom/ss/android/ugc/aweme/comment/commentinputmanager/presenter/PublishPresenter;";
+    private static final String PUBLISH_REQUEST =
+            "Lcom/ss/android/ugc/aweme/comment/data/publish/CommentPublishRequest;";
     private static final Map<String, ClassDef> classes = new HashMap<>();
 
     @BeforeClass public static void readOnlyTheRequiredOriginalDexClasses() throws Exception {
@@ -80,7 +88,9 @@ public final class CommentReplyHostContractTest {
                 NOTICE, PAYLOAD, GENERAL, ADDITIONAL, DETAIL, ACCESSORS, "LX/0dN2;", "LX/0dN5;",
                 "LX/0dPP;", "LX/0dH8;", "LX/0dHN;", MINE));
         Set<String> commentClasses = new HashSet<>(Arrays.asList(COMMENT, "LX/0yXF;", "LX/0y6L;",
-                REPLY_BUILDER, REPLY_ARGS, "LX/0yTH;", "LX/0yAP;", REPLY_API, REPLY_LIST, "LX/0y6z;"));
+                REPLY_BUILDER, REPLY_ARGS, "LX/0yTH;", "LX/0yAP;", REPLY_API, REPLY_LIST, "LX/0y6z;",
+                PUBLISH_MODEL, PUBLISH_BASE, PUBLISH_BUILDER, PUBLISH_BUILDER_BASE,
+                PUBLISH_PRESENTER, PUBLISH_REQUEST));
         Set<String> taskClasses = new HashSet<>(Arrays.asList(TASK));
         try (ZipFile archive = new ZipFile(apk)) {
             readSelectedClasses(archive, "classes17.dex", required);
@@ -381,6 +391,144 @@ public final class CommentReplyHostContractTest {
                 calls(directTarget, COMMENT, "LLLLIILLL"));
         // Assigning a verified level1_comment CID to a missing root is module
         // compatibility logic, not an operation performed by these native helpers.
+    }
+
+    @Test public void nativePublishBuilderCopiesLegacyReplyIdsSeparatelyFromTheTargetComment() {
+        assertEquals(PUBLISH_BASE, classes.get(PUBLISH_MODEL).getSuperclass());
+        assertEquals(PUBLISH_BUILDER_BASE, classes.get(PUBLISH_BUILDER).getSuperclass());
+        Code builder = new Code(method(PUBLISH_BUILDER, "LIZ", PUBLISH_MODEL));
+        for (String[] mapping : new String[][]{
+                {PUBLISH_BUILDER_BASE, "LIZJ", PUBLISH_BASE, "b", STRING},
+                {PUBLISH_BUILDER_BASE, "LJ", PUBLISH_BASE, "e", STRING},
+                {PUBLISH_BUILDER, "LJIILLIIL", PUBLISH_MODEL, "p", COMMENT}}) {
+            assertFalse(AccessFlags.STATIC.isSet(field(mapping[0], mapping[1], mapping[4]).getAccessFlags()));
+            assertFalse(AccessFlags.STATIC.isSet(field(mapping[2], mapping[3], mapping[4]).getAccessFlags()));
+            int read = fieldIndex(builder, mapping[0], mapping[1]);
+            assertEquals(Opcode.IGET_OBJECT, builder.at(read).getOpcode());
+            assertEquals(Opcode.IPUT_OBJECT, builder.at(read + 1).getOpcode());
+            assertFieldReference(builder.at(read + 1), mapping[2], mapping[3], mapping[4]);
+            assertEquals(((OneRegisterInstruction) builder.at(read)).getRegisterA(),
+                    ((OneRegisterInstruction) builder.at(read + 1)).getRegisterA());
+        }
+        assertFalse("The base constructor leaves the legacy root unset",
+                referencesField(method(PUBLISH_BASE, "<init>", "V"), PUBLISH_BASE, "b"));
+        assertFalse("The base constructor leaves the legacy direct target unset",
+                referencesField(method(PUBLISH_BASE, "<init>", "V"), PUBLISH_BASE, "e"));
+        assertFalse(referencesField(method(PUBLISH_MODEL, "<init>", "V"), PUBLISH_BASE, "b"));
+        assertFalse(referencesField(method(PUBLISH_MODEL, "<init>", "V"), PUBLISH_BASE, "e"));
+    }
+
+    @Test public void nativeUiBuildsNestedRepliesWithTheTargetsRootAndItsOwnCid() {
+        assertDirectGetter(COMMENT, "LLLLIILLL", STRING, "replyId", Opcode.IGET_OBJECT);
+        assertDirectGetter(COMMENT, "LLIIIILZ", STRING, "cid", Opcode.IGET_OBJECT);
+        Code ui = new Code(method(PUBLISH_PRESENTER, "LJIIZILJ", PUBLISH_BUILDER, "LX/0yGX;"));
+        int pairedNestedBranches = 0;
+        for (int index = 0; index + 5 < ui.instructions.size(); index++) {
+            Object candidate = reference(ui.at(index));
+            if (!(candidate instanceof MethodReference)) continue;
+            MethodReference getter = (MethodReference) candidate;
+            if (!COMMENT.equals(getter.getDefiningClass()) || !"LLLLIILLL".equals(getter.getName())
+                    || ui.at(index + 2).getOpcode() != Opcode.IPUT_OBJECT
+                    || !(reference(ui.at(index + 2)) instanceof FieldReference)
+                    || !"LIZJ".equals(((FieldReference) reference(ui.at(index + 2))).getName())) continue;
+            // Only the adjacent root/cid pair is evidence of nested reply targeting.
+            Object directCandidate = reference(ui.at(index + 3));
+            if (!(directCandidate instanceof MethodReference)
+                    || !"LLIIIILZ".equals(((MethodReference) directCandidate).getName())) continue;
+            assertCall(ui.at(index), COMMENT, "LLLLIILLL", STRING);
+            assertCall(ui.at(index + 3), COMMENT, "LLIIIILZ", STRING);
+            assertEquals(Opcode.MOVE_RESULT_OBJECT, ui.at(index + 1).getOpcode());
+            assertEquals(Opcode.MOVE_RESULT_OBJECT, ui.at(index + 4).getOpcode());
+            assertEquals(Opcode.IPUT_OBJECT, ui.at(index + 5).getOpcode());
+            assertFieldReference(ui.at(index + 2), PUBLISH_BUILDER_BASE, "LIZJ", STRING);
+            assertFieldReference(ui.at(index + 5), PUBLISH_BUILDER_BASE, "LJ", STRING);
+            assertEquals("Both IDs must be read from the same actual target Comment",
+                    ((FiveRegisterInstruction) ui.at(index)).getRegisterC(),
+                    ((FiveRegisterInstruction) ui.at(index + 3)).getRegisterC());
+            assertEquals(((OneRegisterInstruction) ui.at(index + 1)).getRegisterA(),
+                    ((OneRegisterInstruction) ui.at(index + 2)).getRegisterA());
+            assertEquals(((OneRegisterInstruction) ui.at(index + 4)).getRegisterA(),
+                    ((OneRegisterInstruction) ui.at(index + 5)).getRegisterA());
+            assertEquals("The root and direct target must populate the same native builder",
+                    ((TwoRegisterInstruction) ui.at(index + 2)).getRegisterB(),
+                    ((TwoRegisterInstruction) ui.at(index + 5)).getRegisterB());
+            pairedNestedBranches++;
+        }
+        assertTrue("The native UI must retain actual nested-reply root/cid branches", pairedNestedBranches >= 6);
+    }
+
+    @Test public void ordinaryNativePublishHelpersReturnLegacyModelIdsWhenReplyTreeRoutingIsDisabled() {
+        for (String[] helper : new String[][]{{"LJ", "b"}, {"LJFF", "e"}}) {
+            Method target = method("LX/0y6L;", helper[0], STRING, COMMENT, PUBLISH_MODEL);
+            assertTrue(AccessFlags.PUBLIC.isSet(target.getAccessFlags()));
+            assertTrue(AccessFlags.STATIC.isSet(target.getAccessFlags()));
+            Code code = new Code(target);
+            int flag = callIndex(code, "LX/00Wd;", "LIZ");
+            assertCall(code.at(flag), "LX/00Wd;", "LIZ", "Z");
+            assertEquals(Opcode.MOVE_RESULT, code.at(flag + 1).getOpcode());
+            assertEquals(Opcode.IF_NEZ, code.at(flag + 2).getOpcode());
+            assertEquals(((OneRegisterInstruction) code.at(flag + 1)).getRegisterA(),
+                    ((OneRegisterInstruction) code.at(flag + 2)).getRegisterA());
+            assertCall(code.at(flag + 3), "LX/0xyq;", "LIZIZ", "Z", COMMENT);
+            assertEquals("Target routing must consult the actual first Comment argument",
+                    target.getImplementation().getRegisterCount() - 2,
+                    ((FiveRegisterInstruction) code.at(flag + 3)).getRegisterC());
+            assertEquals(Opcode.MOVE_RESULT, code.at(flag + 4).getOpcode());
+            assertEquals(Opcode.IF_NEZ, code.at(flag + 5).getOpcode());
+            assertEquals(((OneRegisterInstruction) code.at(flag + 4)).getRegisterA(),
+                    ((OneRegisterInstruction) code.at(flag + 5)).getRegisterA());
+            assertEquals("Either enabled routing condition skips the legacy return",
+                    code.target(flag + 2), code.target(flag + 5));
+            assertEquals(Opcode.IGET_OBJECT, code.at(flag + 6).getOpcode());
+            assertFieldReference(code.at(flag + 6), PUBLISH_BASE, helper[1], STRING);
+            assertEquals("The disabled branch must read from the actual second model argument",
+                    target.getImplementation().getRegisterCount() - 1,
+                    ((TwoRegisterInstruction) code.at(flag + 6)).getRegisterB());
+            assertEquals(Opcode.RETURN_OBJECT, code.at(flag + 7).getOpcode());
+            assertEquals(((OneRegisterInstruction) code.at(flag + 6)).getRegisterA(),
+                    ((OneRegisterInstruction) code.at(flag + 7)).getRegisterA());
+        }
+    }
+
+    @Test public void nativePublishEndpointsReceiveTheEffectiveRootAndDirectHelperResults() {
+        for (String[] path : new String[][]{
+                {"LJII", "Ljava/lang/Object;", "LJII", "/aweme/v1/comment/publish/", "5"},
+                {"LJIILL", PUBLISH_MODEL, "LJIIL", "/aweme/v1/comment/publish_evaluate/", "6"}}) {
+            Method caller = method(PUBLISH_REQUEST, path[0], "LJII".equals(path[0]) ? "Lio/reactivex/Observable;" : "V", path[1]);
+            Method endpoint = singleMethod(REPLY_API, path[2]);
+            assertEquals(path[3], annotationValue(endpoint.getAnnotations(), "Lretrofit2/http/POST;"));
+            Code code = new Code(caller);
+            int request = callIndex(code, REPLY_API, path[2]);
+            assertEquals(Opcode.INVOKE_INTERFACE_RANGE, code.at(request).getOpcode());
+            int requestStart = ((RegisterRangeInstruction) code.at(request)).getStartRegister();
+            for (String[] helper : new String[][]{{"LJ", "2", "reply_id"}, {"LJFF", path[4], "reply_to_reply_id"}}) {
+                int parameter = Integer.parseInt(helper[1]);
+                assertEquals(STRING, endpoint.getParameters().get(parameter).getType());
+                assertEquals(helper[2], annotationValue(endpoint.getParameters().get(parameter).getAnnotations(),
+                        "Lretrofit2/http/Field;"));
+                int invoke = callIndex(code, "LX/0y6L;", helper[0]);
+                assertCall(code.at(invoke), "LX/0y6L;", helper[0], STRING, COMMENT, PUBLISH_MODEL);
+                assertEquals(Opcode.IGET_OBJECT, code.at(invoke - 1).getOpcode());
+                assertFieldReference(code.at(invoke - 1), PUBLISH_MODEL, "p", COMMENT);
+                TwoRegisterInstruction targetRead = (TwoRegisterInstruction) code.at(invoke - 1);
+                FiveRegisterInstruction helperCall = (FiveRegisterInstruction) code.at(invoke);
+                assertEquals(targetRead.getRegisterA(), helperCall.getRegisterC());
+                assertEquals("Target and model must be taken from the same prepared native model",
+                        targetRead.getRegisterB(), helperCall.getRegisterD());
+                assertEquals(Opcode.MOVE_RESULT_OBJECT, code.at(invoke + 1).getOpcode());
+                int resultRegister = ((OneRegisterInstruction) code.at(invoke + 1)).getRegisterA();
+                assertEquals("The helper result must occupy its exact native wire parameter register",
+                        parameterRegister(endpoint, requestStart, parameter), resultRegister);
+                assertTrue(invoke + 1 < request);
+                for (int index = invoke + 2; index < request; index++) {
+                    Instruction instruction = code.at(index);
+                    if (instruction.getOpcode().setsRegister() && instruction instanceof OneRegisterInstruction) {
+                        assertNotEquals("The wire ID must not be overwritten before the service call",
+                                resultRegister, ((OneRegisterInstruction) instruction).getRegisterA());
+                    }
+                }
+            }
+        }
     }
 
     @Test public void ownCommentsUseTheNativeSelfListEndpointAndRawCommentNoticeItems() {

@@ -232,3 +232,5 @@ comment_reply_task_result	comment_reply	method	Lbolts/Task;		getResult	()Ljava/l
 comment_reply_task_faulted	comment_reply	method	Lbolts/Task;		isFaulted	()Z								
 comment_reply_task_error	comment_reply	method	Lbolts/Task;		LJIIL	()Ljava/lang/Exception;								
 comment_reply_task_cancelled	comment_reply	method	Lbolts/Task;		isCancelled	()Z								
+comment_reply_publish_root	comment_reply	method	LX/0y6L;		LJ	(Lcom/ss/android/ugc/aweme/comment/model/Comment;LX/0yFs;)Ljava/lang/String;								
+comment_reply_publish_direct	comment_reply	method	LX/0y6L;		LJFF	(Lcom/ss/android/ugc/aweme/comment/model/Comment;LX/0yFs;)Ljava/lang/String;								
