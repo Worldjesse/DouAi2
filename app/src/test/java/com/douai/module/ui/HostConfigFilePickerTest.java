@@ -72,6 +72,22 @@ public final class HostConfigFilePickerTest {
         } finally { activity.finish(); }
     }
 
+    @Test @Config(sdk = 28) public void reportPdfSelectsOneFileThroughTheSameHostOwnedRegistry() {
+        PickerActivity activity = Robolectric.buildActivity(PickerActivity.class).setup().get();
+        AtomicReference<Uri> selected = new AtomicReference<>();
+        try {
+            HostConfigFilePicker picker = HostConfigFilePicker.launch(activity, ReportImageShare.destination(ReportImageExport.Format.PDF), selected::set);
+            assertNotNull(picker); assertTrue(HostConfigFilePicker.isPending(activity));
+            assertEquals(Intent.ACTION_CREATE_DOCUMENT, activity.registry.intent.getAction());
+            assertEquals("application/pdf", activity.registry.intent.getType());
+            assertNotEquals(0, activity.registry.intent.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            assertNotEquals(0, activity.registry.intent.getFlags() & Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            Uri tree = Uri.parse("content://report.docs/tree/report-root");
+            activity.registry.dispatchResult(activity.registry.code, Activity.RESULT_OK, new Intent().setData(tree));
+            assertEquals(tree, selected.get()); assertFalse(HostConfigFilePicker.isPending(activity));
+        } finally { activity.finish(); }
+    }
+
     @Test public void settingsRemainAliveWhileSystemDocumentPickerIsOpen() {
         PickerActivity activity = Robolectric.buildActivity(PickerActivity.class).setup().get();
         HostUiController controller = new HostUiController(RuntimeEnvironment.getApplication(), ignored -> { });

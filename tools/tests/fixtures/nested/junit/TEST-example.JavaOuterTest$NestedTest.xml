@@ -1,0 +1,3 @@
+<testsuite name="example.JavaOuterTest$NestedTest" tests="1" skipped="0" failures="0" errors="0">
+  <testcase name="sameName" classname="example.JavaOuterTest$NestedTest"/>
+</testsuite>

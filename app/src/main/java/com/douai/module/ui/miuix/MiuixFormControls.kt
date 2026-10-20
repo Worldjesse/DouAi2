@@ -185,16 +185,7 @@ private class FormInput(context: Context, label: String, initial: String, secret
         val state = state ?: return
         applyingComposeValue = true
         try {
-            // Editable.replace applies the native filters and still calls the Java TextWatchers.
-            if (text.toString() != next.text) text.replace(0, text.length, next.text)
-            val actual = text.toString()
-            val selection = next.selection.clamped(actual.length)
-            state.value = next.copy(
-                text = actual,
-                selection = selection,
-                composition = next.composition?.takeIf { it.max <= actual.length },
-            )
-            setSelection(selection.start, selection.end)
+            state.value = applyNativeTextEdit(this, state.value, next)
             state.error = error?.toString()
         } finally {
             applyingComposeValue = false

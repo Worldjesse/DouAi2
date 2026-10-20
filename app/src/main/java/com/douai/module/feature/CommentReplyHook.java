@@ -352,7 +352,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
             safeLog("Comment reply generated: chars=" + task.generatedChars);
             if (task.settings.enabled(LocalOptions.REPLY_VOICE)) {
                 task.stage = "speech";
-                SpeechPreparation.Audio audio = speechPreparer.prepare(application, task.text, task.settings, 30_000, () -> valid(task));
+                SpeechPreparation.Audio audio = speechPreparer.prepare(application, task.text, task.settings, Long.MAX_VALUE, () -> valid(task));
                 task.audio = audio;
                 if (!valid(task)) { audio.delete(); complete(task, "cancelled"); return; }
             }

@@ -14,9 +14,12 @@ import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import com.douai.module.config.ConfigTransfer;
 import com.douai.module.config.ConfigBackup;
+import com.douai.module.config.BackupLimitException;
+import com.douai.module.config.BackupValidationException;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
 import com.douai.module.ui.miuix.MiuixFormControls;
@@ -77,6 +80,7 @@ final class ConfigTransferDialog implements AutoCloseable {
     private Operation operation;
     private ConfigBackup.Preview preview;
     private String sourceJson;
+    private String sourceFileSummary;
 
     ConfigTransferDialog(Context context, SettingsStore store, boolean miuix, Runnable changed) {
         this(context, store, miuix, changed, new Files() {
@@ -143,7 +147,7 @@ final class ConfigTransferDialog implements AutoCloseable {
 
     private void choose(boolean export) {
         if (!active() || operation != null || selection != null) return;
-        preview = null; sourceJson = null; previewText.setText(""); confirmButton.setEnabled(false);
+        preview = null; sourceJson = null; sourceFileSummary = null; previewText.setText(""); confirmButton.setEnabled(false);
         resetAnalyticsRestore();
         boolean includeSecrets = secrets.isChecked();
         boolean includeLocalAnalytics = includeAnalytics.isChecked();
@@ -157,9 +161,11 @@ final class ConfigTransferDialog implements AutoCloseable {
             selection = null;
             if (uri == null) { busy(false); status.setText("已取消选择，配置未更改。"); return; }
             if (export) run(op -> {
+                op.stage = Stage.EXPORT_DATA;
                 byte[] data = ConfigBackup.export(application, store, includeSecrets, includeLocalAnalytics).getBytes(StandardCharsets.UTF_8);
-                if (data.length > ConfigBackup.MAX_BYTES) throw new IllegalArgumentException();
+                if (data.length > ConfigBackup.MAX_BYTES) throw new BackupLimitException(BackupLimitException.Section.FILE);
                 op.check();
+                op.stage = Stage.WRITE_FILE;
                 try (OutputStream stream = op.attach(files.write(uri))) {
                     for (int offset = 0; offset < data.length; offset += 8192) {
                         op.check(); stream.write(data, offset, Math.min(8192, data.length - offset));
@@ -169,6 +175,7 @@ final class ConfigTransferDialog implements AutoCloseable {
                 return null;
             }, "正在导出…", includeLocalAnalytics ? "配置和本地分析数据已导出。" : "配置已导出。");
             else run(op -> {
+                op.stage = Stage.READ_FILE;
                 byte[] data;
                 try (InputStream stream = op.attach(files.read(uri))) {
                     ByteArrayOutputStream output = new ByteArrayOutputStream();
@@ -176,15 +183,18 @@ final class ConfigTransferDialog implements AutoCloseable {
                     int count;
                     while ((count = stream.read(buffer)) != -1) {
                         op.check();
-                        if (count > ConfigBackup.MAX_BYTES - output.size()) throw new IllegalArgumentException();
+                        if (count > ConfigBackup.MAX_BYTES - output.size()) throw new BackupLimitException(BackupLimitException.Section.FILE);
                         output.write(buffer, 0, count);
                     }
                     data = output.toByteArray();
                 } finally { op.detach(); }
                 op.check();
+                op.fileSummary = logRead(data);
+                op.stage = Stage.DECODE_FILE;
                 String json = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                         .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(data)).toString();
                 op.importJson = json;
+                op.stage = Stage.VALIDATE_DATA;
                 return ConfigBackup.inspect(store, json, mode);
             }, "正在读取并校验…", "请核对以下变更，确认后才会写入配置。");
         });
@@ -201,10 +211,12 @@ final class ConfigTransferDialog implements AutoCloseable {
     private void refreshMode() {
         if (!active() || operation != null || selection != null || sourceJson == null) return;
         String original = sourceJson;
+        String originalFileSummary = sourceFileSummary;
         ConfigTransfer.Mode selected = mode();
         preview = null; previewText.setText("");
         run(op -> {
-            op.check(); op.importJson = original;
+            op.check(); op.importJson = original; op.fileSummary = originalFileSummary;
+            op.stage = Stage.VALIDATE_DATA;
             return ConfigBackup.inspect(store, original, selected);
         }, "正在重新核对导入方式…", "请核对以下变更，确认后才会写入配置。");
     }
@@ -219,6 +231,7 @@ final class ConfigTransferDialog implements AutoCloseable {
             // This is the commit boundary. A confirmed atomic settings write may finish after close.
             op.applying = true;
             op.check();
+            op.stage = Stage.APPLY_DATA;
             ConfigBackup.apply(application, store, accepted, restoreLocalAnalytics);
             op.applied = true;
             return null;
@@ -228,6 +241,7 @@ final class ConfigTransferDialog implements AutoCloseable {
         cancelButton.setEnabled(false);
     }
 
+    private enum Stage { EXPORT_DATA, WRITE_FILE, READ_FILE, DECODE_FILE, VALIDATE_DATA, APPLY_DATA }
     private interface Work { ConfigBackup.Preview execute(Operation op) throws Exception; }
     private void run(Work work, String working, String success) {
         Operation op = new Operation();
@@ -237,7 +251,18 @@ final class ConfigTransferDialog implements AutoCloseable {
             ConfigBackup.Preview result = null;
             boolean succeeded = false;
             try { op.check(); result = work.execute(op); op.check(); succeeded = true; }
-            catch (Exception ignored) { /* Never display provider messages, JSON fragments, or secrets. */ }
+            catch (Exception | LinkageError failure) {
+                op.failureMessage = failureMessage(op.stage, failure);
+                String validation = validationDetails(failure);
+                if (!validation.isEmpty()) op.failureMessage += "\n校验详情：" + validation;
+                if (!op.cancelled && !(failure instanceof CancellationException)) {
+                    // Provider messages and stack traces may contain document contents or credentials.
+                    android.util.Log.w("DouAi", "ConfigTransfer failed: stage="
+                            + op.stage.name().toLowerCase(java.util.Locale.ROOT)
+                            + "; error=" + failure.getClass().getSimpleName()
+                            + (validation.isEmpty() ? "" : "; validation=" + validation));
+                }
+            }
             ConfigBackup.Preview ready = result;
             boolean done = succeeded;
             main.post(() -> {
@@ -245,17 +270,23 @@ final class ConfigTransferDialog implements AutoCloseable {
                 main.removeCallbacks(op.timeout);
                 operation = null;
                 busy(false);
-                status.setText(done ? success : op.applying
+                String message = done ? success : op.applying
                         ? "导入未完成，配置或本地分析数据可能已变化。请重新选择文件并核对预览。"
-                        : "操作失败。请检查文件格式、文件权限和存储空间后重试。配置文件最大 2 MiB，含本地分析数据的备份最大 32 MiB。");
+                        : op.failureMessage;
+                status.setText(message + (op.fileSummary == null ? "" : "\n" + op.fileSummary));
                 if (done && ready != null) {
-                    sourceJson = op.importJson; preview = ready;
+                    sourceJson = op.importJson; sourceFileSummary = op.fileSummary; preview = ready;
                     restoreAnalytics.setVisibility(ready.includesAnalytics ? View.VISIBLE : View.GONE);
                     updatePreview();
                     cancelButton.setEnabled(true);
                 }
                 if (op.applied) {
-                    sourceJson = null;
+                    try {
+                        Toast.makeText(application, "备份导入成功", Toast.LENGTH_SHORT).show();
+                    } catch (RuntimeException unavailable) {
+                        android.util.Log.w("DouAi", "ConfigTransfer import_success_toast_unavailable");
+                    }
+                    sourceJson = null; sourceFileSummary = null;
                     resetAnalyticsRestore();
                     if (changed != null) changed.run();
                 }
@@ -265,6 +296,46 @@ final class ConfigTransferDialog implements AutoCloseable {
         try { worker.execute(op.future); main.postDelayed(op.timeout, 60_000); }
         catch (java.util.concurrent.RejectedExecutionException unavailable) {
             operation = null; busy(false); status.setText("配置文件任务繁忙，请稍后重试。");
+        }
+    }
+
+    private static String logRead(byte[] data) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(data);
+            char[] digits = "0123456789ABCDEF".toCharArray();
+            char[] hex = new char[digest.length * 2];
+            for (int index = 0; index < digest.length; index++) {
+                hex[index * 2] = digits[(digest[index] >>> 4) & 15];
+                hex[index * 2 + 1] = digits[digest[index] & 15];
+            }
+            String hash = new String(hex);
+            android.util.Log.i("DouAi", "ConfigTransfer read: bytes=" + data.length + "; sha256=" + hash);
+            return "文件摘要：bytes=" + data.length + "；SHA256=" + hash.substring(0, 12);
+        } catch (java.security.NoSuchAlgorithmException unavailable) {
+            // Diagnostics must not make otherwise readable data fail to import.
+            android.util.Log.i("DouAi", "ConfigTransfer read: bytes=" + data.length + "; sha256=unavailable");
+            return "文件摘要：bytes=" + data.length + "；SHA256=unavailable";
+        }
+    }
+
+    private static String validationDetails(Throwable failure) {
+        if (!(failure instanceof BackupValidationException)) return "";
+        BackupValidationException validation = (BackupValidationException) failure;
+        return validation.diagnosticCode() + (validation.field.isEmpty() ? "" : "; field=" + validation.field)
+                + "; failureKind=" + validation.failureKind.name();
+    }
+
+    private static String failureMessage(Stage stage, Throwable failure) {
+        if (failure instanceof BackupLimitException) return failure.getMessage();
+        if (failure instanceof LinkageError || failure instanceof BackupValidationException
+                && ((BackupValidationException) failure).failureKind == BackupValidationException.FailureKind.LINKAGE)
+            return "备份操作遇到系统或宿主兼容性问题。请更新模块并重启抖音后重试。";
+        switch (stage) {
+            case READ_FILE: return "无法读取备份文件。请通过系统文件选择器重新选择可访问的本地文件；云盘文件请先下载完成。";
+            case WRITE_FILE: return "无法写入备份文件。请检查保存位置的写入权限和可用空间后重试。";
+            case DECODE_FILE: return "文件不是有效的 UTF-8 文本。请选择 DouAi 原始导出的 JSON 文件。";
+            case VALIDATE_DATA: return "备份格式、版本或配置项校验失败。请选择 DouAi 导出的完整 JSON 文件。";
+            default: return "备份生成失败。请检查当前配置或本地分析数据是否有效后重试。";
         }
     }
 
@@ -322,7 +393,7 @@ final class ConfigTransferDialog implements AutoCloseable {
     }
     private void cancel(String message) {
         if (!active() || operation != null && operation.applying) return;
-        stop(); preview = null; sourceJson = null; resetAnalyticsRestore(); previewText.setText(""); busy(false); status.setText(message);
+        stop(); preview = null; sourceJson = null; sourceFileSummary = null; resetAnalyticsRestore(); previewText.setText(""); busy(false); status.setText(message);
     }
     private void stop() {
         selectionGeneration++; // A cancelled chooser cannot restart an operation through a late callback.
@@ -338,14 +409,17 @@ final class ConfigTransferDialog implements AutoCloseable {
             catch (java.util.concurrent.RejectedExecutionException ignored) { }
         }
     }
-    @Override public void close() { closed = true; stop(); preview = null; sourceJson = null; }
+    @Override public void close() { closed = true; stop(); preview = null; sourceJson = null; sourceFileSummary = null; }
 
     private final class Operation {
         volatile boolean cancelled;
         volatile boolean applying;
         volatile boolean applied;
         volatile Closeable stream;
+        Stage stage = Stage.EXPORT_DATA;
+        String failureMessage;
         String importJson;
+        String fileSummary;
         FutureTask<Void> future;
         final Runnable timeout = () -> { if (operation == this && !applying) cancel("操作超时，配置未更改。"); };
         void check() { if (cancelled || Thread.currentThread().isInterrupted()) throw new CancellationException(); }

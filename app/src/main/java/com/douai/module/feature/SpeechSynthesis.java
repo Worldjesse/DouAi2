@@ -52,7 +52,8 @@ public final class SpeechSynthesis implements AutoCloseable {
             request.complete(null, "语音设置不可用");
             return request;
         }
-        if (!new SpeechSettings(options).thirdParty) {
+        SpeechSettings settings = new SpeechSettings(options);
+        if (!settings.thirdParty && !settings.minimax) {
             request.local = LocalSpeechSynthesis.synthesize(context, text, options, request::complete);
             return request;
         }
@@ -62,9 +63,10 @@ public final class SpeechSynthesis implements AutoCloseable {
         }
         Context application = context.getApplicationContext();
         Context use = application == null ? context : application;
-        request.main.postDelayed(() -> request.complete(null, "第三方语音生成超时"), 60_000);
+        request.main.postDelayed(() -> request.complete(null,
+                settings.minimax ? "MiniMax 语音生成超时" : "第三方语音生成超时"), 60_000);
         try {
-            request.worker = WORKERS.submit(() -> request.generate(use, text, new SpeechSettings(options)));
+            request.worker = WORKERS.submit(() -> request.generate(use, text, settings));
             if (request.finished.get()) request.worker.cancel(true);
         } catch (RejectedExecutionException ignored) {
             request.complete(null, "语音生成任务过多，请稍后重试");
@@ -74,13 +76,18 @@ public final class SpeechSynthesis implements AutoCloseable {
 
     private void generate(Context context, String text, SpeechSettings settings) {
         try {
-            String url = SpeechHttpClient.resolveTemplate(settings.getTemplate, text, settings.selectedVoice);
-            SpeechHttpClient.Resource response = http.fetchResource(url, settings.headers);
-            if (!response.isAudio()) {
-                String audioUrl = SpeechHttpClient.audioUrl(response.text(), settings.audioField);
-                // API authentication belongs to its origin, not an unrelated media/CDN host.
-                response = http.fetchResource(audioUrl,
-                        SpeechHttpClient.sameOrigin(url, audioUrl) ? settings.headers : "{}");
+            SpeechHttpClient.Resource response;
+            if (settings.minimax) {
+                response = MiniMaxSpeechClient.synthesize(http, text, settings);
+            } else {
+                String url = SpeechHttpClient.resolveTemplate(settings.getTemplate, text, settings.selectedVoice);
+                response = http.fetchResource(url, settings.headers);
+                if (!response.isAudio()) {
+                    String audioUrl = SpeechHttpClient.audioUrl(response.text(), settings.audioField);
+                    // API authentication belongs to its origin, not an unrelated media/CDN host.
+                    response = http.fetchResource(audioUrl,
+                            SpeechHttpClient.sameOrigin(url, audioUrl) ? settings.headers : "{}");
+                }
             }
             http.ensureActive();
             if (!response.isAudio()) throw new IllegalArgumentException("第三方语音链接未返回音频文件");
@@ -99,11 +106,11 @@ public final class SpeechSynthesis implements AutoCloseable {
         } catch (Exception failure) {
             String message = failure.getMessage();
             // Parsing/IO failures must not leak text, credentials or provider response content.
-            if (message == null || !(message.startsWith("第三方语音") || message.startsWith("所选语音字段")
+            if (message == null || !(message.startsWith("第三方语音") || message.startsWith("MiniMax 语音") || message.startsWith("所选语音字段")
                     || message.equals("返回了多个语音链接，请选择音频字段")
                     || message.equals("返回了多个链接，请选择音频字段") || message.equals("无法创建语音缓存")
                     || message.equals("生成的语音文件无效"))) {
-                message = "第三方语音生成失败，请检查接口及音频字段";
+                message = settings.minimax ? "MiniMax 语音生成失败，请检查配置" : "第三方语音生成失败，请检查接口及音频字段";
             }
             complete(null, message);
         } finally {

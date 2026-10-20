@@ -19,6 +19,7 @@ import androidx.compose.ui.test.junit4.AndroidComposeTestRule_androidKt;
 import androidx.test.ext.junit.rules.ActivityScenarioRule;
 
 import com.douai.module.config.FeatureSettings;
+import com.douai.module.config.MiniMaxSpeechOptions;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.config.SpeechSettings;
 import com.douai.module.config.ThirdPartyRequestTemplate;
@@ -101,6 +102,360 @@ public final class SpeechSettingsDialogTest {
         assertEquals("1.4", value("语速"));
         assertEquals("0.8", value("音调"));
         assertEquals("https://example.com/speak?text={text}", store.getString(SpeechSettings.GET_TEMPLATE, ""));
+    }
+
+    @Test public void miniMaxControlsPreserveSystemAndThirdPartySettingsAndHideTheApiKey() {
+        store.putString("tts_rate", "1.4");
+        store.putString("tts_pitch", "0.8");
+        store.putString(SpeechSettings.SELECTED_VOICE, "third-voice");
+        store.putString(SpeechSettings.MINIMAX_API_KEY, "fixture-private-key");
+        store.putString(SpeechSettings.MINIMAX_VOICE_ID, "minimax-voice");
+        open(false);
+        chooseProvider(2);
+        assertEquals("MiniMax", value("语音来源"));
+        assertEquals("已设置", value("API Key"));
+        assertEquals(SpeechSettings.DEFAULT_MINIMAX_BASE_URL, value("API 地址"));
+        assertEquals("1", value("语速"));
+        assertEquals("1", value("音量"));
+        assertEquals("0", value("音调"));
+        assertEquals("minimax-voice", value("音色"));
+        assertNull(root.findViewWithTag("settings.option.合成 GET"));
+        assertNull(root.findViewWithTag("settings.option.语音引擎"));
+        assertNull(root.findViewWithTag("settings.option.音色高级设置"));
+        AlertDialog editor = option("API Key");
+        assertEquals(android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD,
+                input(editor, "API Key").getInputType() & android.text.InputType.TYPE_MASK_VARIATION);
+        editor.dismiss();
+        editor = option("音量");
+        input(editor, "音量").setText("10");
+        save(editor);
+        assertEquals("10", store.getString(SpeechSettings.MINIMAX_VOLUME, ""));
+        chooseProvider(1);
+        assertEquals("third-voice", value("音色"));
+        chooseProvider(0);
+        assertEquals("1.4", value("语速"));
+        assertEquals("0.8", value("音调"));
+        assertEquals("minimax-voice", store.getString(SpeechSettings.MINIMAX_VOICE_ID, ""));
+    }
+
+    @Test public void miniMaxRefreshActionsBelongToTheirCachedListsAndOpeningDoesNotRequestOrSynthesize() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+            store.putString(SpeechSettings.MINIMAX_API_KEY, "fixture-key");
+            store.putString(SpeechSettings.MINIMAX_BASE_URL, server.url("/").toString());
+            store.putString(SpeechSettings.MINIMAX_MODEL_SAMPLE, "[\"speech-2.8-hd\"]");
+            store.putString(SpeechSettings.MINIMAX_MODEL_SOURCE, "api");
+            store.putString(SpeechSettings.MINIMAX_VOICE_SAMPLE, "[{\"id\":\"saved-voice\",\"name\":\"缓存音色\"}]");
+            open(false);
+            assertNull("Model refresh must stay inside its list", root.findViewWithTag("settings.option.刷新模型"));
+            assertNull("Official refresh must stay inside its model list", root.findViewWithTag("settings.option.刷新官方模型列表"));
+            assertNull("Voice refresh must stay inside its list", root.findViewWithTag("settings.option.刷新音色"));
+            AlertDialog models = option("模型");
+            assertEquals("speech-2.8-hd", models.getListView().getAdapter().getItem(0));
+            assertEquals("刷新", models.getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+            assertEquals("手动填写", models.getButton(AlertDialog.BUTTON_NEUTRAL).getText().toString());
+            models.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            ShadowLooper.idleMainLooper();
+            AlertDialog sources = (AlertDialog) ShadowDialog.getLatestDialog();
+            assertEquals(2, sources.getListView().getAdapter().getCount());
+            assertTrue(sources.getListView().getAdapter().getItem(0).toString().contains("当前接口"));
+            assertTrue(sources.getListView().getAdapter().getItem(1).toString().contains("官方目录"));
+            sources.dismiss();
+            AlertDialog voices = option("音色");
+            assertEquals("缓存音色 · saved-voice", voices.getListView().getAdapter().getItem(0));
+            assertEquals("刷新", voices.getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+            assertEquals("手动填写", voices.getButton(AlertDialog.BUTTON_NEUTRAL).getText().toString());
+            assertEquals("Opening cached lists must not request models, voices or paid synthesis", 0, server.getRequestCount());
+        }
+    }
+
+    @Test public void miniMaxEditsValidateRangesAndManualVoiceDoesNotOverwriteThirdPartySelection() {
+        store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+        store.putString(SpeechSettings.SELECTED_VOICE, "third-voice");
+        store.putString(SpeechSettings.MINIMAX_VOICE_ID, "saved-voice");
+        open(false);
+        String[][] invalids = {{"语速", "0.49"}, {"音量", "0"}, {"音调", "0.5"}, {"API 地址", "invalid-url"}};
+        for (String[] invalid : invalids) {
+            AlertDialog editor = option(invalid[0]);
+            input(editor, invalid[0]).setText(invalid[1]);
+            save(editor);
+            assertTrue(editor.isShowing());
+            assertNotNull(input(editor, invalid[0]).getError());
+            editor.dismiss();
+        }
+        AlertDialog voice = option("音色");
+        voice.getButton(AlertDialog.BUTTON_NEUTRAL).performClick();
+        ShadowLooper.idleMainLooper();
+        AlertDialog manual = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertEquals("saved-voice", input(manual, "音色编号").getText().toString());
+        input(manual, "音色编号").setText("new-minimax-voice");
+        save(manual);
+        assertEquals("new-minimax-voice", store.getString(SpeechSettings.MINIMAX_VOICE_ID, ""));
+        assertEquals("third-voice", store.getString(SpeechSettings.SELECTED_VOICE, ""));
+    }
+
+    @Test public void miniMaxModelsOfferTheBuiltInCatalogAndManualIdsWithoutRelabelingThemAsFetched() {
+        store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+        store.putString(SpeechSettings.MINIMAX_MODEL, "manual-model");
+        open(false);
+        AlertDialog choice = option("模型");
+        assertEquals(9, choice.getListView().getAdapter().getCount());
+        assertTrue(choice.getListView().getAdapter().getItem(0).toString().contains("当前模型，未在列表中"));
+        choice.getButton(AlertDialog.BUTTON_NEUTRAL).performClick();
+        ShadowLooper.idleMainLooper();
+        AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
+        input(editor, "模型").setText("");
+        save(editor);
+        assertTrue(editor.isShowing());
+        assertNotNull(input(editor, "模型").getError());
+        input(editor, "模型").setText("speech-future-hd");
+        save(editor);
+        assertEquals("speech-future-hd", value("模型"));
+        TextView hint = root.findViewWithTag("speech.model.capability");
+        assertNotNull(hint);
+        assertTrue(hint.getText().toString().contains("能力未验证"));
+    }
+
+    @Test public void miniMaxModelRefreshUsesTheApiAndPreservesItsCacheWhenTheApiHasOnlyTextModels() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setBody("{\"data\":[{\"id\":\"MiniMax-M2.5\"},{\"id\":\"speech-future-hd\"}]}"));
+            server.enqueue(new MockResponse().setBody("{\"data\":[{\"id\":\"MiniMax-M2.5\"}]}"));
+            server.start();
+            store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+            store.putString(SpeechSettings.MINIMAX_API_KEY, "fixture-key");
+            store.putString(SpeechSettings.MINIMAX_BASE_URL, server.url("/").toString());
+            open(false);
+            refreshMiniMaxList("模型");
+            RecordedRequest request = server.takeRequest(2, TimeUnit.SECONDS);
+            assertNotNull(request);
+            assertEquals("GET", request.getMethod());
+            assertEquals("/v1/models", request.getPath());
+            assertEquals("Bearer fixture-key", request.getHeader("Authorization"));
+            await(() -> "api".equals(store.getString(SpeechSettings.MINIMAX_MODEL_SOURCE, "")));
+            String cached = store.getString(SpeechSettings.MINIMAX_MODEL_SAMPLE, "");
+            assertTrue(cached.contains("speech-future-hd"));
+            assertFalse(cached.contains("MiniMax-M2.5"));
+            AlertDialog choice = (AlertDialog) ShadowDialog.getLatestDialog();
+            assertEquals(2, choice.getListView().getAdapter().getCount());
+            choice.getListView().performItemClick(null, 1, 1);
+            assertEquals("speech-future-hd", value("模型"));
+            refreshMiniMaxList("模型");
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            await(() -> org.robolectric.shadows.ShadowToast.getTextOfLatestToast().toString().contains("未返回语音模型"));
+            assertEquals(cached, store.getString(SpeechSettings.MINIMAX_MODEL_SAMPLE, ""));
+            assertEquals("api", store.getString(SpeechSettings.MINIMAX_MODEL_SOURCE, ""));
+        }
+    }
+
+    @Test public void changingMiniMaxEndpointCancelsTheModelFetchAndReleasesTheSharedVoiceRequestSlot() throws Exception {
+        try (MockWebServer old = new MockWebServer(); MockWebServer current = new MockWebServer()) {
+            old.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            current.enqueue(new MockResponse().setBody("{\"system_voice\":[{\"voice_id\":\"current\"}],\"base_resp\":{\"status_code\":0}}"));
+            old.start(); current.start();
+            store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+            store.putString(SpeechSettings.MINIMAX_API_KEY, "fixture-key");
+            store.putString(SpeechSettings.MINIMAX_BASE_URL, old.url("/").toString());
+            open(false);
+            refreshMiniMaxList("模型");
+            assertNotNull(old.takeRequest(2, TimeUnit.SECONDS));
+            refreshMiniMaxList("音色");
+            assertEquals(1, old.getRequestCount());
+            AlertDialog editor = option("API 地址");
+            input(editor, "API 地址").setText(current.url("/").toString());
+            save(editor);
+            refreshMiniMaxList("音色");
+            assertNotNull(current.takeRequest(2, TimeUnit.SECONDS));
+            await(() -> store.getString(SpeechSettings.MINIMAX_VOICE_SAMPLE, "").contains("current"));
+            assertEquals("", store.getString(SpeechSettings.MINIMAX_MODEL_SAMPLE, ""));
+        }
+    }
+
+    @Test public void miniMaxAdvancedSettingsValidateAndPersistWithoutChangingLocalControls() {
+        store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+        store.putString(SpeechSettings.RATE, "1.8");
+        store.putString(SpeechSettings.PITCH, "1.4");
+        open(false);
+        AlertDialog advanced = option("MiniMax 高级设置");
+        View form = advanced.getWindow().getDecorView();
+        pick(form, "情绪", 1);
+        assertEquals("happy", store.getString(MiniMaxSpeechOptions.EMOTION, ""));
+        pick(form, "音频格式", 1);
+        assertEquals("wav", store.getString(MiniMaxSpeechOptions.AUDIO_FORMAT, ""));
+        assertNull(form.findViewWithTag("settings.option.MP3 码率"));
+        pick(form, "采样率", 5);
+        pick(form, "声道", 1);
+        assertEquals("44100", store.getString(MiniMaxSpeechOptions.SAMPLE_RATE, ""));
+        assertEquals("2", store.getString(MiniMaxSpeechOptions.CHANNEL, ""));
+        AlertDialog editor = option(form, "音高调整（-100 至 100）");
+        input(editor, "音高调整（-100 至 100）").setText("101");
+        save(editor);
+        assertTrue(editor.isShowing());
+        input(editor, "音高调整（-100 至 100）").setText("-30");
+        save(editor);
+        assertEquals("-30", store.getString(MiniMaxSpeechOptions.MODIFY_PITCH, ""));
+        editor = option(form, "发音字典（每行 原文/替换内容）");
+        input(editor, "发音字典（每行 原文/替换内容）").setText("invalid");
+        save(editor);
+        assertTrue(editor.isShowing());
+        input(editor, "发音字典（每行 原文/替换内容）").setText("处理/(chu3)(li3)\n世界/world");
+        save(editor);
+        assertEquals("处理/(chu3)(li3)\n世界/world", store.getString(MiniMaxSpeechOptions.PRONUNCIATION_TONE, ""));
+        assertEquals("1.8", store.getString(SpeechSettings.RATE, ""));
+        assertEquals("1.4", store.getString(SpeechSettings.PITCH, ""));
+    }
+
+    @Test public void miniMaxAdvancedAndModelEditsRejectIncompatibleMergedSettingsBeforeSaving() {
+        store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+        open(false);
+        AlertDialog advanced = option("MiniMax 高级设置");
+        View form = advanced.getWindow().getDecorView();
+        AlertDialog emotion = option(form, "情绪");
+        assertTrue(emotion.getListView().getAdapter().getItem(9).toString().contains("不适用"));
+        assertTrue(emotion.getListView().getAdapter().getItem(9).toString().contains("speech-2.6"));
+        emotion.getListView().performItemClick(null, 9, 9);
+        assertTrue(emotion.isShowing());
+        assertEquals("", store.getString(MiniMaxSpeechOptions.EMOTION, ""));
+        emotion.dismiss();
+        pick(form, "语言增强", java.util.Arrays.asList(MiniMaxSpeechOptions.LANGUAGES).indexOf("English"));
+        AlertDialog latex = option(form, "LaTeX 朗读");
+        assertTrue(latex.getListView().getAdapter().getItem(1).toString().contains("不适用"));
+        latex.getListView().performItemClick(null, 1, 1);
+        assertTrue(latex.isShowing());
+        assertEquals("", store.getString(MiniMaxSpeechOptions.LATEX_READ, ""));
+        latex.dismiss();
+        pick(form, "语言增强", 1);
+        pick(form, "LaTeX 朗读", 1);
+        assertEquals("true", store.getString(MiniMaxSpeechOptions.LATEX_READ, ""));
+        pick(form, "文本归一化", 2);
+        advanced.dismiss();
+        AlertDialog models = option("模型");
+        boolean offeredConflict = false;
+        for (int index = 0; index < models.getListView().getAdapter().getCount(); index++) {
+            String label = models.getListView().getAdapter().getItem(index).toString();
+            if (label.startsWith("speech-01-hd")) offeredConflict = label.contains("不适用");
+        }
+        assertTrue(offeredConflict);
+        models.getButton(AlertDialog.BUTTON_NEUTRAL).performClick();
+        ShadowLooper.idleMainLooper();
+        AlertDialog manual = (AlertDialog) ShadowDialog.getLatestDialog();
+        input(manual, "模型").setText("speech-01-hd");
+        save(manual);
+        assertTrue(manual.isShowing());
+        assertNotNull(input(manual, "模型").getError());
+        assertEquals(SpeechSettings.DEFAULT_MINIMAX_MODEL, store.getString(SpeechSettings.MINIMAX_MODEL, SpeechSettings.DEFAULT_MINIMAX_MODEL));
+    }
+
+    private void pick(View form, String title, int index) {
+        AlertDialog choice = option(form, title);
+        choice.getListView().performItemClick(null, index, index);
+        assertFalse(title, choice.isShowing());
+    }
+
+    private void refreshMiniMaxList(String title) {
+        AlertDialog choice = option(title);
+        choice.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        ShadowLooper.idleMainLooper();
+        if ("模型".equals(title)) {
+            AlertDialog source = (AlertDialog) ShadowDialog.getLatestDialog();
+            source.getListView().performItemClick(null, 0, 0);
+            ShadowLooper.idleMainLooper();
+        }
+    }
+
+    @Test public void miniMaxRefreshShowsSafeHttpAndProviderReasonsAndRetainsExistingCatalogs() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+            store.putString(SpeechSettings.MINIMAX_API_KEY, "fixture-private-key");
+            store.putString(SpeechSettings.MINIMAX_BASE_URL, server.url("/").toString());
+            String models = "[\"speech-2.8-hd\"]", voices = "[{\"id\":\"saved-voice\",\"name\":\"saved\"}]";
+            store.putString(SpeechSettings.MINIMAX_MODEL_SAMPLE, models);
+            store.putString(SpeechSettings.MINIMAX_VOICE_SAMPLE, voices);
+            open(false);
+            for (String action : new String[]{"刷新模型", "刷新音色"}) {
+                for (int code : new int[]{401, 429, 1008, 2042, -1}) {
+                    String expected;
+                    MockResponse response = new MockResponse().addHeader("Content-Type", "application/json");
+                    if (code == 401 || code == 429) {
+                        response.setResponseCode(code).setBody("private-token https://secret.example");
+                        expected = "HTTP " + code;
+                    } else if (code > 0) {
+                        response.setBody("{\"base_resp\":{\"status_code\":" + code
+                                + ",\"status_msg\":\"fixture-private-key https://secret.example\"}}");
+                        expected = code == 1008 ? "账户余额不足" : "当前账户无所选音色权限";
+                    } else {
+                        response.setBody("private-token https://secret.example");
+                        expected = "不是有效的 JSON";
+                    }
+                    server.enqueue(response);
+                    refreshMiniMaxList("刷新模型".equals(action) ? "模型" : "音色");
+                    assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+                    await(() -> String.valueOf(org.robolectric.shadows.ShadowToast.getTextOfLatestToast()).contains(expected));
+                    String message = String.valueOf(org.robolectric.shadows.ShadowToast.getTextOfLatestToast());
+                    assertTrue(message.contains("已保留"));
+                    assertFalse(message.contains("fixture-private-key"));
+                    assertFalse(message.contains("private-token"));
+                    assertFalse(message.contains("secret.example"));
+                    assertEquals(models, store.getString(SpeechSettings.MINIMAX_MODEL_SAMPLE, ""));
+                    assertEquals(voices, store.getString(SpeechSettings.MINIMAX_VOICE_SAMPLE, ""));
+                }
+            }
+        }
+    }
+
+    @Test public void miniMaxRefreshCachesItsOwnCatalogAndSelectsTheProviderVoiceId() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().addHeader("Content-Type", "application/json").setBody(
+                    "{\"system_voice\":[{\"voice_id\":\"male-qn-qingse\",\"voice_name\":\"青涩青年\"}],"
+                    + "\"voice_cloning\":[{\"voice_id\":\"cloned\"}],\"voice_generation\":[],\"base_resp\":{\"status_code\":0}}"));
+            server.start();
+            store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+            store.putString(SpeechSettings.MINIMAX_BASE_URL, server.url("/").toString());
+            store.putString(SpeechSettings.MINIMAX_API_KEY, "fixture-key");
+            store.putString("tts_voice_sample", "7. Third Voice");
+            store.putString(SpeechSettings.SELECTED_VOICE, "7");
+            open(false);
+            refreshMiniMaxList("音色");
+            RecordedRequest request = server.takeRequest(2, TimeUnit.SECONDS);
+            assertNotNull(request);
+            assertEquals("POST", request.getMethod());
+            assertEquals("/v1/get_voice", request.getPath());
+            assertEquals("Bearer fixture-key", request.getHeader("Authorization"));
+            await(() -> !store.getString(SpeechSettings.MINIMAX_VOICE_SAMPLE, "").isEmpty());
+            AlertDialog choice = (AlertDialog) ShadowDialog.getLatestDialog();
+            assertEquals(2, choice.getListView().getAdapter().getCount());
+            choice.getListView().performItemClick(null, 1, 1);
+            assertEquals("cloned", store.getString(SpeechSettings.MINIMAX_VOICE_ID, ""));
+            assertEquals("7. Third Voice", store.getString("tts_voice_sample", ""));
+            assertEquals("7", store.getString(SpeechSettings.SELECTED_VOICE, ""));
+            AlertDialog apiKey = option("API Key");
+            input(apiKey, "API Key").setText("new-key");
+            save(apiKey);
+            assertEquals("", store.getString(SpeechSettings.MINIMAX_VOICE_SAMPLE, ""));
+            assertEquals("7. Third Voice", store.getString("tts_voice_sample", ""));
+        }
+    }
+
+    @Test public void changingMiniMaxEndpointCancelsTheOldVoiceFetch() throws Exception {
+        try (MockWebServer old = new MockWebServer(); MockWebServer current = new MockWebServer()) {
+            old.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+            current.enqueue(new MockResponse().setBody("{\"system_voice\":[{\"voice_id\":\"current\",\"voice_name\":\"当前音色\"}],\"base_resp\":{\"status_code\":0}}"));
+            old.start(); current.start();
+            store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+            store.putString(SpeechSettings.MINIMAX_API_KEY, "fixture-key");
+            store.putString(SpeechSettings.MINIMAX_BASE_URL, old.url("/").toString());
+            open(false);
+            refreshMiniMaxList("音色");
+            assertNotNull(old.takeRequest(2, TimeUnit.SECONDS));
+            AlertDialog editor = option("API 地址");
+            input(editor, "API 地址").setText(current.url("/").toString());
+            save(editor);
+            refreshMiniMaxList("音色");
+            assertNotNull(current.takeRequest(2, TimeUnit.SECONDS));
+            await(() -> store.getString(SpeechSettings.MINIMAX_VOICE_SAMPLE, "").contains("current"));
+            assertEquals("当前音色 · current", ((AlertDialog) ShadowDialog.getLatestDialog()).getListView().getAdapter().getItem(0));
+        }
     }
 
     @Test public void savingGetUpdatesParameterNamesAndRejectsAnInvalidAddress() {
@@ -579,11 +934,72 @@ public final class SpeechSettingsDialogTest {
             ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option.音频地址字段"), false));
             AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasText("data.audio", false, false), false));
             savePreview(children.get(children.size() - 1), "speech-audio-fields");
+            compose.runOnUiThread(() -> {
+                children.get(children.size() - 1).dismiss();
+                return Unit.INSTANCE;
+            });
+            scrollToOption("语音来源");
+            ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option.语音来源"), false));
+            compose.waitForIdle();
+            ActionsKt.performClick(compose.onNode(FiltersKt.hasText("MiniMax", false, false), false));
+            compose.waitForIdle();
+            assertEquals(SpeechSettings.MINIMAX, store.getString(SpeechSettings.PROVIDER, ""));
+            scrollToOption("模型");
+            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("settings.option.模型"), false));
+            savePreview(page.dialog(), "speech-minimax-settings");
+            compose.runOnIdle(() -> {
+                View main = page.dialog().getWindow().getDecorView();
+                assertNull(main.findViewWithTag("settings.option.刷新模型"));
+                assertNull(main.findViewWithTag("settings.option.刷新官方模型列表"));
+                assertNull(main.findViewWithTag("settings.option.刷新音色"));
+                return Unit.INSTANCE;
+            });
+            ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option.模型"), false));
+            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("miuix.dialog.button.-1"), false));
+            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasText("手动填写", false, false), false));
+            savePreview(children.get(children.size() - 1), "speech-minimax-model-list");
+            ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("miuix.dialog.button.-1"), false));
+            compose.waitForIdle();
+            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasText("当前接口模型（使用 API Key）", false, false), false));
+            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasText("MiniMax 官方目录（无需 Key）", false, false), false));
+            savePreview(children.get(children.size() - 1), "speech-minimax-model-refresh-sources");
+            compose.runOnUiThread(() -> {
+                children.get(children.size() - 1).dismiss();
+                return Unit.INSTANCE;
+            });
+            scrollToOption("音色");
+            ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option.音色"), false));
+            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("miuix.dialog.button.-1"), false));
+            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasText("手动填写", false, false), false));
+            savePreview(children.get(children.size() - 1), "speech-minimax-voice-list");
+            compose.runOnUiThread(() -> {
+                children.get(children.size() - 1).dismiss();
+                return Unit.INSTANCE;
+            });
+            scrollToOption("MiniMax 高级设置");
+            ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option.MiniMax 高级设置"), false));
+            compose.waitForIdle();
+            Dialog minimaxAdvanced = children.get(children.size() - 1);
+            scrollToOption(minimaxAdvanced, "情绪");
+            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("settings.option.情绪"), false));
+            scrollToOption(minimaxAdvanced, "发音字典（每行 原文/替换内容）");
+            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("settings.option.发音字典（每行 原文/替换内容）"), false));
+            scrollToOption(minimaxAdvanced, "AIGC 水印");
+            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("settings.option.AIGC 水印"), false));
+            savePreview(minimaxAdvanced, "speech-minimax-advanced");
         }
 
         private void scrollToOption(String title) {
+            scrollToOption(page.dialog(), title);
+        }
+
+        private void scrollToOption(Dialog dialog, String title) {
+            // Dynamic provider changes replace the native form inside AndroidView. Let that layout
+            // settle before reading its row positions or inspecting a newly opened child dialog.
+            compose.waitForIdle();
             compose.runOnUiThread(() -> {
-                View row = page.dialog().getWindow().getDecorView().findViewWithTag("settings.option." + title);
+                View row = dialog.getWindow().getDecorView().findViewWithTag("settings.option." + title);
+                assertNotNull("Dialog must contain the requested row before scrolling: " + title, row);
                 android.view.ViewParent parent = row.getParent();
                 while (!(parent instanceof android.widget.ScrollView)) parent = parent.getParent();
                 ((android.widget.ScrollView) parent).scrollTo(0, row.getTop());

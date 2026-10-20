@@ -37,20 +37,46 @@ public final class ConfigBackup {
 
     /** Inspection validates the incoming data without opening current local analytics. */
     public static Preview inspect(SettingsStore store, String encoded, ConfigTransfer.Mode mode) {
-        checkBytes(encoded);
-        Object value = ConfigJson.parse(encoded, MAX_BYTES, AnalyticsBackup.MAX_ROWS);
-        if (!(value instanceof JSONObject)) throw ConfigJson.invalid();
-        JSONObject root = (JSONObject) value;
-        if (!root.has("backupFormatVersion")) return new Preview(ConfigTransfer.inspect(store, encoded, mode), null);
+        Object value;
         try {
-            if (root.length() != 4 || !Long.valueOf(1).equals(root.get("backupFormatVersion"))
-                    || !KIND.equals(root.get("kind")) || !root.has("config") || !root.has("analytics"))
-                throw new IllegalArgumentException("不支持此本地备份格式");
-            ConfigTransfer.Preview config = ConfigTransfer.inspect(store, root.getJSONObject("config").toString(), mode);
-            AnalyticsBackup.Snapshot analytics = AnalyticsBackup.inspect(root.getJSONObject("analytics"));
+            checkBytes(encoded);
+            value = ConfigJson.parse(encoded, MAX_BYTES, AnalyticsBackup.MAX_ROWS);
+        } catch (RuntimeException | LinkageError failure) {
+            throw BackupValidationException.wrap(BackupValidationException.Section.BUNDLE_JSON,
+                    BackupValidationException.Reason.INVALID_JSON, null, failure);
+        }
+        if (!(value instanceof JSONObject)) throw new BackupValidationException(
+                BackupValidationException.Section.BUNDLE_JSON, BackupValidationException.Reason.HEADER_SHAPE, null);
+        JSONObject root = (JSONObject) value;
+        if (!root.has("backupFormatVersion")) return new Preview(inspectConfig(store, encoded, mode), null);
+        if (root.length() != 4 || !root.has("kind") || !root.has("config") || !root.has("analytics"))
+            throw new BackupValidationException(BackupValidationException.Section.BUNDLE_HEADER,
+                    BackupValidationException.Reason.HEADER_SHAPE, null);
+        if (!Long.valueOf(1).equals(root.opt("backupFormatVersion")))
+            throw new BackupValidationException(BackupValidationException.Section.BUNDLE_HEADER,
+                    BackupValidationException.Reason.FORMAT_VERSION, "backupFormatVersion");
+        if (!KIND.equals(root.opt("kind"))) throw new BackupValidationException(
+                BackupValidationException.Section.BUNDLE_HEADER, BackupValidationException.Reason.HEADER_SHAPE, "kind");
+        if (!(root.opt("config") instanceof JSONObject)) throw new BackupValidationException(
+                BackupValidationException.Section.BUNDLE_HEADER, BackupValidationException.Reason.TYPE_MISMATCH, "config");
+        if (!(root.opt("analytics") instanceof JSONObject)) throw new BackupValidationException(
+                BackupValidationException.Section.BUNDLE_HEADER, BackupValidationException.Reason.TYPE_MISMATCH, "analytics");
+        ConfigTransfer.Preview config = inspectConfig(store, root.opt("config").toString(), mode);
+        try {
+            AnalyticsBackup.Snapshot analytics = AnalyticsBackup.inspect((JSONObject) root.opt("analytics"));
             return new Preview(config, analytics);
-        } catch (RuntimeException failure) { throw failure; }
-        catch (Exception failure) { throw ConfigJson.invalid(); }
+        } catch (RuntimeException | LinkageError failure) {
+            throw BackupValidationException.wrap(BackupValidationException.Section.ANALYTICS,
+                    BackupValidationException.Reason.UNEXPECTED, null, failure);
+        }
+    }
+
+    private static ConfigTransfer.Preview inspectConfig(SettingsStore store, String encoded, ConfigTransfer.Mode mode) {
+        try { return ConfigTransfer.inspect(store, encoded, mode); }
+        catch (RuntimeException | LinkageError failure) {
+            throw BackupValidationException.wrap(BackupValidationException.Section.CONFIG,
+                    BackupValidationException.Reason.UNEXPECTED, null, failure);
+        }
     }
 
     /** Analytics is independently replaced only when selected; settings retain their own merge mode. */
@@ -64,8 +90,9 @@ public final class ConfigBackup {
     }
 
     private static void checkBytes(String encoded) {
-        if (encoded == null || encoded.length() > MAX_BYTES
+        if (encoded == null) throw ConfigJson.invalid();
+        if (encoded.length() > MAX_BYTES
                 || encoded.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES)
-            throw new IllegalArgumentException("备份为空或超过 32 MiB 限制");
+            throw new BackupLimitException(BackupLimitException.Section.FILE);
     }
 }

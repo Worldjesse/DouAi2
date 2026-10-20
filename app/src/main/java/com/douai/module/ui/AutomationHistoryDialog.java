@@ -15,6 +15,7 @@ import android.widget.TextView;
 
 import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.AutomationHistoryStore.Entry;
+import com.douai.module.config.AutomationDiagnostics;
 import com.douai.module.ui.miuix.HostComposeContext;
 import com.douai.module.ui.miuix.MiuixAutomationHistory;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
@@ -178,6 +179,7 @@ final class AutomationHistoryDialog {
                 + (AutomationHistoryStore.COMMENT_REPLY.equals(entry.kind) ? "\n来源：评论回复" : "")
                 + (isComment(entry.kind)
                 ? "\n发送方式：" + deliveryMode(entry) + "\n" + imageRequest(entry) : "")
+                + "\n" + AutomationDiagnostics.details(entry)
                 + "\n\n原内容\n" + entry.input + "\n\n生成内容\n" + entry.output);
         text.setTextIsSelectable(true);
         text.setPadding(dp(16), dp(12), dp(16), dp(12));

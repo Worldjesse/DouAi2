@@ -7,6 +7,59 @@ import java.util.Map;
 import static org.junit.Assert.*;
 
 public final class SpeechSettingsTest {
+    @Test public void miniMaxHasIndependentDefaultsAndLeavesOtherProvidersUntouched() {
+        SpeechSettings settings = new SpeechSettings(new LocalOptions(Map.of(
+                SpeechSettings.PROVIDER, SpeechSettings.MINIMAX,
+                SpeechSettings.RATE, "1.8", SpeechSettings.PITCH, "1.2",
+                SpeechSettings.SELECTED_VOICE, "third-voice")));
+        assertTrue(settings.minimax);
+        assertFalse(settings.thirdParty);
+        assertFalse(settings.local);
+        assertEquals(SpeechSettings.DEFAULT_MINIMAX_BASE_URL, settings.minimaxBaseUrl);
+        assertEquals("speech-2.8-hd", settings.minimaxModel);
+        assertEquals("male-qn-qingse", settings.minimaxVoiceId);
+        assertEquals(1f, settings.minimaxSpeed, 0);
+        assertEquals(1f, settings.minimaxVolume, 0);
+        assertEquals(0, settings.minimaxPitch);
+        assertEquals("third-voice", settings.selectedVoice);
+        assertEquals(1.8f, settings.rate, 0);
+        assertEquals(1.2f, settings.pitch, 0);
+    }
+
+    @Test public void miniMaxValidatesProviderSpecificRangesAndRequiresCredentialsAtRequestTime() {
+        for (String invalid : new String[]{"NaN", "Infinity", "0.49", "2.01", ""}) {
+            assertThrows(IllegalArgumentException.class, () -> SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_SPEED, invalid));
+        }
+        for (String invalid : new String[]{"0", "-1", "10.01", "NaN", "1e-1000", ""}) {
+            assertThrows(IllegalArgumentException.class, () -> SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_VOLUME, invalid));
+        }
+        for (String invalid : new String[]{"-13", "13", "0.5", "1.0", "NaN", ""}) {
+            assertThrows(IllegalArgumentException.class, () -> SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_PITCH, invalid));
+        }
+        assertEquals("0.5", SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_SPEED, "0.5"));
+        assertEquals("2", SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_SPEED, "2.00"));
+        assertEquals("10", SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_VOLUME, "10.00"));
+        assertEquals("-12", SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_PITCH, "-12"));
+        assertEquals("12", SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_PITCH, "12"));
+        SpeechSettings empty = new SpeechSettings(new LocalOptions(Map.of(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX)));
+        assertThrows(IllegalArgumentException.class, empty::validateMiniMax);
+        SpeechSettings valid = new SpeechSettings(new LocalOptions(Map.of(SpeechSettings.MINIMAX_API_KEY, "fixture-key")));
+        valid.validateMiniMax();
+        SpeechSettings malformed = new SpeechSettings(new LocalOptions(Map.of(
+                SpeechSettings.MINIMAX_API_KEY, "fixture-key", SpeechSettings.MINIMAX_SPEED, "NaN")));
+        assertThrows(IllegalArgumentException.class, malformed::validateMiniMax);
+    }
+
+    @Test public void miniMaxApiAddressRejectsEmbeddedCredentialsAndInvalidPorts() {
+        assertEquals("https://api.minimax.cn", SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_BASE_URL, " https://api.minimax.cn/ "));
+        for (String invalid : new String[]{"", "bad-url", "ftp://example.test", "https://user:secret@example.test",
+                "https://example.test?key=secret", "https://example.test#secret", "https://example.test:0", "https://example.test:65536"}) {
+            assertThrows(invalid, IllegalArgumentException.class, () -> SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_BASE_URL, invalid));
+        }
+        assertThrows(IllegalArgumentException.class, () -> SpeechSettings.validateProvider("unknown"));
+        assertEquals(SpeechSettings.MINIMAX, SpeechSettings.validateProvider(SpeechSettings.MINIMAX));
+    }
+
     @Test public void existingEngineSettingsRemainLocalByDefault() {
         LocalOptions options = new LocalOptions(Map.of("tts_engine", "system.engine", "tts_language", "en-US",
                 "tts_rate", "1.5", "tts_pitch", "0.8"));

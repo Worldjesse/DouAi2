@@ -6,6 +6,8 @@ import android.app.Dialog;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.Intent;
+import android.net.Uri;
+import android.os.Build;
 import android.content.res.Configuration;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -136,6 +138,10 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
     private String analyzedModel;
     private long analyzedAt;
     private int analyzedDays;
+    private Button imageShare;
+    private TextView imageShareNote;
+    private ImageOperation imageOperation;
+    private AlertDialog exportChoiceDialog;
 
     public LocalAnalyticsDialog(Context context) {
         this(context, source(context), executor("DouAi-analytics-report"));
@@ -370,6 +376,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
 
     private void load(Boolean nextEnabled, boolean erase, Consumer<Source> contextChange) {
         if (closed) return;
+        cancelImageExport();
         // A new snapshot must never be paired with an interpretation of older chart values.
         resetAnalysis();
         int request = ++generation;
@@ -661,8 +668,10 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
             caption(analysisBody, rangeLabel(analyzedDays) + " · " + analyzedModel + " · "
                     + formatDate(analyzedAt, "MM-dd HH:mm")
                     + "\n基于本次图表统计。刷新图表或切换时间范围后需重新分析，不会自动请求 AI。");
-            TextView result = text("分析已显示在各图表下方", 14, ACCENT, true);
+            TextView result = text(analysisResult.shareText(), 14, TEXT, false);
             result.setTag("analytics.analysis.result");
+            result.setTextIsSelectable(true);
+            result.setLineSpacing(dp(4), 1);
             result.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
             analysisBody.addView(result, matchWrap());
             Button expand = button("展开各区块的 AI 解读", "analytics.analysis.expand", () -> {
@@ -672,7 +681,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
                 }
             });
             analysisBody.addView(controlView(expand), new LinearLayout.LayoutParams(-1, dp(52)));
-            Button share = button("分享", "analytics.analysis.share", this::shareAnalysis);
+            Button share = button("分享分析文字", "analytics.analysis.share", this::shareAnalysis);
             analysisBody.addView(controlView(share), new LinearLayout.LayoutParams(-1, dp(52)));
         } else {
             boolean configured;
@@ -713,6 +722,15 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
                 analysisBody.addView(controlView(request), new LinearLayout.LayoutParams(-1, dp(52)));
             }
         }
+        imageShareNote = text("导出一张长图 PNG 或一份 PDF，再由你选择分享目标；包含完整报告、排行、最近记录与已有 AI 结果，不会再次请求 AI。"
+                + (Build.VERSION.SDK_INT >= 29 ? "长图保存到相册 Pictures/DouAi，PDF 保存到下载目录 Downloads/DouAi。"
+                : "请选择报告文件的保存位置。")
+                + "请核对其中可见的作者、话题和自述；长图过长时请选择 PDF。", 13, MUTED, false);
+        imageShareNote.setTag("analytics.report.share.note");
+        analysisBody.addView(imageShareNote, matchWrap());
+        imageShare = button("导出/分享报告", "analytics.report.share.image", this::shareReportImage);
+        imageShare.setEnabled(currentSnapshot != null && analysisOperation == null && imageOperation == null);
+        analysisBody.addView(controlView(imageShare), new LinearLayout.LayoutParams(-1, dp(52)));
         ModuleTheme.bind(root);
     }
 
@@ -770,6 +788,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
     private void requestAnalysis() {
         if (closed || analysisOperation != null || analysisResult != null || currentSnapshot == null
                 || currentSnapshot.totalViews == 0 && currentSnapshot.totalFeatureUses == 0) return;
+        cancelImageExport();
         AnalysisService.Request request;
         try {
             if (!analysisService.isConfigured()) throw new AnalyticsAiAnalysis.AnalysisFailure(
@@ -855,6 +874,120 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         catch (RuntimeException failure) {
             if (analysisBody != null) caption(analysisBody, "无法打开系统分享面板，可长按分析文字复制。");
         }
+    }
+
+    /** Builds a separate paper report without mutating or measuring the live dialog. */
+    ReportImageExport.Document captureReportImage(int width, int pageHeight) {
+        if (currentSnapshot == null) throw new IllegalStateException("请先读取本地报告");
+        long generatedAt = System.currentTimeMillis();
+        View paper = ReportPresentation.build(context.getApplicationContext(), currentSnapshot, rangeLabel(days), generatedAt,
+                analysisResult, analyzedModel, rangeLabel(analyzedDays), analyzedAt);
+        return ReportImageExport.capture(paper, rangeLabel(days) + " · 报告生成 "
+                + formatDate(generatedAt, "yyyy-MM-dd HH:mm"), false, width, pageHeight, ReportPresentation.LOGICAL_WIDTH);
+    }
+
+    private void shareReportImage() {
+        if (closed || currentSnapshot == null || analysisOperation != null || imageOperation != null || exportChoiceDialog != null) return;
+        exportChoiceDialog = new MiuixDialogBuilder(context, miuix).setTitle("导出/分享报告")
+                .setItems(new String[]{"长图 PNG", "PDF 文档"}, (ignored, selected) -> {
+                    exportChoiceDialog = null;
+                    if (selected >= 0 && selected < 2) exportReport(selected == 0
+                            ? ReportImageExport.Format.LONG_PNG : ReportImageExport.Format.PDF);
+                }).setNegativeButton("取消", null).create();
+        AlertDialog shown = exportChoiceDialog;
+        shown.setOnDismissListener(ignored -> { if (exportChoiceDialog == shown) exportChoiceDialog = null; });
+        shown.show();
+        if (!miuix && activity != null) HostDialogBounds.install(activity, shown, true);
+    }
+
+    private void exportReport(ReportImageExport.Format format) {
+        if (closed || currentSnapshot == null || analysisOperation != null || imageOperation != null) return;
+        ImageOperation operation = new ImageOperation(format); imageOperation = operation;
+        imageShare.setEnabled(false); imageShareNote.setText("正在排版完整报告…");
+        ReportImageExport.Document document;
+        try { document = captureReportImage(ReportImageExport.WIDTH, ReportImageExport.PAGE_HEIGHT); }
+        catch (RuntimeException | OutOfMemoryError failure) { imageFailed(operation); return; }
+        if (Build.VERSION.SDK_INT >= 29) saveReportImages(operation, document, null);
+        else {
+            imageShareNote.setText("请选择" + (format == ReportImageExport.Format.PDF ? " PDF 文档" : "长图 PNG") + "的保存位置。");
+            operation.picker = HostConfigFilePicker.launch(activity, ReportImageShare.destination(format), uri -> {
+                operation.picker = null;
+                if (closed || imageOperation != operation || operation.cancelled) return;
+                if (uri == null) {
+                    imageOperation = null; imageShare.setEnabled(true); imageShareNote.setText("已取消，未生成报告文件。");
+                } else saveReportImages(operation, document, uri);
+            });
+            if (operation.picker == null && imageOperation == operation) imageFailed(operation);
+        }
+    }
+
+    private void saveReportImages(ImageOperation operation, ReportImageExport.Document document, Uri destination) {
+        Context application = context.getApplicationContext();
+        WeakReference<LocalAnalyticsDialog> target = new WeakReference<>(this);
+        Handler dispatcher = main;
+        try { worker.execute(() -> {
+            ReportImageShare.Saved saved = null;
+            try {
+                saved = ReportImageShare.save(application, document, operation.format, destination, () -> !operation.cancelled);
+                operation.saved = saved;
+                if (operation.cancelled) { saved.delete(); return; }
+            } catch (Exception | OutOfMemoryError failure) {
+                boolean tooLong = failure instanceof ReportImageExport.LongPngLimitException;
+                dispatcher.post(() -> { LocalAnalyticsDialog page = target.get(); if (page != null) page.imageFailed(operation, tooLong); });
+                return;
+            }
+            ReportImageShare.Saved ready = saved;
+            dispatcher.post(() -> {
+                LocalAnalyticsDialog page = target.get();
+                if (page == null || page.closed || page.imageOperation != operation || operation.cancelled) { ReportImageShare.cleanup(ready); return; }
+                page.imageOperation = null; operation.saved = null;
+                ready.handOff(); // Host onPause may close the report as soon as the chooser is launched.
+                try {
+                    Intent chooser = ready.chooser();
+                    if (page.activity == null) chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    page.context.startActivity(chooser);
+                    LocalAnalytics.feature("analytics_share", "打开分析分享");
+                    if (!page.closed) {
+                        page.imageShare.setEnabled(true);
+                        page.imageShareNote.setText(operation.format == ReportImageExport.Format.PDF
+                                ? "已生成一份完整 PDF（" + document.pdfPageCount() + " 页），请选择分享目标。" : "已生成一张完整长图 PNG，请选择分享目标。");
+                    }
+                } catch (RuntimeException failure) {
+                    ready.failedHandOff();
+                    if (!page.closed) { page.imageShare.setEnabled(true); page.imageShareNote.setText("无法打开分享面板，报告文件未分享，可重试。"); }
+                }
+            });
+        }); } catch (RuntimeException unavailable) { imageFailed(operation); }
+    }
+
+    private void imageFailed(ImageOperation operation) {
+        imageFailed(operation, false);
+    }
+
+    private void imageFailed(ImageOperation operation, boolean tooLong) {
+        if (closed || imageOperation != operation || operation.cancelled) return;
+        imageOperation = null; imageShare.setEnabled(true);
+        imageShareNote.setText(tooLong ? "内容较长，请选择 PDF 导出完整报告。"
+                : "报告生成或保存失败。长图过长时请选择 PDF；也可检查保存位置或缩小范围后重试。报告内容未更改。");
+    }
+
+    private void cancelImageExport() {
+        if (exportChoiceDialog != null) exportChoiceDialog.dismiss();
+        exportChoiceDialog = null;
+        ImageOperation operation = imageOperation; imageOperation = null;
+        if (operation == null) return;
+        operation.cancelled = true;
+        if (operation.picker != null) try { operation.picker.close(); } catch (Exception ignored) { }
+        ReportImageShare.Saved saved = operation.saved;
+        if (saved != null) ReportImageShare.cleanup(saved);
+    }
+
+    private static final class ImageOperation {
+        final ReportImageExport.Format format;
+        ImageOperation(ReportImageExport.Format format) { this.format = format; }
+        volatile boolean cancelled;
+        volatile ReportImageShare.Saved saved;
+        AutoCloseable picker;
     }
 
     private void resetAnalysis() {
@@ -1155,6 +1288,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
     @Override public void close() {
         if (closed) return;
         closed = true;
+        cancelImageExport();
         resetAnalysis();
         generation++;
         main.removeCallbacksAndMessages(null);

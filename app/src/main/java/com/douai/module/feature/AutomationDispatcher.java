@@ -16,6 +16,10 @@ import android.widget.TextView;
 
 import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.AutomationHistoryStore.Entry;
+import com.douai.module.config.AutomationHistoryStore.Reason;
+import com.douai.module.config.AutomationHistoryStore.Stage;
+import com.douai.module.config.AutomationDiagnostics;
+import com.douai.module.config.AutomationMessageSettings;
 import com.douai.module.config.LocalOptions;
 
 import java.lang.ref.WeakReference;
@@ -202,7 +206,8 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
             if (closed || seen.containsKey(key(entry.kind, entry.id))) { outcome.accept("cancelled"); return; }
             remember(entry.kind, entry.id);
             if (pending.size() >= MAX_PENDING) {
-                record(withStatus(entry, "cancelled"));
+                record(withStatus(entry.withDiagnostics(Reason.QUEUE_FULL, Stage.QUEUE, entry.queueMillis,
+                        entry.mediaMillis, entry.generationMillis, entry.sendMillis), "cancelled"));
                 safeLog("Automatic action cancelled because the preview queue is full");
                 outcome.accept(AutomationHistoryStore.COMMENT_REPLY.equals(kind) ? "deferred" : "cancelled");
                 return;
@@ -241,6 +246,27 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
     }
 
     public void recordOutcome(Entry entry) { onMain(() -> record(entry)); }
+
+    /** Amend a source-specific reason without replacing the dispatcher's final state or timings. */
+    public void recordOutcomeReason(Entry source) {
+        if (source == null || source.reason == Reason.NONE) return;
+        onMain(() -> {
+            try {
+                worker.execute(() -> {
+                    if (!saveHistory(source.kind)) return;
+                    try {
+                        for (Entry recorded : history.read(source.kind)) {
+                            if (!source.kind.equals(recorded.kind) || !source.id.equals(recorded.id)
+                                    || !source.status.equals(recorded.status)) continue;
+                            history.upsert(recorded.withDiagnostics(source.reason, recorded.stage,
+                                    recorded.queueMillis, recorded.mediaMillis, recorded.generationMillis, recorded.sendMillis));
+                            return;
+                        }
+                    } catch (RuntimeException failure) { safeLog("Could not amend automatic action reason"); }
+                });
+            } catch (RejectedExecutionException ignored) { }
+        });
+    }
 
     public void commentRequestSent(String id, int imageCount) {
         onMain(() -> {
@@ -310,7 +336,8 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
     }
 
     private int noticeSeconds(String kind) {
-        return Math.max(2, Math.min(120, options.integer(settingsKind(kind) + "_notice_seconds", 8)));
+        return Math.max(2, Math.min(120, options.integer(settingsKind(kind) + "_notice_seconds",
+                AutomationMessageSettings.DEFAULT_NOTICE_SECONDS)));
     }
 
     private boolean valid(Pending item) {
@@ -332,12 +359,18 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         if (!item.ready) return;
         int state = item.state.get();
         if ((state != WAITING && state != DETAILS) || !item.state.compareAndSet(state, QUEUED)) return;
+        item.queuedAt = SystemClock.elapsedRealtime();
         removeNotice(item);
         if (closed || !enabled(item.kind) || !valid(item)) { cancel(item); return; }
         try {
             worker.execute(() -> {
                 if (closed || !enabled(item.kind) || !valid(item)) { onMain(() -> cancel(item)); return; }
                 if (!item.state.compareAndSet(QUEUED, SENDING)) return;
+                item.sendStartedAt = SystemClock.elapsedRealtime();
+                long queuedMillis = Math.max(0, item.sendStartedAt - item.queuedAt);
+                item.entry = item.entry.withDiagnostics(item.entry.reason, Stage.SEND,
+                        item.entry.queueMillis < 0 ? queuedMillis : item.entry.queueMillis + queuedMillis,
+                        item.entry.mediaMillis, item.entry.generationMillis, item.entry.sendMillis);
                 item.phase = "publishing";
                 onMain(this::renderNotices);
                 record(withStatus(item.entry, "sending"));
@@ -355,6 +388,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         String result = "sent".equals(status) || "submitted".equals(status) || "cancelled".equals(status) ? status : "failed";
         if (!item.state.compareAndSet(SENDING, FINISHED) && !item.state.compareAndSet(UNCONFIRMED, FINISHED)) return;
         onMain(() -> {
+            item.entry = sendTiming(item);
             main.removeCallbacks(item.acknowledgmentTimeout);
             pending.remove(key(item.kind, item.entry.id));
             if (submittedReply == item) submittedReply = null;
@@ -378,6 +412,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
 
     private void unconfirmed(Pending item) {
         if (!item.state.compareAndSet(SENDING, UNCONFIRMED)) return;
+        item.entry = sendTiming(item);
         pending.remove(key(item.kind, item.entry.id));
         if (isReply(item.kind)) retainSubmittedReply(item);
         removeNotice(item);
@@ -398,10 +433,30 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
     }
 
     private static Entry withStatus(Entry entry, String status) {
+        Reason reason = entry.reason;
+        Stage stage = entry.stage;
+        if ("sent".equals(status)) {
+            reason = Reason.NONE;
+            stage = Stage.COMPLETE;
+        } else if ("submitted".equals(status)) {
+            if (reason == Reason.NONE) reason = Reason.SUBMITTED_UNCONFIRMED;
+            stage = Stage.SEND;
+        } else if ("failed".equals(status)) {
+            if (reason == Reason.NONE) reason = Reason.SEND_FAILED;
+        } else if ("cancelled".equals(status) && reason == Reason.NONE) {
+            reason = Reason.CANCELLED;
+        }
         return new Entry(entry.id, entry.kind, entry.targetId, entry.targetName,
                 entry.input, entry.output, entry.modelName, status,
                 entry.createdAt, System.currentTimeMillis(), entry.requestImageCount, entry.modelRequestSent,
-                entry.deliveryMode);
+                entry.deliveryMode).withDiagnostics(reason, stage, entry.queueMillis,
+                entry.mediaMillis, entry.generationMillis, entry.sendMillis);
+    }
+
+    private static Entry sendTiming(Pending item) {
+        Entry entry = item.entry;
+        return entry.withDiagnostics(entry.reason, Stage.SEND, entry.queueMillis, entry.mediaMillis,
+                entry.generationMillis, Math.max(0, SystemClock.elapsedRealtime() - item.sendStartedAt));
     }
 
     private void record(Entry entry) {
@@ -613,7 +668,8 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(dp(activity, 20), dp(activity, 12), dp(activity, 20), dp(activity, 12));
         body.addView(text(activity, target(item.entry), 14, Color.rgb(105, 115, 122)));
-        item.detailStatus = text(activity, phaseName(item), 13, isReply(item.kind) ? Color.rgb(53, 122, 204) : Color.rgb(0, 121, 107));
+        item.detailStatus = text(activity, phaseName(item) + "\n" + AutomationDiagnostics.details(item.entry), 13,
+                isReply(item.kind) ? Color.rgb(53, 122, 204) : Color.rgb(0, 121, 107));
         body.addView(item.detailStatus);
         TextView inputTitle = text(activity, AutomationHistoryStore.COMMENT_REPLY.equals(item.kind) ? "收到的评论回复"
                 : AutomationHistoryStore.REPLY.equals(item.kind) ? "收到的消息" : "视频内容", 13, Color.rgb(105, 115, 122));
@@ -652,7 +708,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
 
     private void refreshDetails(Pending item) {
         if (item.detailOutput != null) item.detailOutput.setText(item.ready ? item.entry.output : "正在生成…");
-        if (item.detailStatus != null) item.detailStatus.setText(phaseName(item));
+        if (item.detailStatus != null) item.detailStatus.setText(phaseName(item) + "\n" + AutomationDiagnostics.details(item.entry));
         if (item.details instanceof AlertDialog && item.state.get() == DETAILS) {
             ((AlertDialog) item.details).getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(item.ready && valid(item));
         }
@@ -757,6 +813,8 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         final Runnable acknowledgmentTimeout = () -> unconfirmed(this);
         long deadline;
         long noticeDuration;
+        long queuedAt;
+        long sendStartedAt;
         boolean early;
         boolean ready = true;
         String phase = "preview";

@@ -1,0 +1,4 @@
+<testsuite name="example.KotlinOuterTest$NestedTest" tests="2" skipped="0" failures="0" errors="0">
+  <testcase name="nested works[28]" classname="example.KotlinOuterTest$NestedTest"/>
+  <testcase name="nested works[35]" classname="example.KotlinOuterTest$NestedTest"/>
+</testsuite>

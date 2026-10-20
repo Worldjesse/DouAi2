@@ -92,6 +92,82 @@ public final class SpeechSynthesisTest {
         }
     }
 
+    @Test public void miniMaxSpeechRoutesToNativePostAndReturnsAnOwnedValidatedMp3() throws Exception {
+        try (MockWebServer server = new MockWebServer(); MockWebServer thirdParty = new MockWebServer()) {
+            server.enqueue(new MockResponse().addHeader("Content-Type", "application/json")
+                    .setBody("{\"base_resp\":{\"status_code\":0},\"data\":{\"status\":2,\"audio\":\"49443366697874757265\"}}"));
+            server.start(); thirdParty.start();
+            AtomicReference<LocalSpeechSynthesis.Result> result = new AtomicReference<>();
+            AtomicReference<String> failure = new AtomicReference<>();
+            AtomicInteger calls = new AtomicInteger();
+            LocalOptions options = miniMaxSettings(server).withDefault(SpeechSettings.GET_TEMPLATE,
+                    thirdParty.url("/unused") + "?text={text}");
+            SpeechSynthesis request = SpeechSynthesis.synthesize(context(), "你好 MiniMax", options,
+                    (audio, error) -> { result.set(audio); failure.set(error); calls.incrementAndGet(); });
+            await(calls);
+            assertNull(failure.get()); assertNotNull(result.get());
+            assertEquals(1000L, result.get().durationMillis); assertTrue(result.get().file.isFile());
+            assertTrue(result.get().file.getName().endsWith(".mp3"));
+            assertArrayEquals(new byte[]{'I', 'D', '3', 'f', 'i', 'x', 't', 'u', 'r', 'e'},
+                    Files.readAllBytes(result.get().file.toPath()));
+            assertEquals("/v1/t2a_v2", server.takeRequest(2, TimeUnit.SECONDS).getPath());
+            assertEquals(0, thirdParty.getRequestCount());
+            request.close(); ShadowLooper.getShadowMainLooper().idle();
+            assertEquals(1, calls.get()); assertTrue(result.get().file.isFile());
+            Files.deleteIfExists(result.get().file.toPath());
+        }
+    }
+
+    @Test public void miniMaxFailureDoesNotFallBackToTheGenericProviderOrAndroidEngine() throws Exception {
+        try (MockWebServer server = new MockWebServer(); MockWebServer thirdParty = new MockWebServer()) {
+            server.enqueue(new MockResponse().setResponseCode(401).setBody("private-key private-text"));
+            thirdParty.enqueue(wav()); server.start(); thirdParty.start();
+            AtomicReference<LocalSpeechSynthesis.Result> result = new AtomicReference<>();
+            AtomicReference<String> failure = new AtomicReference<>();
+            AtomicInteger calls = new AtomicInteger();
+            LocalOptions options = miniMaxSettings(server).withDefault(SpeechSettings.GET_TEMPLATE,
+                    thirdParty.url("/unused") + "?text={text}");
+            SpeechSynthesis.synthesize(context(), "private-text", options,
+                    (audio, error) -> { result.set(audio); failure.set(error); calls.incrementAndGet(); });
+            await(calls);
+            assertNull(result.get()); assertNotNull(failure.get());
+            assertTrue(failure.get().startsWith("MiniMax 语音")); assertFalse(failure.get().contains("private"));
+            assertEquals(1, server.getRequestCount()); assertEquals(0, thirdParty.getRequestCount());
+            assertEquals(0, cachedAudioCount());
+        }
+    }
+
+    @Test public void invalidMiniMaxAudioIsRemovedWithoutDeliveringAnOutput() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            AudioMetadata.duration = "0";
+            server.enqueue(new MockResponse().addHeader("Content-Type", "application/json")
+                    .setBody("{\"base_resp\":{\"status_code\":0},\"data\":{\"status\":2,\"audio\":\"49443366697874757265\"}}"));
+            server.start();
+            AtomicReference<LocalSpeechSynthesis.Result> result = new AtomicReference<>();
+            AtomicReference<String> failure = new AtomicReference<>();
+            AtomicInteger calls = new AtomicInteger();
+            SpeechSynthesis.synthesize(context(), "hello", miniMaxSettings(server),
+                    (audio, error) -> { result.set(audio); failure.set(error); calls.incrementAndGet(); });
+            await(calls);
+            assertNull(result.get()); assertEquals("生成的语音文件无效", failure.get());
+            assertEquals(0, cachedAudioCount());
+        }
+    }
+
+    @Test public void closeCancelsMiniMaxPostAndCompletesOnceWithoutOutput() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)); server.start();
+            AtomicInteger calls = new AtomicInteger();
+            AtomicReference<String> failure = new AtomicReference<>();
+            SpeechSynthesis request = SpeechSynthesis.synthesize(context(), "hello", miniMaxSettings(server),
+                    (audio, error) -> { assertNull(audio); failure.set(error); calls.incrementAndGet(); });
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+            request.close(); request.close(); await(calls);
+            assertEquals(1, calls.get()); assertEquals("语音生成已停止", failure.get());
+            assertEquals(0, cachedAudioCount());
+        }
+    }
+
     @Test public void thirdPartySpeechDoesNotUseTheAndroidEngineTextLimit() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(wav()); server.start();
@@ -213,6 +289,11 @@ public final class SpeechSynthesisTest {
 
     private static LocalOptions settings(String template) {
         return new LocalOptions(Map.of(SpeechSettings.PROVIDER, SpeechSettings.THIRD_PARTY, SpeechSettings.GET_TEMPLATE, template));
+    }
+
+    private static LocalOptions miniMaxSettings(MockWebServer server) {
+        return new LocalOptions(Map.of(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX,
+                SpeechSettings.MINIMAX_BASE_URL, server.url("/").toString(), SpeechSettings.MINIMAX_API_KEY, "private-key"));
     }
 
     private static MockResponse wav() {

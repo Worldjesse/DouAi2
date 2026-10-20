@@ -56,6 +56,8 @@ public final class NativeAutoReplyIntegrationTest {
             fixture.runReply(reply); fixture.flush();
             assertEquals(1, fixture.database.imSdkContext.sends);
             assertEquals("thread", fixture.database.imSdkContext.last.conversation.id());
+            assertEquals("sent", fixture.history().get(0).status);
+            assertEquals(AutomationHistoryStore.Stage.COMPLETE, fixture.history().get(0).stage);
         }
     }
 
@@ -84,6 +86,163 @@ public final class NativeAutoReplyIntegrationTest {
             fixture.runReply(reply); fixture.flush();
             assertEquals(1, fixture.database.imSdkContext.sends);
             assertEquals(1, fixture.history().size());
+        }
+    }
+
+    @Test public void durableReplyReservationBlocksFreshReplayAfterHookRecreation() throws Throwable {
+        Message incoming = incomingMessage(200, "thread", 9201, System.currentTimeMillis());
+        try (LimitedReplies first = new LimitedReplies()) {
+            first.database.imSdkContext.suppressCallbacks = true;
+            Runnable reply = first.enqueueGlobal(incoming);
+            assertNotNull(reply);
+            first.runReply(reply); first.flush();
+            assertEquals(1, first.database.imSdkContext.sends);
+            android.content.SharedPreferences records = first.activity.getSharedPreferences("douai_reply_submissions", 0);
+            assertTrue(new com.douai.module.config.SubmissionLedger(records, 1000)
+                    .contains(com.douai.module.config.SubmissionLedger.identity("100:thread:9201")));
+            assertFalse(records.getAll().toString().contains("100:thread:9201"));
+        }
+        try (LimitedReplies recreated = new LimitedReplies(true)) {
+            assertNull("A restart within the fresh-message window must retain the native submission claim",
+                    recreated.enqueueGlobal(incoming));
+            recreated.flush();
+            assertEquals(0, recreated.database.imSdkContext.sends);
+        }
+    }
+
+    @Test public void unavailableDurableReservationForbidsNativeSendAndDoesNotSpendAllowance() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies("reply_daily_limit", "1")) {
+            android.content.SharedPreferences records = fixture.activity.getSharedPreferences("douai_reply_submissions", 0);
+            com.douai.module.config.SubmissionLedger full = new com.douai.module.config.SubmissionLedger(records, 1);
+            assertTrue(full.reserve(com.douai.module.config.SubmissionLedger.identity("other-unconfirmed"), "old", System.currentTimeMillis()));
+            java.lang.reflect.Field field = NativeMessagingHooks.class.getDeclaredField("replyLedger");
+            field.setAccessible(true); field.set(fixture.hook, full);
+            fixture.receive(200, "thread"); fixture.flush();
+            assertEquals(0, fixture.database.imSdkContext.sends);
+            assertEquals(AutomationHistoryStore.Reason.LEDGER_WRITE_FAILED, fixture.history().get(0).reason);
+            assertTrue(new AutomationRateLimiter(fixture.activity).canSend("reply", 100, "200", new LocalOptions(fixture.values)));
+        }
+    }
+
+    @Test public void nativeAcknowledgmentPersistsOnTheSharedResultLane() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies()) {
+            java.util.concurrent.atomic.AtomicReference<String> commitThread = new java.util.concurrent.atomic.AtomicReference<>();
+            android.content.SharedPreferences preferences = fixture.activity.getSharedPreferences("douai_reply_submissions", 0);
+            android.content.SharedPreferences observed = (android.content.SharedPreferences) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{android.content.SharedPreferences.class}, (proxy, method, arguments) -> {
+                        if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
+                        if ("equals".equals(method.getName())) return proxy == arguments[0];
+                        if (!"edit".equals(method.getName())) return method.invoke(preferences, arguments);
+                        android.content.SharedPreferences.Editor editor = preferences.edit();
+                        return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),
+                                new Class<?>[]{android.content.SharedPreferences.Editor.class}, (editorProxy, edit, args) -> {
+                                    if ("commit".equals(edit.getName())) commitThread.set(Thread.currentThread().getName());
+                                    Object result = edit.invoke(editor, args);
+                                    return result instanceof android.content.SharedPreferences.Editor ? editorProxy : result;
+                                });
+                    });
+            java.lang.reflect.Field field = NativeMessagingHooks.class.getDeclaredField("replyLedger");
+            field.setAccessible(true); field.set(fixture.hook, new com.douai.module.config.SubmissionLedger(observed, 1000));
+            fixture.database.imSdkContext.suppressCallbacks = true;
+            fixture.receive(200, "thread"); fixture.flush();
+            commitThread.set(null);
+            fixture.database.imSdkContext.pendingCallbacks.remove(0).run();
+            fixture.flush();
+            assertEquals("DouAi-reply-results", commitThread.get());
+            assertEquals("sent", fixture.history().get(0).status);
+        }
+    }
+
+    @Test public void fullResultLaneKeepsSubmittedOutcomeAndAllowanceWithoutBlockingTheCaller() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies("reply_daily_limit", "1")) {
+            awaitResults();
+            java.util.concurrent.CountDownLatch blocked = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.ThreadPoolExecutor results = resultExecutor();
+            results.execute(() -> {
+                blocked.countDown();
+                try { release.await(5, TimeUnit.SECONDS); }
+                catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+            });
+            assertTrue(blocked.await(2, TimeUnit.SECONDS));
+            try {
+                for (int i = 0; i < 64; i++) results.execute(() -> { });
+                fixture.receive(200, "thread");
+                fixture.worker.runAll(); ShadowLooper.idleMainLooper(); fixture.worker.runAll();
+                assertEquals(1, fixture.database.imSdkContext.sends);
+                assertEquals("submitted", fixture.history().get(0).status);
+                assertEquals(AutomationHistoryStore.Reason.SUBMITTED_UNCONFIRMED, fixture.history().get(0).reason);
+                assertFalse(new AutomationRateLimiter(fixture.activity).canSend("reply", 100, "200", new LocalOptions(fixture.values)));
+            } finally { release.countDown(); }
+            fixture.flush();
+        }
+    }
+
+    @Test public void throwingNativeSendRemainsUnknownAndKeepsItsAllowance() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies("reply_daily_limit", "1")) {
+            fixture.database.imSdkContext.throwAfterSend = true;
+            fixture.receive(200, "thread"); fixture.flush();
+            assertEquals(1, fixture.database.imSdkContext.sends);
+            AutomationHistoryStore.Entry record = fixture.history().get(0);
+            assertEquals("submitted", record.status);
+            assertEquals(AutomationHistoryStore.Reason.SUBMITTED_UNCONFIRMED, record.reason);
+            fixture.receive(201, "other"); fixture.flush();
+            assertEquals(1, fixture.database.imSdkContext.sends);
+        }
+    }
+
+    @Test public void expiredQueuedReplyIsIdentifiedBeforeAnyGenerationOrNativeSend() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies()) {
+            Runnable reply = fixture.enqueue(200, "thread", false);
+            assertNotNull(reply);
+            org.robolectric.shadows.ShadowSystemClock.advanceBy(Duration.ofSeconds(121));
+            reply.run(); fixture.flush();
+            assertEquals(0, fixture.database.imSdkContext.sends);
+            assertEquals(AutomationHistoryStore.Reason.QUEUE_EXPIRED, fixture.history().get(0).reason);
+            assertEquals(AutomationHistoryStore.Stage.QUEUE, fixture.history().get(0).stage);
+            assertFalse(fixture.history().get(0).modelRequestSent);
+        }
+    }
+
+    @Test public void queueWaitingDoesNotSpendTheExecutionBudget() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies("reply_voice", "true")) {
+            NativeAudioMessageSenderTest.Uploader.count = 0;
+            NativeAudioMessageSenderTest.LocalInsert.fail = false;
+            NativeAudioMessageSenderTest.LocalInsert.defer = false;
+            fixture.hook.speechPreparer = (context, text, options, maximum, valid) -> {
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(Duration.ofSeconds(40));
+                return NativeAudioMessageSenderTest.audio();
+            };
+            Runnable reply = fixture.enqueue(200, "thread", false);
+            assertNotNull(reply);
+            org.robolectric.shadows.ShadowSystemClock.advanceBy(Duration.ofSeconds(90));
+            reply.run(); fixture.flush();
+            assertEquals(1, NativeAudioMessageSenderTest.Uploader.count);
+            assertEquals(0, fixture.history().stream().filter(entry -> "failed".equals(entry.status)).count());
+        }
+    }
+
+    @Test public void fullReplyQueueRecordsAnExplicitReasonAndDoesNotGrow() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies()) {
+            for (int i = 0; i < 101; i++) fixture.enqueue(200, "thread", false);
+            fixture.flush();
+            ReplyScheduler<?> queue = (ReplyScheduler<?>) HostTargets.read(fixture.hook, "replyQueue");
+            assertEquals(100, queue.size());
+            assertEquals(AutomationHistoryStore.Reason.QUEUE_FULL, fixture.history().get(0).reason);
+            assertEquals(0, fixture.database.imSdkContext.sends);
+        }
+    }
+
+    @Test public void fullPreviewQueueKeepsItsReasonInsteadOfBecomingGenericCancellation() throws Throwable {
+        try (LimitedReplies fixture = new LimitedReplies()) {
+            fixture.values.put("reply_tip", true);
+            fixture.values.put("reply_notice_seconds", "120");
+            fixture.applyOptions();
+            for (int i = 0; i < 17; i++) fixture.receive(200, "thread");
+            fixture.flush();
+            assertEquals(0, fixture.database.imSdkContext.sends);
+            assertEquals(1, fixture.history().stream().filter(entry -> "cancelled".equals(entry.status)
+                    && entry.reason == AutomationHistoryStore.Reason.QUEUE_FULL).count());
         }
     }
 
@@ -541,6 +700,7 @@ public final class NativeAutoReplyIntegrationTest {
             assertEquals("failed", history.status);
             assertTrue(history.modelRequestSent);
             assertEquals(1, history.requestImageCount);
+            assertEquals(AutomationHistoryStore.Reason.AI_HTTP_ERROR, history.reason);
         }
     }
 
@@ -749,7 +909,9 @@ public final class NativeAutoReplyIntegrationTest {
                 hook.setOptions(changed);
                 dispatcher.setOptions(changed);
             }
-            assertNotNull(reply); scheduled.getQueue().remove(reply); reply.run();
+            assertNotNull(reply); scheduled.getQueue().remove(reply);
+            org.robolectric.shadows.ShadowSystemClock.advanceBy(Duration.ofSeconds(2));
+            reply.run();
             ShadowLooper.idleMainLooper();
             View notice = replyNotice(activity, "100:thread:7001");
             assertNotNull(notice);
@@ -766,7 +928,8 @@ public final class NativeAutoReplyIntegrationTest {
             }
             if (cancel) notice.performLongClick();
             ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(9));
-            worker.runAll(); ShadowLooper.idleMainLooper(); worker.runAll();
+            worker.runAll(); awaitResults(); ShadowLooper.idleMainLooper(); awaitResults();
+            ShadowLooper.idleMainLooper(); worker.runAll();
             List<AutomationHistoryStore.Entry> records = new AutomationHistoryStore(activity).read("reply");
             assertEquals(1, records.size());
             assertEquals(cancel || removedFromList || disablePrivate ? "cancelled" : "sent", records.get(0).status);
@@ -777,7 +940,7 @@ public final class NativeAutoReplyIntegrationTest {
                 assertEquals("thread", database.imSdkContext.last.conversation.id());
             }
         } finally {
-            hook.close(); dispatcher.close(); ShadowLooper.idleMainLooper(); worker.runAll(); activity.finish();
+            hook.close(); awaitResults(); dispatcher.close(); ShadowLooper.idleMainLooper(); worker.runAll(); activity.finish();
             FollowListSnapshot.reset();
         }
     }
@@ -793,6 +956,7 @@ public final class NativeAutoReplyIntegrationTest {
         final Map<String, Conversation> cachedConversations = new HashMap<>();
         int conversationLoads;
         boolean fillConversationCache;
+        boolean throwAfterSend;
         public long uid() { return account; }
         public Bean bean() { return new Bean(); }
         public Conversations conversations() { return new Conversations(this, enumerated::countDown); }
@@ -870,6 +1034,7 @@ public final class NativeAutoReplyIntegrationTest {
         }
         public void send(Message message, Map<String, String> extras) {
             sdk.sends++; sdk.last = message;
+            if (sdk.throwAfterSend) throw new IllegalStateException("Native send threw after invocation");
             if (sdk.suppressCallbacks) { sdk.pendingCallbacks.add(() -> listener.onSuccess(message)); return; }
             if (sdk.failNext) {
                 sdk.failNext = false;
@@ -889,7 +1054,10 @@ public final class NativeAutoReplyIntegrationTest {
         final ScheduledThreadPoolExecutor scheduled;
         int serverId = 8000;
 
-        LimitedReplies(String... limits) throws Exception {
+        LimitedReplies(String... limits) throws Exception { this(false, limits); }
+
+        LimitedReplies(boolean preserveLedger, String... limits) throws Exception {
+            if (!preserveLedger) activity.getSharedPreferences("douai_reply_submissions", 0).edit().clear().commit();
             FollowListSnapshot.reset();
             values.put("native_auto_reply", true);
             values.put("reply_global", true);
@@ -952,6 +1120,7 @@ public final class NativeAutoReplyIntegrationTest {
             Runnable reply = scheduled.getQueue().peek();
             if (reply != null) {
                 scheduled.getQueue().remove(reply);
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(Duration.ofSeconds(2));
             }
             return reply;
         }
@@ -979,7 +1148,13 @@ public final class NativeAutoReplyIntegrationTest {
         }
 
         void flush() {
-            worker.runAll();
+            // A background generation first posts prepare to main; prepare then queues the native
+            // action. Drain each handoff before its FIFO barrier, including the final history write.
+            for (int round = 0; round < 3; round++) {
+                ShadowLooper.idleMainLooper();
+                worker.runAll();
+                awaitResults();
+            }
             ShadowLooper.idleMainLooper();
             worker.runAll();
         }
@@ -990,6 +1165,22 @@ public final class NativeAutoReplyIntegrationTest {
             hook.close(); dispatcher.close(); ShadowLooper.idleMainLooper(); worker.runAll(); activity.finish();
             FollowListSnapshot.reset();
         }
+    }
+
+    private static java.util.concurrent.ThreadPoolExecutor resultExecutor() throws Exception {
+        java.lang.reflect.Field field = NativeMessagingHooks.class.getDeclaredField("RESULTS_IO");
+        field.setAccessible(true);
+        return (java.util.concurrent.ThreadPoolExecutor) field.get(null);
+    }
+
+    private static void awaitResults() {
+        try {
+            java.util.concurrent.ThreadPoolExecutor results = resultExecutor();
+            results.prestartCoreThread();
+            java.util.concurrent.FutureTask<Void> barrier = new java.util.concurrent.FutureTask<>(() -> null);
+            assertTrue("Reply result queue did not free a barrier slot", results.getQueue().offer(barrier, 2, TimeUnit.SECONDS));
+            barrier.get(2, TimeUnit.SECONDS);
+        } catch (Exception failure) { throw new AssertionError("Reply result persistence did not finish", failure); }
     }
 
     private static void configureAi(LimitedReplies fixture, okhttp3.mockwebserver.MockWebServer server) throws Exception {

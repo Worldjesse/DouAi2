@@ -9,6 +9,8 @@ import android.widget.CheckBox;
 import android.widget.TextView;
 import com.douai.module.config.ConfigTransfer;
 import com.douai.module.config.ConfigBackup;
+import com.douai.module.config.SpeechSettings;
+import com.douai.module.config.MiniMaxSpeechOptions;
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.analytics.LocalAnalytics;
@@ -22,6 +24,7 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowDialog;
 import org.robolectric.shadows.ShadowLooper;
+import org.robolectric.shadows.ShadowLog;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
@@ -73,6 +76,119 @@ public final class ConfigTransferDialogTest {
         view("export").performClick(); picker.select(); finish();
         assertTrue(files.output.toString("UTF-8").contains("private-export-key"));
         assertFalse(allText(page.dialog().getWindow().getDecorView()).contains("private-export-key"));
+    }
+
+    @Test public void dialogOwnSmallExportsRoundTripWithDefaultMiniMaxAndEveryBackupOption() throws Exception {
+        LocalAnalytics analytics = LocalAnalytics.get(activity);
+        try {
+            for (boolean includeSecrets : new boolean[]{false, true}) {
+                for (boolean includeAnalysis : new boolean[]{false, true}) {
+                    for (boolean replaceCurrent : new boolean[]{false, true}) {
+                    store.values.clear();
+                    store.values.put("native_auto_reply", true);
+                    store.values.put(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+                    store.values.put(SpeechSettings.MINIMAX_API_KEY, "fixture-round-trip-key");
+                    store.values.put(SpeechSettings.MINIMAX_BASE_URL, SpeechSettings.DEFAULT_MINIMAX_BASE_URL);
+                    store.values.put(SpeechSettings.MINIMAX_MODEL, SpeechSettings.DEFAULT_MINIMAX_MODEL);
+                    store.values.put(SpeechSettings.MINIMAX_VOICE_ID, SpeechSettings.DEFAULT_MINIMAX_VOICE_ID);
+                    store.values.put(SpeechSettings.MINIMAX_SPEED, "1");
+                    store.values.put(SpeechSettings.MINIMAX_VOLUME, "1");
+                    store.values.put(SpeechSettings.MINIMAX_PITCH, "0");
+                    for (String key : MiniMaxSpeechOptions.KEYS) store.values.put(key, MiniMaxSpeechOptions.defaultValue(key));
+                    seedAnalytics(analytics, "round-trip-source", 3, "往返备份测试自述");
+                    ((CheckBox) view("secrets")).setChecked(includeSecrets);
+                    ((CheckBox) view("includeAnalytics")).setChecked(includeAnalysis);
+                    ((CheckBox) view("replace")).setChecked(replaceCurrent);
+                    view("export").performClick(); picker.select(); finishOffMain();
+                    assertTrue(((TextView) view("status")).getText().toString().contains("已导出"));
+                    byte[] original = files.output.toByteArray();
+                    assertTrue("Fixture must be far below either byte limit", original.length < 64 * 1024);
+                    files.input = original;
+                    store.values.put("native_auto_reply", false);
+                    seedAnalytics(analytics, "round-trip-current", 1, "导入前自述");
+                    view("import").performClick(); picker.select(); finishOffMain();
+                    assertTrue("Own export must produce a preview: secrets=" + includeSecrets + "; analysis=" + includeAnalysis
+                                    + "; replace=" + replaceCurrent,
+                            view("confirm").isEnabled());
+                    assertEquals(1, snapshotViews(analytics));
+                    if (includeAnalysis) ((CheckBox) view("restoreAnalytics")).setChecked(true);
+                    view("confirm").performClick(); finishOffMain();
+                    assertEquals(true, store.values.get("native_auto_reply"));
+                    assertEquals("fixture-round-trip-key", store.values.get(SpeechSettings.MINIMAX_API_KEY));
+                    assertEquals(includeAnalysis ? 3 : 1, snapshotViews(analytics));
+                    }
+                }
+            }
+        } finally { clearAnalytics(analytics); }
+    }
+
+    @Test public void smallInvalidBackupReportsValidationRatherThanAnUnrelatedSizeLimit() {
+        files.input = "{\"formatVersion\":1}".getBytes(StandardCharsets.UTF_8);
+        view("import").performClick(); picker.select(); finish();
+        String status = ((TextView) view("status")).getText().toString();
+        assertTrue(status, status.contains("格式") || status.contains("校验"));
+        assertFalse(status, status.contains("2 MiB") || status.contains("32 MiB"));
+        assertFalse(view("confirm").isEnabled());
+        assertEquals(0, store.applies);
+    }
+
+    @Test public void providerReadFailureReportsReadingRatherThanAnUnrelatedSizeLimit() {
+        files.fail = true;
+        view("import").performClick(); picker.select(); finish();
+        String status = ((TextView) view("status")).getText().toString();
+        assertTrue(status, status.contains("无法读取") || status.contains("读取失败"));
+        assertFalse(status, status.contains("2 MiB") || status.contains("32 MiB"));
+        assertFalse(status.contains("private-provider-key"));
+        assertTrue(ShadowLog.getLogsForTag("DouAi").stream().anyMatch(item ->
+                item.msg.contains("stage=read_file") && item.msg.contains("IllegalStateException")));
+        assertTrue(ShadowLog.getLogsForTag("DouAi").stream().noneMatch(item -> item.msg.contains("private-provider-key")));
+        assertEquals(0, store.applies);
+    }
+
+    @Test public void smallInvalidUtf8ReportsEncodingRatherThanAnUnrelatedSizeLimit() {
+        files.input = new byte[]{(byte) 0xff};
+        view("import").performClick(); picker.select(); finish();
+        String status = ((TextView) view("status")).getText().toString();
+        assertTrue(status, status.contains("UTF-8"));
+        assertFalse(status, status.contains("2 MiB") || status.contains("32 MiB"));
+        assertEquals(0, store.applies);
+    }
+
+    @Test public void linkageFailureDuringReadingCompletesWithASafeCompatibilityReasonInsteadOfStalling() {
+        files.linkageFailure = true;
+        view("import").performClick(); picker.select(); finish();
+        String status = ((TextView) view("status")).getText().toString();
+        assertTrue("Linkage failure must leave the busy state with a compatibility reason", status.contains("兼容"));
+        assertFalse(status.contains("private-linkage-key"));
+        assertFalse(view("confirm").isEnabled());
+        assertTrue(view("import").isEnabled());
+        assertTrue(ShadowLog.getLogsForTag("DouAi").stream().anyMatch(item ->
+                item.msg.contains("stage=read_file") && item.msg.contains("NoSuchMethodError")));
+        assertTrue(ShadowLog.getLogsForTag("DouAi").stream().noneMatch(item -> item.msg.contains("private-linkage-key")));
+        assertEquals(0, store.applies);
+    }
+
+    @Test public void successfulReadsLogOnlyByteCountAndSha256WithoutDocumentOrConfigurationContents() throws Exception {
+        MemoryStore source = new MemoryStore();
+        source.values.put("native_auto_reply", true);
+        source.values.put(SpeechSettings.MINIMAX_API_KEY, "private-hash-fixture-key");
+        files.input = ConfigTransfer.export(source, true).getBytes(StandardCharsets.UTF_8);
+        byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(files.input);
+        String expectedHash = String.format(java.util.Locale.ROOT, "%064X", new java.math.BigInteger(1, digest));
+        ShadowLog.clear();
+        view("import").performClick(); picker.select(); finish();
+        assertTrue(view("confirm").isEnabled());
+        java.util.List<org.robolectric.shadows.ShadowLog.LogItem> logs = ShadowLog.getLogsForTag("DouAi");
+        assertTrue(logs.stream().anyMatch(item -> item.msg.equals(
+                "ConfigTransfer read: bytes=" + files.input.length + "; sha256=" + expectedHash)));
+        for (org.robolectric.shadows.ShadowLog.LogItem item : logs) {
+            assertFalse(item.msg.contains("private-hash-fixture-key"));
+            assertFalse(item.msg.contains("content://"));
+            assertFalse(item.msg.contains("file.json"));
+            assertFalse(item.msg.contains("native_auto_reply"));
+            assertFalse(item.msg.contains("\"values\""));
+        }
+        assertEquals(0, store.applies);
     }
 
     @Test public void localAnalysisIsExcludedByDefaultAndIncludedOnlyForTheSelectedExport() throws Exception {
@@ -396,8 +512,9 @@ public final class ConfigTransferDialogTest {
         void runAll() { while (!queued.isEmpty()) queued.remove().run(); }
     }
     private static final class Files implements ConfigTransferDialog.Files {
-        byte[] input = new byte[0]; ByteArrayOutputStream output; int reads, writes; boolean fail;
+        byte[] input = new byte[0]; ByteArrayOutputStream output; int reads, writes; boolean fail, linkageFailure;
         @Override public InputStream read(Uri uri) {
+            if (linkageFailure) throw new NoSuchMethodError("private-linkage-key");
             reads++; if (fail) throw new IllegalStateException("private-provider-key");
             return new ByteArrayInputStream(input);
         }

@@ -128,6 +128,8 @@ object MiuixSettingsViews {
         private val environment = HostComposeEnvironment(activity, onClose)
         private var currentScan by mutableStateOf(ScanStatus.pending())
         private var categorySearchTerms by mutableStateOf(titles.copyOf())
+        private var featureSearch by mutableStateOf<List<FeatureSearch>>(emptyList())
+        private var onFeature: IntConsumer? = null
         val view = ComposeView(environment.context())
 
         init {
@@ -140,6 +142,12 @@ object MiuixSettingsViews {
         fun setSearchTerms(terms: Array<String>) {
             require(terms.size == titles.size)
             categorySearchTerms = terms.copyOf()
+        }
+        fun setFeatureSearch(ids: Array<String>, labels: Array<String>, paths: Array<String>,
+                             terms: Array<String>, action: IntConsumer) {
+            require(ids.size == labels.size && ids.size == paths.size && ids.size == terms.size)
+            onFeature = action
+            featureSearch = ids.indices.map { FeatureSearch(ids[it], labels[it], paths[it], terms[it]) }
         }
         fun bindBackNavigation(dialog: Dialog) = environment.bindBackNavigation(dialog)
         override fun close() = environment.close()
@@ -184,7 +192,10 @@ object MiuixSettingsViews {
                         .testTag("settings.search"),
                 )
                 val matching = titles.indices.filter { categorySearchTerms[it].contains(query.trim(), ignoreCase = true) }
-                if (matching.isEmpty()) BasicComponent(title = "没有匹配的设置分类")
+                val features = if (query.isBlank()) emptyList() else featureSearch.indices.filter {
+                    featureSearch[it].terms.contains(query.trim(), ignoreCase = true)
+                }
+                if (matching.isEmpty() && features.isEmpty()) BasicComponent(title = "没有匹配的设置分类")
                 matching.forEach { index ->
                     BasicComponent(
                         title = titles[index],
@@ -199,8 +210,19 @@ object MiuixSettingsViews {
                         onClick = { onCategory.accept(index) },
                     )
                 }
+                features.forEach { index ->
+                    val entry = featureSearch[index]
+                    BasicComponent(
+                        title = entry.title,
+                        summary = entry.path,
+                        modifier = Modifier.testTag("settings.search.result.${entry.id}"),
+                        onClick = { onFeature?.accept(index) },
+                    )
+                }
             }
         }
+
+        private data class FeatureSearch(val id: String, val title: String, val path: String, val terms: String)
     }
 
     class Toggle(

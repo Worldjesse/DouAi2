@@ -13,6 +13,7 @@ final class BehaviorHookGroup implements AutoCloseable {
     private final Consumer<String> log;
     private final List<XposedInterface.HookHandle> handles = new ArrayList<>();
     private boolean closed;
+    private String installationFailure = "";
 
     BehaviorHookGroup(String id, Consumer<String> log) {
         this.id = id;
@@ -37,8 +38,12 @@ final class BehaviorHookGroup implements AutoCloseable {
     }
 
     synchronized boolean isActive() { return !closed && !handles.isEmpty(); }
+    synchronized String installationFailure() { return installationFailure; }
 
     void fail(Throwable failure) {
+        synchronized (this) {
+            installationFailure = com.douai.module.diagnostics.HostAdaptationDiagnostics.installationFailure(failure);
+        }
         close();
         try { log.accept("Advanced feature " + id + " rolled back: "
                 + failure.getClass().getSimpleName() + ": " + failure.getMessage()); }

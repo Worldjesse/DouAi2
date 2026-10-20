@@ -12,6 +12,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
+import com.douai.module.config.BackupValidationException.Reason;
+import com.douai.module.config.BackupValidationException.Section;
 
 /** Versioned configuration transfer. Inspect is pure; only an accepted preview can be applied. */
 public final class ConfigTransfer {
@@ -46,6 +48,7 @@ public final class ConfigTransfer {
     public static String export(SettingsStore store, boolean includeSecrets) {
         try {
             Map<String, ?> source = store.snapshot(); JSONObject values = new JSONObject();
+            new MiniMaxSpeechOptions(new LocalOptions(source)).validate();
             for (Map.Entry<String, ?> entry : new TreeMap<>(source).entrySet()) {
                 String key = entry.getKey(); if (!ConfigKeys.TYPES.containsKey(key)) continue;
                 Object value = entry.getValue(); ConfigKeys.validate(key, value);
@@ -57,7 +60,7 @@ public final class ConfigTransfer {
                     .put("module", new JSONObject().put("applicationId", APPLICATION_ID)
                             .put("versionName", BuildConfig.VERSION_NAME).put("versionCode", BuildConfig.VERSION_CODE))
                     .put("includesSecrets", includeSecrets).put("values", values).toString(2);
-            if (encoded.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES) throw new IllegalArgumentException("配置文件超过 2 MiB 限制");
+            if (encoded.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES) throw new BackupLimitException(BackupLimitException.Section.CONFIG);
             return encoded;
         } catch (IllegalArgumentException failure) { throw failure; }
         catch (Exception failure) { throw new IllegalArgumentException("配置无法导出，请检查设置内容"); }
@@ -66,33 +69,47 @@ public final class ConfigTransfer {
     public static Preview inspect(SettingsStore store, String encoded) { return inspect(store, encoded, Mode.MERGE); }
 
     public static Preview inspect(SettingsStore store, String encoded, Mode mode) {
-        if (encoded == null || encoded.length() > MAX_BYTES || encoded.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES) {
-            throw new IllegalArgumentException("配置文件为空或超过 2 MiB 限制");
-        }
-        if (mode == null) throw ConfigJson.invalid();
+        if (encoded == null) throw new BackupValidationException(Section.CONFIG, Reason.INVALID_JSON, null);
+        if (encoded.length() > MAX_BYTES || encoded.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES)
+            throw new BackupLimitException(BackupLimitException.Section.CONFIG);
+        if (mode == null) throw new BackupValidationException(Section.CONFIG, Reason.MERGED_SETTINGS, null);
+        Reason reason = Reason.INVALID_JSON;
+        String field = null;
         try {
             Object parsed = ConfigJson.parse(encoded);
+            reason = Reason.HEADER_SHAPE;
             if (!(parsed instanceof JSONObject)) throw ConfigJson.invalid();
             JSONObject root = (JSONObject) parsed;
             exactKeys(root, "formatVersion", "module", "includesSecrets", "values");
-            if (!Long.valueOf(FORMAT_VERSION).equals(root.get("formatVersion"))) throw new IllegalArgumentException("不支持此配置文件版本");
+            reason = Reason.FORMAT_VERSION; field = "formatVersion";
+            if (!Long.valueOf(FORMAT_VERSION).equals(root.get("formatVersion"))) throw ConfigJson.invalid();
+            reason = Reason.MODULE; field = "module";
             JSONObject metadata = root.getJSONObject("module");
             exactKeys(metadata, "applicationId", "versionName", "versionCode");
-            if (!APPLICATION_ID.equals(metadata.get("applicationId"))) throw new IllegalArgumentException("配置文件不属于 DouAi");
+            field = "applicationId";
+            if (!APPLICATION_ID.equals(metadata.get("applicationId"))) throw ConfigJson.invalid();
+            field = "versionName";
             Object version = metadata.get("versionName"), code = metadata.get("versionCode");
-            if (!(version instanceof String) || !((String) version).matches("[0-9]+\\.[0-9]+\\.[0-9]+")
-                    || !(code instanceof Long) || (Long) code <= 0 || (Long) code > Integer.MAX_VALUE) throw ConfigJson.invalid();
+            if (!(version instanceof String) || !((String) version).matches("[0-9]+\\.[0-9]+\\.[0-9]+")) throw ConfigJson.invalid();
+            field = "versionCode";
+            if (!(code instanceof Long) || (Long) code <= 0 || (Long) code > Integer.MAX_VALUE) throw ConfigJson.invalid();
+            reason = Reason.TYPE_MISMATCH; field = "includesSecrets";
             if (!(root.get("includesSecrets") instanceof Boolean)) throw ConfigJson.invalid();
             boolean secrets = root.getBoolean("includesSecrets");
+            field = "values";
             JSONObject values = root.getJSONObject("values");
             if (values.length() > ConfigKeys.TYPES.size()) throw ConfigJson.invalid();
             Map<String, Object> incoming = new LinkedHashMap<>(); int redacted = 0;
             Iterator<String> keys = values.keys();
             while (keys.hasNext()) {
-                String key = keys.next(); JSONObject typed = values.getJSONObject(key);
-                exactKeys(typed, "type", "value");
+                String key = keys.next();
+                reason = Reason.UNKNOWN_KEY; field = null;
                 String type = ConfigKeys.TYPES.get(key);
-                if (type == null || !type.equals(typed.get("type"))) throw ConfigJson.invalid();
+                if (type == null) throw ConfigJson.invalid();
+                reason = Reason.TYPE_MISMATCH; field = key;
+                JSONObject typed = values.getJSONObject(key);
+                exactKeys(typed, "type", "value");
+                if (!type.equals(typed.get("type"))) throw ConfigJson.invalid();
                 Object value = typed.get("value");
                 if ("int".equals(type)) {
                     if (!(value instanceof Long) || (Long) value < Integer.MIN_VALUE || (Long) value > Integer.MAX_VALUE) throw ConfigJson.invalid();
@@ -100,21 +117,26 @@ public final class ConfigTransfer {
                 }
                 ConfigKeys.validate(key, value); validateStructured(key, value);
                 if (value instanceof String) {
+                    reason = Reason.SECRET_POLICY;
                     String text = (String) value; redacted += ConfigSecrets.count(text);
                     if (!secrets && !equivalentText(key, text, ConfigSecrets.redact(key, text))) {
-                        throw new IllegalArgumentException("标记为不含密钥的配置仍包含认证内容");
+                        throw ConfigJson.invalid();
                     }
                 }
                 incoming.put(key, value);
             }
+            reason = Reason.SECRET_POLICY; field = null;
             if (secrets && redacted > 0) throw ConfigJson.invalid();
+            reason = Reason.CURRENT_STORE;
             Map<String, ?> before = store.snapshot(); Map<String, Object> result = new LinkedHashMap<>(before);
+            reason = Reason.MERGED_SETTINGS;
             if (mode == Mode.REPLACE) for (String key : ConfigKeys.TYPES.keySet()) result.remove(key);
             result.putAll(incoming);
             int[] missing = {0};
             if (!secrets && mode == Mode.REPLACE) {
                 for (Map.Entry<String, ?> entry : before.entrySet()) {
                     String key = entry.getKey(); Object value = entry.getValue();
+                    field = ConfigKeys.TYPES.containsKey(key) ? key : null;
                     if (ConfigKeys.TYPES.containsKey(key) && !result.containsKey(key) && value instanceof String
                             && !AiModelSettings.KEY.equals(key) && ConfigSecrets.sameEndpoint(before, result, key)
                             && !equivalentText(key, (String) value, ConfigSecrets.redact(key, (String) value))) result.put(key, value);
@@ -122,6 +144,7 @@ public final class ConfigTransfer {
             }
             // New endpoints must not inherit credentials that were absent from the incoming file.
             for (String key : ConfigKeys.TYPES.keySet()) {
+                field = key;
                 Object current = result.get(key);
                 if (!(current instanceof String)) continue;
                 boolean same = ConfigSecrets.sameEndpoint(before, result, key);
@@ -133,11 +156,16 @@ public final class ConfigTransfer {
                 result.put(key, restored);
             }
             for (Map.Entry<String, Object> entry : result.entrySet()) if (ConfigKeys.TYPES.containsKey(entry.getKey())) {
+                field = entry.getKey();
                 ConfigKeys.validate(entry.getKey(), entry.getValue()); validateStructured(entry.getKey(), entry.getValue());
             }
+            reason = Reason.MINIMAX_OPTIONS; field = null;
+            new MiniMaxSpeechOptions(new LocalOptions(result)).validate();
+            reason = Reason.MERGED_SETTINGS;
             return new Preview(before, result, incoming.size(), redacted, missing[0], (String) version, secrets, mode);
-        } catch (IllegalArgumentException failure) { throw failure; }
-        catch (Exception failure) { throw ConfigJson.invalid(); }
+        } catch (Exception | LinkageError failure) {
+            throw BackupValidationException.wrap(Section.CONFIG, reason, field, failure);
+        }
     }
 
     public static void apply(SettingsStore store, Preview preview) {
@@ -175,9 +203,15 @@ public final class ConfigTransfer {
     }
 
     private static void validateStructured(String key, Object value) {
-        if (!(value instanceof String) || ((String) value).isEmpty()) return;
-        String text = (String) value;
+        Reason reason = key.endsWith("headers") ? Reason.STRUCTURED_HEADERS
+                : AiModelSettings.KEY.equals(key) ? Reason.STRUCTURED_MODELS
+                : CustomViewLocator.SETTINGS_KEY.equals(key) ? Reason.STRUCTURED_COMPONENTS
+                : key.startsWith("tts_minimax_") ? Reason.MINIMAX_OPTIONS : Reason.STRUCTURED_FIELDS;
         try {
+            if (SpeechSettings.PROVIDER.equals(key) && value instanceof String) SpeechSettings.validateProvider((String) value);
+            if (key.startsWith("tts_minimax_") && value instanceof String) SpeechSettings.validateMiniMaxValue(key, (String) value);
+            if (!(value instanceof String) || ((String) value).isEmpty()) return;
+            String text = (String) value;
             if (AiModelSettings.KEY.equals(key)) {
                 JSONObject root = (JSONObject) ConfigJson.parse(text);
                 exactKeys(root, "version", "activeId", "configs");
@@ -218,6 +252,8 @@ public final class ConfigTransfer {
                 JSONArray fields = (JSONArray) parsed;
                 for (int i = 0; i < fields.length(); i++) if (!(fields.get(i) instanceof String)) throw ConfigJson.invalid();
             }
-        } catch (Exception failure) { throw new IllegalArgumentException("配置包含无效的模型、请求头或组件设置"); }
+        } catch (Exception | LinkageError failure) {
+            throw BackupValidationException.wrap(Section.CONFIG, reason, key, failure);
+        }
     }
 }

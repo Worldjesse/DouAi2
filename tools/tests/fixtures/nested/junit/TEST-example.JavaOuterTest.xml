@@ -1,0 +1,4 @@
+<testsuite name="example.JavaOuterTest" tests="2" skipped="0" failures="0" errors="0">
+  <testcase name="sameName" classname="example.JavaOuterTest"/>
+  <testcase name="afterNestedClass" classname="example.JavaOuterTest"/>
+</testsuite>

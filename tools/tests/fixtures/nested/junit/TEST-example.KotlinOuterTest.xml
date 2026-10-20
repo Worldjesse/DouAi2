@@ -1,0 +1,3 @@
+<testsuite name="example.KotlinOuterTest" tests="1" skipped="0" failures="0" errors="0">
+  <testcase name="sameName" classname="example.KotlinOuterTest"/>
+</testsuite>

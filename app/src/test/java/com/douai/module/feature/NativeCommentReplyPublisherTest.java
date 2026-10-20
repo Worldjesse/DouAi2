@@ -35,6 +35,7 @@ public final class NativeCommentReplyPublisherTest {
     private NativeCommentPublisher publisher;
     private final List<NativeCommentPublisher> publishers = new ArrayList<>();
     private final List<File> audioFiles = new ArrayList<>();
+    private final List<String> diagnostics = new ArrayList<>();
 
     @Before public void install() throws Exception {
         framework = new Framework();
@@ -47,7 +48,7 @@ public final class NativeCommentReplyPublisherTest {
         Resolver.wrongDirect = false;
         Resolver.latestModel = null;
         publisher = NativeCommentPublisher.install(framework.api, report(), getClass().getClassLoader(),
-                ignored -> { }, "DouAi.CommentReply");
+                diagnostics::add, "DouAi.CommentReply");
         publishers.add(publisher);
     }
 
@@ -333,6 +334,154 @@ public final class NativeCommentReplyPublisherTest {
         assertEquals(Arrays.asList("submitted", "sent"), outcomes);
     }
 
+    @Test public void ownedAudioCallbackDistinguishesUploadFromPublishWithoutRevealingTheVid() throws Throwable {
+        Request.uploadAudio = true;
+        String[] vids = {null, "", "private-video-id", null};
+        String[] phases = {"upload_or_auth", "upload_or_auth", "publish", "unknown"};
+        for (int index = 0; index < vids.length; index++) {
+            diagnostics.clear();
+            List<String> outcomes = new ArrayList<>();
+            publisher.sendReply(event("incoming-" + index, "root"), "", audio(), () -> true,
+                    () -> true, () -> { }, outcomes::add);
+            ShadowLooper.idleMainLooper();
+            Model model = Request.models.get(index);
+            model.A.audio.vid = vids[index];
+            if (index == 3) model.A = null;
+            framework.invoke(Request.class.getMethod("failed", Exception.class), Request.instances.get(index),
+                    new NativeCommentPublisherResponseTest.ApiServerFailure(12345));
+            ShadowLooper.idleMainLooper();
+            assertEquals(Collections.singletonList("failed"), outcomes);
+            String phase = phases[index];
+            assertTrue(diagnostics.toString(), diagnostics.stream().anyMatch(value -> value.contains("native callback: failed")
+                    && value.contains("code=12345") && value.contains("audio_phase=" + phase)));
+            assertFalse(diagnostics.toString().contains("private-video-id"));
+            assertFalse(diagnostics.toString().contains("private-key"));
+        }
+    }
+
+    @Test public void ownedAudioSuccessReportsWhetherTheCommentContainsCompleteAudioMetadata() throws Throwable {
+        Request.uploadAudio = true;
+        for (int index = 0; index < 5; index++) {
+            diagnostics.clear();
+            List<String> outcomes = new ArrayList<>();
+            publisher.sendReply(event("incoming-" + index, "root"), "", audio(), () -> true,
+                    () -> true, () -> { }, outcomes::add);
+            ShadowLooper.idleMainLooper();
+            Response response = wireResponse(index);
+            if (index != 1) {
+                response.comment.commentAudio = new ReceiptAudio();
+                response.comment.commentAudio.a = index == 2 ? "" : "private-receipt-vid";
+                response.comment.commentAudio.e = index == 4 ? null : Long.valueOf(index == 3 ? 0L : 33_516L);
+            }
+            complete(index, response);
+            assertEquals("Receipt diagnostics must not change the existing success decision",
+                    Collections.singletonList("sent"), outcomes);
+            String expected = index == 0 ? "present" : "missing";
+            assertTrue(diagnostics.toString(), diagnostics.stream().anyMatch(value -> value.contains("native callback: sent")
+                    && value.contains("audio_receipt=" + expected)));
+            assertFalse(diagnostics.toString().contains("private-receipt-vid"));
+        }
+    }
+
+    @Test public void ownedAudioFailuresClassifyVerifiedServerHintsWithoutPrintingThemOrInferringFromCodeFive() throws Throwable {
+        Request.uploadAudio = true;
+        Exception[] failures = {
+                new com.ss.android.ugc.aweme.base.api.exceptions.server.ApiServerException(5,
+                        "音频时长超出限制 private-hint https://private.invalid/format?key=private-key", "参数错误"),
+                new com.ss.android.ugc.aweme.base.api.exceptions.server.ApiServerException(5, "",
+                        "音频格式不支持，内容审核，参数错误，请求过于频繁 private-hint"),
+                new com.ss.android.ugc.aweme.base.api.exceptions.server.ApiServerException(5, "文件体积过大，没有语音评论权限", ""),
+                new com.ss.android.ugc.aweme.base.api.exceptions.server.ApiServerException(5, "服务器暂时不可用 private-hint", ""),
+                new com.ss.android.ugc.aweme.base.api.exceptions.server.ApiServerException(5, "", ""),
+                new UnverifiedHintFailure(),
+                new com.ss.android.ugc.aweme.base.api.exceptions.server.ApiServerException(5,
+                        "https://private.invalid/format?duration=30&token=private-key", ""),
+                new com.ss.android.ugc.aweme.base.api.exceptions.server.ApiServerException(5, "private-hint", "", true)
+        };
+        String[] hints = {"duration", "format+frequency+parameter+content", "size+permission", "other", "empty", "unknown", "other", "unknown"};
+        for (int index = 0; index < failures.length; index++) {
+            diagnostics.clear();
+            List<String> outcomes = new ArrayList<>();
+            publisher.sendReply(event("incoming-" + index, "root"), "", audio(), () -> true, () -> true, () -> { }, outcomes::add);
+            ShadowLooper.idleMainLooper();
+            Request.models.get(index).A.audio.vid = "private-video-id";
+            framework.invoke(Request.class.getMethod("failed", Exception.class), Request.instances.get(index), failures[index]);
+            ShadowLooper.idleMainLooper();
+            assertEquals(Collections.singletonList("failed"), outcomes);
+            String expected = "audio_hint=" + hints[index];
+            assertTrue(expected + ": " + diagnostics, diagnostics.stream().anyMatch(value -> value.contains("native callback: failed")
+                    && value.contains("code=5") && value.contains(expected) && value.contains("audio_phase=publish")));
+            for (String secret : new String[]{"private-hint", "private-key", "private.invalid", "private-video-id", "private-throwable", "private-getter"}) {
+                assertFalse(secret, diagnostics.toString().contains(secret));
+            }
+        }
+    }
+
+    @Test public void ownedAudioFailureReportsCapturedTypedPermissionsWithoutUsingThemAsASendGate() throws Throwable {
+        Request.uploadAudio = true;
+        Object[] settings = {new FeedConfig(0, false), new FeedConfig(1, true), new FeedConfig(7, false), null,
+                new WrongFeedConfig(), new FeedConfig(0, false)};
+        String[] permissions = {"0", "1", "7", "unknown", "unknown", "0"};
+        String[] blocks = {"false", "true", "false", "unknown", "unknown", "false"};
+        for (int index = 0; index < settings.length; index++) {
+            diagnostics.clear();
+            CommentReplyEvent event = event("incoming-" + index, "root");
+            Work work = (Work) event.work;
+            work.feedCommentConfig = settings[index];
+            List<String> outcomes = new ArrayList<>();
+            AtomicInteger accepted = new AtomicInteger();
+            publisher.sendReply(event, "", audio(), () -> true, () -> true, accepted::incrementAndGet, outcomes::add);
+            ShadowLooper.idleMainLooper();
+            assertEquals("Permission diagnostics must not become a new send gate", 1, accepted.get());
+            if (index == 5) work.feedCommentConfig = new FeedConfig(1, true);
+            framework.invoke(Request.class.getMethod("failed", Exception.class), Request.instances.get(index),
+                    new com.ss.android.ugc.aweme.base.api.exceptions.server.ApiServerException(5, "", ""));
+            ShadowLooper.idleMainLooper();
+            assertEquals(Collections.singletonList("failed"), outcomes);
+            String permission = "audio_permission=" + permissions[index], block = "audio_block=" + blocks[index];
+            assertTrue(diagnostics.toString(), diagnostics.stream().anyMatch(value -> value.contains("native callback: failed")
+                    && value.contains(permission) && value.contains(block)));
+        }
+    }
+
+    @Test public void audioFailureHintAndPermissionDiagnosticsIgnoreForeignCallbacksAndOrdinaryTextFailures() throws Throwable {
+        Exception failure = new com.ss.android.ugc.aweme.base.api.exceptions.server.ApiServerException(5, "时长 private-hint", "");
+        framework.invoke(Request.class.getMethod("failed", Exception.class), new Request(), failure);
+        ShadowLooper.idleMainLooper();
+        assertTrue("A foreign callback must not produce owned diagnostics", diagnostics.isEmpty());
+
+        List<String> outcomes = new ArrayList<>();
+        publisher.sendReply(event("incoming", "root"), "普通文字", () -> true, () -> true, () -> { }, outcomes::add);
+        ShadowLooper.idleMainLooper();
+        framework.invoke(Request.class.getMethod("failed", Exception.class), Request.instances.get(0), failure);
+        ShadowLooper.idleMainLooper();
+        assertEquals(Collections.singletonList("failed"), outcomes);
+        assertFalse(diagnostics.toString().contains("audio_hint="));
+        assertFalse(diagnostics.toString().contains("audio_permission="));
+        assertFalse(diagnostics.toString().contains("audio_block="));
+        assertFalse(diagnostics.toString().contains("private-hint"));
+    }
+
+    @Test public void missingOptionalPermissionFieldTypeCannotPreventTheOwnedAudioSubmission() throws Throwable {
+        Request.uploadAudio = true;
+        Class<?> isolated = NativeCommentPublisherResponseTest.isolatedDiagnosticFixture(
+                LinkageWork.class, MissingPermissionType.class.getName());
+        Object work = isolated.getConstructor().newInstance();
+        // This is field type resolution itself, not a getter throwing through InvocationTargetException.
+        assertThrows(NoClassDefFoundError.class, () -> isolated.getDeclaredField("feedCommentConfig"));
+        List<String> outcomes = new ArrayList<>();
+        AtomicInteger accepted = new AtomicInteger();
+        publisher.send(work, "work", "", audio(), () -> true, () -> true, accepted::incrementAndGet, outcomes::add);
+        ShadowLooper.idleMainLooper();
+        assertEquals(1, accepted.get());
+        framework.invoke(Request.class.getMethod("failed", Exception.class), Request.instances.get(0),
+                new NativeCommentPublisherResponseTest.ApiServerFailure(5));
+        ShadowLooper.idleMainLooper();
+        assertEquals(Collections.singletonList("failed"), outcomes);
+        assertTrue(diagnostics.toString(), diagnostics.stream().anyMatch(value -> value.contains("native callback: failed")
+                && value.contains("audio_permission=unknown") && value.contains("audio_block=unknown")));
+    }
+
     @Test public void foreignVoiceUploadDoesNotMakeARejectedReplyLookAccepted() throws Exception {
         Request.uploadAudio = true;
         Request.foreignUpload = true;
@@ -514,11 +663,36 @@ public final class NativeCommentReplyPublisherTest {
     }
 
     public static final class Work extends NativeCommentReplyInboxTest.Work {
+        public Object feedCommentConfig;
         public String getAid() { return aid; }
     }
+    public static final class LinkageWork extends NativeCommentReplyInboxTest.Work {
+        public Object feedCommentConfig;
+        public MissingPermissionType unrelatedOptionalField;
+        public String getAid() { return aid; }
+    }
+    public static final class MissingPermissionType { }
+    public static final class FeedConfig {
+        public final int audioCommentPermission;
+        public final BlockConfig commentBlockConfig;
+        FeedConfig(int permission, boolean block) { audioCommentPermission = permission; commentBlockConfig = new BlockConfig(block); }
+    }
+    public static final class BlockConfig { public final boolean blockAudio; BlockConfig(boolean value) { blockAudio = value; } }
+    public static final class WrongFeedConfig {
+        public final Long audioCommentPermission = 1L;
+        public final WrongBlockConfig commentBlockConfig = new WrongBlockConfig();
+    }
+    public static final class WrongBlockConfig { public final String blockAudio = "private-block"; }
+    public static final class UnverifiedHintFailure extends Exception {
+        public final int errorCode = 5;
+        public String LIZLLL() { throw new AssertionError("Do not invoke an unverified same-name getter"); }
+        public String LIZJ() { throw new AssertionError("Do not invoke an unverified same-name getter"); }
+    }
     public static final class Comment extends NativeCommentReplyInboxTest.Comment {
+        public ReceiptAudio commentAudio;
         public Comment() { cid = "published"; }
     }
+    public static final class ReceiptAudio { public String a; public Long e; }
     public static final class Response { public int status_code; public Comment comment = new Comment(); }
     public static final class State { public NativeCommentReplyInboxTest.Work work; }
     public static final class Resolver {
@@ -552,6 +726,7 @@ public final class NativeCommentReplyPublisherTest {
         public final File localFile;
         public final List<?> waveList;
         public final Long duration;
+        public String vid;
         public Audio(File file, List<?> waves, Long duration) { localFile = file; waveList = waves; this.duration = duration; }
     }
     public static final class UploadCallback {

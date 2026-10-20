@@ -29,6 +29,21 @@ final class HostConfigFilePicker implements AutoCloseable {
 
     static HostConfigFilePicker launch(Activity activity, boolean export, String name,
                                        Consumer<Uri> selected, ClassLoader loader) {
+        Intent intent = new Intent(export ? Intent.ACTION_CREATE_DOCUMENT : Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType(export ? "application/json" : "*/*")
+                .addFlags(export ? Intent.FLAG_GRANT_WRITE_URI_PERMISSION : Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        if (export) intent.putExtra(Intent.EXTRA_TITLE, name);
+        else intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/json", "text/plain", "application/octet-stream"});
+        return launch(activity, intent, selected, loader);
+    }
+
+    static HostConfigFilePicker launch(Activity activity, Intent intent, Consumer<Uri> selected) {
+        return launch(activity, intent, selected, activity == null ? null : activity.getClass().getClassLoader());
+    }
+
+    private static HostConfigFilePicker launch(Activity activity, Intent intent,
+                                               Consumer<Uri> selected, ClassLoader loader) {
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) return null;
         HostConfigFilePicker previous = PENDING.get(activity);
         if (previous != null) previous.close();
@@ -67,12 +82,6 @@ final class HostConfigFilePicker implements AutoCloseable {
             picker.launcher = registryType.getMethod("register", String.class, contract, callback)
                     .invoke(registry, "douai_config_" + UUID.randomUUID(), start, result);
             PENDING.put(activity, picker);
-            Intent intent = new Intent(export ? Intent.ACTION_CREATE_DOCUMENT : Intent.ACTION_OPEN_DOCUMENT)
-                    .addCategory(Intent.CATEGORY_OPENABLE)
-                    .setType(export ? "application/json" : "*/*")
-                    .addFlags(export ? Intent.FLAG_GRANT_WRITE_URI_PERMISSION : Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            if (export) intent.putExtra(Intent.EXTRA_TITLE, name);
-            else intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/json", "text/plain", "application/octet-stream"});
             picker.launcherType.getMethod("launch", Object.class).invoke(picker.launcher, intent);
             return picker;
         } catch (ReflectiveOperationException | RuntimeException failure) {

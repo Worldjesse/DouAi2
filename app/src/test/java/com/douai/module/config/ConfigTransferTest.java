@@ -18,6 +18,97 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class ConfigTransferTest {
+    @Test public void miniMaxSettingsRoundTripAndSecretFreeBackupsBindKeysToTheirOwnEndpoint() {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+        source.values.put(SpeechSettings.MINIMAX_API_KEY, "fixture-minimax-key");
+        source.values.put(SpeechSettings.MINIMAX_BASE_URL, SpeechSettings.DEFAULT_MINIMAX_BASE_URL);
+        source.values.put(SpeechSettings.MINIMAX_MODEL, "speech-2.8-hd");
+        source.values.put(SpeechSettings.MINIMAX_VOICE_ID, "male-qn-qingse");
+        source.values.put(SpeechSettings.MINIMAX_VOICE_NAME, "青涩青年");
+        source.values.put(SpeechSettings.MINIMAX_SPEED, "1.5");
+        source.values.put(SpeechSettings.MINIMAX_VOLUME, "8");
+        source.values.put(SpeechSettings.MINIMAX_PITCH, "-12");
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, ConfigTransfer.export(source, true)));
+        assertEquals(source.values, target.values);
+        target.values.put(SpeechSettings.MINIMAX_API_KEY, "local-minimax-key");
+        String redacted = ConfigTransfer.export(source, false);
+        assertFalse(redacted.contains("fixture-minimax-key"));
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, redacted));
+        assertEquals("local-minimax-key", target.values.get(SpeechSettings.MINIMAX_API_KEY));
+        source.values.put(SpeechSettings.MINIMAX_BASE_URL, "https://new.example.test");
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, ConfigTransfer.export(source, false)));
+        assertEquals("", target.values.get(SpeechSettings.MINIMAX_API_KEY));
+        assertFalse(target.values.toString().contains("local-minimax-key"));
+    }
+
+    @Test public void miniMaxBackupRejectsInvalidFieldsAndKeepsRuntimeVoiceCatalogOutOfExport() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+        source.values.put(SpeechSettings.MINIMAX_VOICE_SAMPLE, "runtime-minimax-catalog");
+        source.values.put(SpeechSettings.MINIMAX_MODEL_SAMPLE, "runtime-model-catalog");
+        source.values.put(SpeechSettings.MINIMAX_MODEL_SOURCE, "api");
+        String encoded = ConfigTransfer.export(source, true);
+        assertFalse(encoded.contains("runtime-minimax-catalog"));
+        assertFalse(encoded.contains("runtime-model-catalog"));
+        assertFalse(encoded.contains(SpeechSettings.MINIMAX_MODEL_SOURCE));
+        String[][] invalidValues = {{SpeechSettings.PROVIDER, "unknown"}, {SpeechSettings.MINIMAX_BASE_URL, "bad-url"},
+                {SpeechSettings.MINIMAX_MODEL, ""}, {SpeechSettings.MINIMAX_VOICE_ID, ""},
+                {SpeechSettings.MINIMAX_SPEED, "0.49"}, {SpeechSettings.MINIMAX_VOLUME, "0"}, {SpeechSettings.MINIMAX_PITCH, "0.5"}};
+        for (String[] invalid : invalidValues) {
+            JSONObject backup = new JSONObject(encoded);
+            backup.getJSONObject("values").put(invalid[0], new JSONObject().put("type", "string").put("value", invalid[1]));
+            assertThrows(invalid[0], IllegalArgumentException.class, () -> ConfigTransfer.inspect(target, backup.toString()));
+            assertTrue(target.values.isEmpty());
+        }
+    }
+
+    @Test public void miniMaxAdvancedOptionsRoundTripAsValidatedSettingsWithoutSerializingCatalogCaches() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+        source.values.put(SpeechSettings.MINIMAX_MODEL, "speech-2.8-turbo");
+        source.values.put(MiniMaxSpeechOptions.EMOTION, "happy");
+        source.values.put(MiniMaxSpeechOptions.LANGUAGE_BOOST, "Chinese");
+        source.values.put(MiniMaxSpeechOptions.TEXT_NORMALIZATION_MODE, "quality");
+        source.values.put(MiniMaxSpeechOptions.AUDIO_FORMAT, "wav");
+        source.values.put(MiniMaxSpeechOptions.SAMPLE_RATE, "44100");
+        source.values.put(MiniMaxSpeechOptions.BITRATE, "256000");
+        source.values.put(MiniMaxSpeechOptions.CHANNEL, "2");
+        source.values.put(MiniMaxSpeechOptions.MODIFY_PITCH, "-50");
+        source.values.put(MiniMaxSpeechOptions.MODIFY_INTENSITY, "0");
+        source.values.put(MiniMaxSpeechOptions.MODIFY_TIMBRE, "100");
+        source.values.put(MiniMaxSpeechOptions.SOUND_EFFECT, "spacious_echo");
+        source.values.put(MiniMaxSpeechOptions.PRONUNCIATION_TONE, "处理/(chu3)(li3)\n世界/world");
+        source.values.put(MiniMaxSpeechOptions.LATEX_READ, "true");
+        source.values.put(MiniMaxSpeechOptions.AIGC_WATERMARK, "false");
+        String encoded = ConfigTransfer.export(source, false);
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, encoded));
+        assertEquals(source.values, target.values);
+        JSONObject request = new JSONObject();
+        new SpeechSettings(new LocalOptions(target.snapshot())).minimaxOptions.applyTo(request);
+        assertEquals("quality", request.getString("text_normalization_mode"));
+        assertEquals("wav", request.getJSONObject("audio_setting").getString("format"));
+        assertFalse(request.getJSONObject("audio_setting").has("bitrate"));
+        assertTrue(request.getJSONObject("voice_setting").getBoolean("latex_read"));
+    }
+
+    @Test public void miniMaxBackupsRejectIncompatibleMergedOptionsBeforeApplying() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put(SpeechSettings.MINIMAX_MODEL, "speech-2.8-hd");
+        source.values.put(MiniMaxSpeechOptions.TEXT_NORMALIZATION_MODE, "quality");
+        JSONObject backup = new JSONObject(ConfigTransfer.export(source, true));
+        backup.getJSONObject("values").getJSONObject(SpeechSettings.MINIMAX_MODEL).put("value", "speech-01-hd");
+        assertThrows(IllegalArgumentException.class, () -> ConfigTransfer.inspect(target, backup.toString()));
+        assertTrue(target.values.isEmpty());
+        source.values.clear();
+        source.values.put(MiniMaxSpeechOptions.LATEX_READ, "true");
+        target.values.put(MiniMaxSpeechOptions.LANGUAGE_BOOST, "English");
+        String incoming = ConfigTransfer.export(source, true);
+        assertThrows(IllegalArgumentException.class, () -> ConfigTransfer.inspect(target, incoming));
+        assertEquals(1, target.values.size());
+        assertEquals("English", target.values.get(MiniMaxSpeechOptions.LANGUAGE_BOOST));
+    }
+
     @Test public void contactProfileRoundTripsWithAvatarInRedactedBackup() throws Exception {
         MemoryStore source = new MemoryStore(), target = new MemoryStore();
         AiModelConfig contact = AiModelConfig.fromJson(new JSONObject().put("id", "ai-contact")
@@ -392,6 +483,21 @@ public final class ConfigTransferTest {
         assertEquals(0, target.commits);
     }
 
+    @Test public void sizeLimitsHaveADistinctSafeTypeAndDoNotMislabelNullOrMalformedBackups() {
+        MemoryStore target = new MemoryStore();
+        BackupLimitException size = assertThrows(BackupLimitException.class,
+                () -> ConfigTransfer.inspect(target, " ".repeat(ConfigTransfer.MAX_BYTES + 1)));
+        assertEquals(BackupLimitException.Section.CONFIG, size.section);
+        assertTrue(size.getMessage().contains("2 MiB"));
+        for (String encoded : new String[]{null, "{private-malformed-fixture"}) {
+            IllegalArgumentException invalid = assertThrows(IllegalArgumentException.class,
+                    () -> ConfigTransfer.inspect(target, encoded));
+            assertFalse(invalid instanceof BackupLimitException);
+            assertFalse(invalid.getMessage().contains("private-malformed-fixture"));
+        }
+        assertEquals(0, target.commits);
+    }
+
     @Test public void malformedStructuredPayloadDoesNotReachStore() throws Exception {
         MemoryStore source = new MemoryStore(), target = new MemoryStore();
         source.values.put("download_enabled", true);
@@ -450,6 +556,81 @@ public final class ConfigTransferTest {
         assertEquals(Map.of("auto_play", false, "keyword", "original"), actual.getAll()); assertEquals(2, commits.get());
     }
 
+    @Test public void controlledDiagnosticsSeparateIncomingVersionTypeAndUnknownKeys() throws Exception {
+        MemoryStore target = new MemoryStore();
+        String valid = ConfigTransfer.export(new MemoryStore(), true);
+        JSONObject version = new JSONObject(valid).put("formatVersion", 2);
+        assertDiagnostic(target, version.toString(), BackupValidationException.Reason.FORMAT_VERSION, "formatVersion");
+
+        JSONObject wrongType = new JSONObject(valid);
+        wrongType.getJSONObject("values").put("native_auto_reply", new JSONObject()
+                .put("type", "boolean").put("value", "private-diagnostic-fixture"));
+        assertDiagnostic(target, wrongType.toString(), BackupValidationException.Reason.TYPE_MISMATCH, "native_auto_reply");
+
+        JSONObject unknown = new JSONObject(valid);
+        unknown.getJSONObject("values").put("private-unregistered-fixture", new JSONObject()
+                .put("type", "string").put("value", "private-diagnostic-fixture"));
+        assertDiagnostic(target, unknown.toString(), BackupValidationException.Reason.UNKNOWN_KEY, "");
+        assertEquals(0, target.commits);
+    }
+
+    @Test public void structuredDiagnosticsRetainTheirSpecificCategoryWithoutNestedDataOrCauses() throws Exception {
+        MemoryStore target = new MemoryStore();
+        String valid = ConfigTransfer.export(new MemoryStore(), true);
+        String[] keys = {AiModelSettings.KEY, "third_party_headers", CustomViewLocator.SETTINGS_KEY,
+                ThirdPartyDownloadSettings.DOWNLOAD_FIELDS};
+        BackupValidationException.Reason[] reasons = {BackupValidationException.Reason.STRUCTURED_MODELS,
+                BackupValidationException.Reason.STRUCTURED_HEADERS, BackupValidationException.Reason.STRUCTURED_COMPONENTS,
+                BackupValidationException.Reason.STRUCTURED_FIELDS};
+        for (int index = 0; index < keys.length; index++) {
+            JSONObject incoming = new JSONObject(valid);
+            incoming.getJSONObject("values").put(keys[index], new JSONObject().put("type", "string")
+                    .put("value", "{private-diagnostic-fixture"));
+            assertDiagnostic(target, incoming.toString(), reasons[index], keys[index]);
+        }
+        assertEquals(0, target.commits);
+    }
+
+    @Test public void currentStoreReadAndRetainedTypeFailuresAreSeparatedFromIncomingData() {
+        String valid = ConfigTransfer.export(new MemoryStore(), true);
+        MemoryStore unreadable = new MemoryStore(); unreadable.failSnapshot = true;
+        assertDiagnostic(unreadable, valid, BackupValidationException.Reason.CURRENT_STORE, "");
+        MemoryStore retained = new MemoryStore();
+        retained.values.put("native_auto_reply", "private-diagnostic-fixture");
+        assertDiagnostic(retained, valid, BackupValidationException.Reason.MERGED_SETTINGS, "native_auto_reply");
+        assertEquals(0, retained.commits);
+        assertEquals(0, unreadable.commits);
+        assertEquals("private-diagnostic-fixture", retained.values.get("native_auto_reply"));
+    }
+
+    @Test public void secretPolicyAndMergedMiniMaxFailuresHaveControlledDistinctReasons() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put(SpeechSettings.MINIMAX_API_KEY, "private-diagnostic-fixture");
+        JSONObject falselyRedacted = new JSONObject(ConfigTransfer.export(source, true)).put("includesSecrets", false);
+        assertDiagnostic(target, falselyRedacted.toString(), BackupValidationException.Reason.SECRET_POLICY,
+                SpeechSettings.MINIMAX_API_KEY);
+
+        source.values.clear();
+        source.values.put(SpeechSettings.MINIMAX_MODEL, "speech-2.8-hd");
+        target.values.put(MiniMaxSpeechOptions.EMOTION, "whisper");
+        assertDiagnostic(target, ConfigTransfer.export(source, true), BackupValidationException.Reason.MINIMAX_OPTIONS, "");
+        assertEquals("whisper", target.values.get(MiniMaxSpeechOptions.EMOTION));
+        assertEquals(0, target.commits);
+    }
+
+    private static void assertDiagnostic(MemoryStore target, String encoded, BackupValidationException.Reason reason, String field) {
+        BackupValidationException failure = assertThrows(BackupValidationException.class,
+                () -> ConfigTransfer.inspect(target, encoded));
+        assertEquals(BackupValidationException.Section.CONFIG, failure.section);
+        assertEquals(reason, failure.reason);
+        assertEquals(field, failure.field);
+        assertEquals("CONFIG/" + reason.name(), failure.diagnosticCode());
+        assertNull(failure.getCause());
+        assertEquals(0, failure.getSuppressed().length);
+        assertFalse(failure.getMessage().contains("private-diagnostic-fixture"));
+        assertFalse(failure.getMessage().contains("private-unregistered-fixture"));
+    }
+
     @Test public void realRepositoryPublishesTheWholeBatchInOneCommit() {
         Context context = ApplicationProvider.getApplicationContext();
         SharedPreferences preferences = context.getSharedPreferences("transfer-success", Context.MODE_PRIVATE);
@@ -467,14 +648,17 @@ public final class ConfigTransferTest {
     }
 
     private static final class MemoryStore implements SettingsStore {
-        final Map<String, Object> values = new LinkedHashMap<>(); int commits;
+        final Map<String, Object> values = new LinkedHashMap<>(); int commits; boolean failSnapshot;
         public FeatureSettings load() { return FeatureSettings.defaults(); }
         public void save(FeatureSettings value) { }
         public boolean getBoolean(String key, boolean fallback) { return (Boolean) values.getOrDefault(key, fallback); }
         public String getString(String key, String fallback) { return (String) values.getOrDefault(key, fallback); }
         public void putBoolean(String key, boolean value) { values.put(key, value); }
         public void putString(String key, String value) { values.put(key, value); }
-        public Map<String, ?> snapshot() { return new LinkedHashMap<>(values); }
+        public Map<String, ?> snapshot() {
+            if (failSnapshot) throw new IllegalStateException("private-diagnostic-fixture");
+            return new LinkedHashMap<>(values);
+        }
         public void replaceSnapshot(Map<String, ?> expected, Map<String, ?> replacement) {
             if (!values.equals(expected)) throw new IllegalStateException("stale");
             values.clear(); values.putAll(replacement); commits++;

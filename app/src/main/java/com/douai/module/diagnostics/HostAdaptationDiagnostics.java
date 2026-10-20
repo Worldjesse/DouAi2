@@ -181,6 +181,8 @@ public final class HostAdaptationDiagnostics {
 
     public static String describe(Bundle snapshot) {
         StringBuilder detail = new StringBuilder("宿主版本：");
+        long scanMillis = snapshot.getLong("host_scan_millis", -1);
+        long heapBytes = snapshot.getLong("host_java_heap_used_bytes", -1);
         if (snapshot.getBoolean("host_version_available")) {
             detail.append(snapshot.getString("host_version_name", "未知"))
                     .append(" / ").append(snapshot.getLong("host_version_code"));
@@ -192,6 +194,12 @@ public final class HostAdaptationDiagnostics {
         } else {
             detail.append("\n版本与 40.6.0 一致，当前规则配置未绑定已验证证据。");
         }
+        if (scanMillis >= 0) {
+            detail.append("\n本次").append(snapshot.getBoolean("cache_hit") ? "缓存读取" : "规则扫描")
+                    .append("耗时：").append(scanMillis).append(" ms。");
+        }
+        if (heapBytes >= 0) detail.append("\n扫描结束时宿主 Java 堆占用：")
+                .append(heapBytes / (1024 * 1024)).append(" MiB（包含宿主，不能单独归因于模块）。");
         int resourceCount = snapshot.getInt("host_adaptation_resource_count");
         detail.append("\n资源映射：").append(resourceCount)
                 .append(" 项 Feed ID；按运行时包名和资源名校验。");

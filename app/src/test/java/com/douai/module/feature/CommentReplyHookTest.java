@@ -1048,17 +1048,17 @@ public final class CommentReplyHookTest {
         assertEquals("sent", history().get(0).status);
     }
 
-    @Test public void parentVoiceReplyPreparesAudioPassesItToTheSenderAndRecordsVoiceDelivery() throws Exception {
+    @Test public void parentVoiceReplyPassesCompleteLongAudioWithoutAssumingARecorderUploadLimit() throws Exception {
         configure(LocalOptions.REPLY_VOICE, true);
         java.io.File audioFile = java.io.File.createTempFile("comment-reply", ".m4a", activity.getCacheDir());
         java.nio.file.Files.write(audioFile.toPath(), new byte[]{1, 2, 3});
-        SpeechPreparation.Audio audio = new SpeechPreparation.Audio(audioFile, 1200);
+        SpeechPreparation.Audio audio = new SpeechPreparation.Audio(audioFile, 33_516);
         HostTargets.field(CommentReplyHook.class, "speechPreparer").set(hook, (SpeechPreparation.Preparer)
                 (context, text, options, maximum, valid) -> {
                     assertTrue(valid.getAsBoolean());
                     assertTrue(options.enabled(LocalOptions.REPLY_VOICE));
                     assertEquals("AI 正文 voice", text);
-                    assertEquals(30_000, maximum);
+                    assertEquals(Long.MAX_VALUE, maximum);
                     return audio;
                 });
         open();

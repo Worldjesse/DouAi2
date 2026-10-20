@@ -1,0 +1,332 @@
+{
+  "schemaVersion": 1,
+  "key": [
+    "id",
+    "file",
+    "message"
+  ],
+  "warnings": [
+    {
+      "id": "AndroidGradlePluginVersion",
+      "file": "gradle/wrapper/gradle-wrapper.properties",
+      "message": "A newer version of Gradle than 9.3.1 is available: 9.8.2",
+      "count": 1,
+      "reason": "Toolchain upgrade notice; retain the verified Gradle/AGP combination until a separate compatibility and signed-artifact regression run."
+    },
+    {
+      "id": "ApplySharedPref",
+      "file": "app/src/main/java/com/douai/module/ui/AdaptationAcknowledgment.java",
+      "message": "Consider using `apply()` instead; `commit` writes its data to persistent storage immediately, whereas `apply` will handle it in the background",
+      "count": 2,
+      "reason": "Synchronous commit is required for acknowledgement durability and failed-commit rollback; replacing it with apply would remove the completion result and alter this boundary. Send ledgers likewise keep their synchronous pre-submission commits."
+    },
+    {
+      "id": "ClickableViewAccessibility",
+      "file": "app/src/main/java/com/douai/module/feature/ViewFinderOverlay.java",
+      "message": "Custom view ``FrameLayout`` has `setOnTouchListener` called on it but does not override `performClick`",
+      "count": 1,
+      "reason": "Existing touch overlay and Miuix compatibility click bridges. Accessibility behavior requires a separate control-level change with touch and accessibility verification; no broad event-dispatch change in this optimization batch."
+    },
+    {
+      "id": "ClickableViewAccessibility",
+      "file": "app/src/main/java/com/douai/module/feature/ViewFinderOverlay.java",
+      "message": "Custom view ``LinearLayout`` has `setOnTouchListener` called on it but does not override `performClick`",
+      "count": 2,
+      "reason": "Existing touch overlay and Miuix compatibility click bridges. Accessibility behavior requires a separate control-level change with touch and accessibility verification; no broad event-dispatch change in this optimization batch."
+    },
+    {
+      "id": "ClickableViewAccessibility",
+      "file": "app/src/main/java/com/douai/module/ui/miuix/MiuixDialogBuilder.kt",
+      "message": "`CompatButton#performClick` should call `super#performClick`",
+      "count": 1,
+      "reason": "Existing touch overlay and Miuix compatibility click bridges. Accessibility behavior requires a separate control-level change with touch and accessibility verification; no broad event-dispatch change in this optimization batch."
+    },
+    {
+      "id": "ClickableViewAccessibility",
+      "file": "app/src/main/java/com/douai/module/ui/miuix/MiuixFormControls.kt",
+      "message": "`FormSpinner#performClick` should call `super#performClick`",
+      "count": 1,
+      "reason": "Existing touch overlay and Miuix compatibility click bridges. Accessibility behavior requires a separate control-level change with touch and accessibility verification; no broad event-dispatch change in this optimization batch."
+    },
+    {
+      "id": "DataExtractionRules",
+      "file": "app/src/main/AndroidManifest.xml",
+      "message": "The attribute `android:allowBackup` is deprecated from Android 12 and higher and may be removed in future versions. Consider adding the attribute `android:dataExtractionRules` specifying an `@xml` resource which configures cloud backups and device transfers on Android 12 and higher.",
+      "count": 1,
+      "reason": "Retain the current backup policy; Android 12+ migration/cloud-backup rules require a separate data-boundary review."
+    },
+    {
+      "id": "ExifInterface",
+      "file": "app/src/main/java/com/douai/module/feature/ChatImageLoader.java",
+      "message": "Avoid using `android.media.ExifInterface`; use `androidx.exifinterface.media.ExifInterface` instead",
+      "count": 1,
+      "reason": "Existing platform EXIF path remains under bounded image-loading tests; library migration is deferred to a dedicated media compatibility change."
+    },
+    {
+      "id": "MonochromeLauncherIcon",
+      "file": "app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml",
+      "message": "The application adaptive icon is missing a monochrome tag",
+      "count": 1,
+      "reason": "Cosmetic launcher icon enhancement; deferred without changing the current published icon assets."
+    },
+    {
+      "id": "NewerVersionAvailable",
+      "file": "app/build.gradle.kts",
+      "message": "A newer version of com.google.code.gson:gson than 2.10.1 is available: 2.14.0",
+      "count": 1,
+      "reason": "Dependency upgrade notice. Retain the verified test dependencies until an explicit upgrade validates Robolectric, mock server behavior and the complete regression suite."
+    },
+    {
+      "id": "NewerVersionAvailable",
+      "file": "app/build.gradle.kts",
+      "message": "A newer version of com.squareup.okhttp3:mockwebserver than 4.12.0 is available: 5.5.0",
+      "count": 1,
+      "reason": "Dependency upgrade notice. Retain the verified test dependencies until an explicit upgrade validates Robolectric, mock server behavior and the complete regression suite."
+    },
+    {
+      "id": "NewerVersionAvailable",
+      "file": "app/build.gradle.kts",
+      "message": "A newer version of org.robolectric:robolectric than 4.14.1 is available: 4.17",
+      "count": 1,
+      "reason": "Dependency upgrade notice. Retain the verified test dependencies until an explicit upgrade validates Robolectric, mock server behavior and the complete regression suite."
+    },
+    {
+      "id": "ObsoleteSdkInt",
+      "file": "app/src/main/java/com/douai/module/feature/VersionInfoHook.java",
+      "message": "Unnecessary; `SDK_INT` is always >= 28",
+      "count": 1,
+      "reason": "Redundant compatibility guards/resource qualifiers are existing cleanup debt and do not change current behavior."
+    },
+    {
+      "id": "ObsoleteSdkInt",
+      "file": "app/src/main/res/mipmap-anydpi-v26",
+      "message": "This folder configuration (`v26`) is unnecessary; `minSdkVersion` is 28. Merge all the resources in this folder into `mipmap-anydpi`.",
+      "count": 1,
+      "reason": "Redundant compatibility guards/resource qualifiers are existing cleanup debt and do not change current behavior."
+    },
+    {
+      "id": "OldTargetApi",
+      "file": "app/build.gradle.kts",
+      "message": "Not targeting the latest versions of Android; compatibility modes apply. Consider testing and updating this version. Consult the `android.os.Build.VERSION_CODES` javadoc for details.",
+      "count": 1,
+      "reason": "Retain targetSdk 35 until a separate Android behavior-change review and host regression; compileSdk 37 is not evidence that a target bump is safe."
+    },
+    {
+      "id": "PrivateApi",
+      "file": "app/src/main/java/com/douai/module/DouAiModule.java",
+      "message": "Accessing internal APIs via reflection is not supported and may not work on all devices or in the future",
+      "count": 1,
+      "reason": "Existing Xposed host integration intentionally reflects private Android/host APIs. Retain the narrow hooks and validate supported host/platform contracts rather than removing these accesses solely to silence Lint."
+    },
+    {
+      "id": "PrivateApi",
+      "file": "app/src/main/java/com/douai/module/feature/VersionInfoHook.java",
+      "message": "Accessing internal APIs via reflection is not supported and may not work on all devices or in the future",
+      "count": 1,
+      "reason": "Existing Xposed host integration intentionally reflects private Android/host APIs. Retain the narrow hooks and validate supported host/platform contracts rather than removing these accesses solely to silence Lint."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/feature/AiMessageEntryHook.java",
+      "message": "Do not concatenate text displayed with `setText`. Use resource string with placeholders.",
+      "count": 1,
+      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/feature/AiMessageEntryHook.java",
+      "message": "String literal in `setText` can not be translated. Use Android resources instead.",
+      "count": 2,
+      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/feature/AutomationDispatcher.java",
+      "message": "Do not concatenate text displayed with `setText`. Use resource string with placeholders.",
+      "count": 1,
+      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/ui/AboutDialog.java",
+      "message": "Do not concatenate text displayed with `setText`. Use resource string with placeholders.",
+      "count": 1,
+      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/ui/AboutDialog.java",
+      "message": "String literal in `setText` can not be translated. Use Android resources instead.",
+      "count": 1,
+      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/ui/AiModelEditor.java",
+      "message": "Do not concatenate text displayed with `setText`. Use resource string with placeholders.",
+      "count": 2,
+      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/ui/AutomationHistoryDialog.java",
+      "message": "Do not concatenate text displayed with `setText`. Use resource string with placeholders.",
+      "count": 1,
+      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/ui/ComponentHideSettingsPage.java",
+      "message": "Do not concatenate text displayed with `setText`. Use resource string with placeholders.",
+      "count": 1,
+      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/ui/ConfigTransferDialog.java",
+      "message": "Do not concatenate text displayed with `setText`. Use resource string with placeholders.",
+      "count": 1,
+      "reason": "Reviewed 0.2.2 import diagnostics: append the operation-owned byte count and SHA-256 fingerprint below the existing simplified-Chinese status so device failures identify the exact selected file. The host-context UI currently uses code-owned Chinese copy; localization remains deferred. This approval covers only this one status composition."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/ui/ConfigTransferDialog.java",
+      "message": "String literal in `setText` can not be translated. Use Android resources instead.",
+      "count": 1,
+      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/ui/DownloadTasksDialog.java",
+      "message": "String literal in `setText` can not be translated. Use Android resources instead.",
+      "count": 1,
+      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/ui/HostSettingsEntry.java",
+      "message": "String literal in `setText` can not be translated. Use Android resources instead.",
+      "count": 1,
+      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/ui/HostUiController.java",
+      "message": "Do not concatenate text displayed with `setText`. Use resource string with placeholders.",
+      "count": 1,
+      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/ui/HostUiController.java",
+      "message": "String literal in `setText` can not be translated. Use Android resources instead.",
+      "count": 1,
+      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/ui/LocalAnalyticsDialog.java",
+      "message": "Do not concatenate text displayed with `setText`. Use resource string with placeholders.",
+      "count": 6,
+      "reason": "Five existing simplified-Chinese status/summary compositions remain approved. Reviewed one 0.2.2 addition: after successful PNG creation and chooser launch, show the actual generated page count with the existing code-owned Chinese sharing status. Host-context UI localization remains deferred; this increase approves only that one completed-export status."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/ui/MemberListView.java",
+      "message": "Do not concatenate text displayed with `setText`. Use resource string with placeholders.",
+      "count": 1,
+      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/ui/MemberListView.java",
+      "message": "String literal in `setText` can not be translated. Use Android resources instead.",
+      "count": 1,
+      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+    },
+    {
+      "id": "SetTextI18n",
+      "file": "app/src/main/java/com/douai/module/ui/SpeechSettingsDialog.java",
+      "message": "String literal in `setText` can not be translated. Use Android resources instead.",
+      "count": 1,
+      "reason": "Existing simplified-Chinese UI/status copy, including the added settings search result path. Resource-based localization is deferred; additions and duplicate counts remain gated."
+    },
+    {
+      "id": "UnusedResources",
+      "file": "app/src/main/res/values/arrays.xml",
+      "message": "The resource `R.array.xposed_scope` appears to be unused",
+      "count": 1,
+      "reason": "The xposed_scope resource is retained as module integration metadata; do not remove it solely on ordinary resource reachability analysis."
+    },
+    {
+      "id": "UseKtx",
+      "file": "app/src/main/java/com/douai/module/ui/ModuleStatusScreen.kt",
+      "message": "Use the KTX extension function `Int.toDrawable` instead?",
+      "count": 1,
+      "reason": "Java/compatibility bridge code intentionally uses platform APIs; KTX conversion is deferred to a scoped Kotlin refactor."
+    },
+    {
+      "id": "UseKtx",
+      "file": "app/src/main/java/com/douai/module/ui/miuix/MiuixComponentHidePage.kt",
+      "message": "Use the KTX extension function `Int.toDrawable` instead?",
+      "count": 1,
+      "reason": "Java/compatibility bridge code intentionally uses platform APIs; KTX conversion is deferred to a scoped Kotlin refactor."
+    },
+    {
+      "id": "UseKtx",
+      "file": "app/src/main/java/com/douai/module/ui/miuix/MiuixDialogBuilder.kt",
+      "message": "Use the KTX extension function `Int.toDrawable` instead?",
+      "count": 1,
+      "reason": "Java/compatibility bridge code intentionally uses platform APIs; KTX conversion is deferred to a scoped Kotlin refactor."
+    },
+    {
+      "id": "UseKtx",
+      "file": "app/src/main/java/com/douai/module/ui/miuix/MiuixEditorSurfaces.kt",
+      "message": "Use the KTX extension property `View.isVisible` instead?",
+      "count": 4,
+      "reason": "Java/compatibility bridge code intentionally uses platform APIs; KTX conversion is deferred to a scoped Kotlin refactor."
+    },
+    {
+      "id": "UseKtx",
+      "file": "app/src/main/java/com/douai/module/ui/miuix/MiuixFormControls.kt",
+      "message": "Use the KTX extension property `View.isVisible` instead?",
+      "count": 1,
+      "reason": "Java/compatibility bridge code intentionally uses platform APIs; KTX conversion is deferred to a scoped Kotlin refactor."
+    },
+    {
+      "id": "UseRequiresApi",
+      "file": "app/src/main/java/com/douai/module/feature/MediaStoreDownloader.java",
+      "message": "Use `@RequiresApi(29) instead of `@TargetApi` to propagate the requirement to callers of `createBundleRow`",
+      "count": 1,
+      "reason": "Existing API-29 helper annotation cleanup; current guarded callers remain under media-save tests."
+    },
+    {
+      "id": "ViewConstructor",
+      "file": "app/src/main/java/com/douai/module/ui/MemberListView.java",
+      "message": "Custom view `MemberListView` is missing constructor used by tools: `(Context)` or `(Context,AttributeSet)` or `(Context,AttributeSet,int)`",
+      "count": 1,
+      "reason": "These custom views are constructed programmatically; retain explicit application-owned constructors and inspect XML inflation needs separately."
+    },
+    {
+      "id": "ViewConstructor",
+      "file": "app/src/main/java/com/douai/module/ui/miuix/MiuixDialogBuilder.kt",
+      "message": "Custom view `CompatButton` is missing constructor used by tools: `(Context)` or `(Context,AttributeSet)` or `(Context,AttributeSet,int)`",
+      "count": 1,
+      "reason": "These custom views are constructed programmatically; retain explicit application-owned constructors and inspect XML inflation needs separately."
+    },
+    {
+      "id": "ViewConstructor",
+      "file": "app/src/main/java/com/douai/module/ui/miuix/MiuixFormControls.kt",
+      "message": "Custom view `FormCheckbox` is missing constructor used by tools: `(Context)` or `(Context,AttributeSet)` or `(Context,AttributeSet,int)`",
+      "count": 1,
+      "reason": "These custom views are constructed programmatically; retain explicit application-owned constructors and inspect XML inflation needs separately."
+    },
+    {
+      "id": "ViewConstructor",
+      "file": "app/src/main/java/com/douai/module/ui/miuix/MiuixFormControls.kt",
+      "message": "Custom view `FormInput` is missing constructor used by tools: `(Context)` or `(Context,AttributeSet)` or `(Context,AttributeSet,int)`",
+      "count": 1,
+      "reason": "These custom views are constructed programmatically; retain explicit application-owned constructors and inspect XML inflation needs separately."
+    }
+  ]
+}

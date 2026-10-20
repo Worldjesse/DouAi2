@@ -25,8 +25,11 @@ android {
         applicationId = "io.github.yudigaga.douai"
         minSdk = 28
         targetSdk = 35
-        versionCode = 98
-        versionName = "0.1.97"
+        versionCode = 105
+        versionName = "0.2.4"
+        require(versionName.orEmpty().matches(Regex("""[0-9]+\.[0-9]\.(?:0|[1-9][0-9]?)"""))) {
+            "Version must carry at patch 100 and minor 10 (0.1.99 -> 0.2.0; 0.9.99 -> 1.0.0)."
+        }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -93,6 +96,16 @@ tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
     // Robolectric SDKs and full-size host APK DEX contracts share a worker JVM.
     // Keep their bounded test heap separate from the module's runtime budget.
     maxHeapSize = "1g"
+    if (providers.gradleProperty("releaseVerification").orNull == "true") {
+        maxParallelForks = 1
+        forkEvery = 20
+        val profile = layout.buildDirectory.file("reports/release-verification/test-profile.json")
+        doFirst {
+            val output = profile.get().asFile
+            output.parentFile.mkdirs()
+            output.writeText("""{"gradleHeapMiB":${Runtime.getRuntime().maxMemory() / (1024 * 1024)},"testHeap":"$maxHeapSize","maxParallelForks":$maxParallelForks,"forkEvery":$forkEvery}""")
+        }
+    }
 }
 
 dependencies {

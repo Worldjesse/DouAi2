@@ -54,7 +54,9 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -75,6 +77,8 @@ class MiuixChatEditorSurface(activity: Activity, private val model: View, close:
     private val input = model.findViewWithTag<EditText>("ai.chat.input")
     private val send = model.findViewWithTag<ImageButton>("ai.chat.send")
     private val attach = model.findViewWithTag<ImageButton>("ai.chat.attach")
+    private var draft by mutableStateOf(readNativeEditorValue(input))
+    private var applyingVisibleEdit = false
     private var state by mutableStateOf(readState())
     val view = ComposeView(environment.context())
 
@@ -84,7 +88,24 @@ class MiuixChatEditorSurface(activity: Activity, private val model: View, close:
         view.setContent { HostSettingsTheme { Content() } }
     }
 
-    fun refresh() { state = readState() }
+    fun refresh() {
+        if (applyingVisibleEdit) {
+            // The Java draft watcher only updates composer controls. Preserve detached history rows.
+            state = state.copy(draft = input.text.toString(),
+                sendDescription = send.contentDescription.toString(), sendEnabled = send.isEnabled,
+                attachEnabled = attach.isEnabled)
+            return
+        }
+        val next = readState()
+        draft = readNativeEditorValue(input, draft, next.draft)
+        state = next
+    }
+
+    private fun editDraft(next: TextFieldValue) {
+        applyingVisibleEdit = true
+        try { draft = applyNativeTextEdit(input, draft, next) }
+        finally { applyingVisibleEdit = false }
+    }
     fun bindBackNavigation(dialog: Dialog) = environment.bindBackNavigation(dialog)
     override fun close() = environment.close()
 
@@ -240,8 +261,8 @@ class MiuixChatEditorSurface(activity: Activity, private val model: View, close:
                     NativeAction(attach, android.R.drawable.ic_menu_add, "添加附件", "ai.chat.attach",
                         snapshot.attachEnabled)
                     TextField(
-                        value = snapshot.draft,
-                        onValueChange = { input.setText(it); input.setSelection(input.length()) },
+                        value = draft,
+                        onValueChange = ::editDraft,
                         label = "输入消息", useLabelAsPlaceholder = true,
                         maxLines = if (compact) 2 else 4,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
@@ -290,10 +311,13 @@ class MiuixPromptEditorSurface(
     close: Runnable,
 ) : AutoCloseable {
     private val environment = HostComposeEnvironment(activity, close)
-    private var draft by mutableStateOf(input.text.toString())
+    private var draft by mutableStateOf(readNativeEditorValue(input))
+    private var applyingVisibleEdit = false
     private val watcher = object : TextWatcher {
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { draft = s.toString() }
+        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+            if (!applyingVisibleEdit) draft = readNativeEditorValue(input, draft, s?.toString().orEmpty())
+        }
         override fun afterTextChanged(s: Editable?) = Unit
     }
     val view = ComposeView(environment.context())
@@ -308,6 +332,12 @@ class MiuixPromptEditorSurface(
     fun bindBackNavigation(dialog: Dialog) = environment.bindBackNavigation(dialog)
     override fun close() { input.removeTextChangedListener(watcher); environment.close() }
 
+    private fun editDraft(next: TextFieldValue) {
+        applyingVisibleEdit = true
+        try { draft = applyNativeTextEdit(input, draft, next) }
+        finally { applyingVisibleEdit = false }
+    }
+
     @Composable private fun Content() {
         val focus = remember { FocusRequester() }
         LaunchedEffect(Unit) { focus.requestFocus() }
@@ -317,7 +347,7 @@ class MiuixPromptEditorSurface(
                 overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp))
             TextField(
                 value = draft,
-                onValueChange = { input.setText(it) },
+                onValueChange = ::editDraft,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
                 modifier = Modifier.weight(1f).fillMaxWidth().focusRequester(focus)
                     .testTag("settings.input.$title"),
@@ -330,4 +360,14 @@ class MiuixPromptEditorSurface(
             }
         }
     }
+}
+
+/** Programmatic changes may replace text; metadata refreshes keep the visible editor's composition. */
+private fun readNativeEditorValue(input: EditText, previous: TextFieldValue? = null,
+                                  text: String = input.text.toString()): TextFieldValue {
+    val fallback = previous?.selection ?: TextRange(text.length)
+    val start = (input.selectionStart.takeIf { it >= 0 } ?: fallback.start).coerceIn(0, text.length)
+    val end = (input.selectionEnd.takeIf { it >= 0 } ?: fallback.end).coerceIn(0, text.length)
+    val composition = if (previous != null && previous.text == text) previous.composition else null
+    return TextFieldValue(text, TextRange(start, end), composition)
 }

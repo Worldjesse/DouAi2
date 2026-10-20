@@ -24,7 +24,11 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextInputSelection
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
@@ -97,6 +101,181 @@ class MiuixFormControlsTest {
         compose.runOnUiThread { input.text.replace(0, input.text.length, "updated") }
         compose.onNodeWithTag("form.key").assert(SemanticsMatcher.expectValue(
             SemanticsProperties.InputText, androidx.compose.ui.text.AnnotatedString("updated")))
+    }
+
+    @Test fun visibleLongInputOnlyReplacesTheInsertedOrDeletedCharacter() {
+        lateinit var input: EditText
+        val initial = "甲".repeat(4096) + "尾"
+        val caret = 2048
+        val changes = mutableListOf<Triple<Int, Int, Int>>()
+        compose.runOnUiThread {
+            input = MiuixFormControls.input(compose.activity, "长输入", initial, false)
+            input.tag = "form.long.input"
+            input.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    changes.add(Triple(start, before, count))
+                }
+                override fun afterTextChanged(s: Editable?) = Unit
+            })
+            mount(input)
+        }
+        val field = compose.onNodeWithTag("form.long.input")
+        field.performTextInputSelection(TextRange(caret))
+        compose.runOnIdle { changes.clear() }
+        field.performTextInput("中")
+        compose.runOnIdle {
+            assertEquals(initial.substring(0, caret) + "中" + initial.substring(caret), input.text.toString())
+            assertEquals(listOf(Triple(caret, 0, 1)), changes)
+            assertEquals(caret + 1, input.selectionStart)
+        }
+        field.performTextInputSelection(TextRange(caret, caret + 1))
+        compose.runOnIdle { changes.clear() }
+        field.performTextInput("")
+        compose.runOnIdle {
+            assertEquals(initial, input.text.toString())
+            assertEquals(listOf(Triple(caret, 1, 0)), changes)
+            assertEquals(caret, input.selectionStart)
+        }
+    }
+
+    @Test fun visibleMiddleInsertionHonorsLengthFilterWithoutRemovingUntouchedSuffixOrMovingPastIt() {
+        lateinit var input: EditText
+        compose.runOnUiThread {
+            input = MiuixFormControls.input(compose.activity, "长度限制", "前后", false)
+            input.tag = "form.filtered.input"
+            input.filters = arrayOf(InputFilter.LengthFilter(6))
+            mount(input)
+        }
+        val field = compose.onNodeWithTag("form.filtered.input")
+        field.performTextInputSelection(TextRange(1))
+        field.performTextInput("abcdef")
+        compose.runOnIdle {
+            assertEquals("前abcd后", input.text.toString())
+            assertEquals(5, input.selectionStart)
+            assertEquals(5, input.selectionEnd)
+        }
+        field.performTextReplacement("甲乙丙丁戊己")
+        field.performTextInputSelection(TextRange(2))
+        field.performTextInput("X")
+        compose.runOnIdle {
+            assertEquals("甲乙丙丁戊己", input.text.toString())
+            assertEquals(2, input.selectionStart)
+            assertEquals(2, input.selectionEnd)
+        }
+    }
+
+    @Test fun visibleSelectedEmojiReplacementKeepsTheSurrogatePairInOneNativeEdit() {
+        lateinit var input: EditText
+        val changes = mutableListOf<Triple<Int, Int, Int>>()
+        compose.runOnUiThread {
+            input = MiuixFormControls.input(compose.activity, "表情替换", "前😀后", false)
+            input.tag = "form.emoji.input"
+            input.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    changes.add(Triple(start, before, count))
+                }
+                override fun afterTextChanged(s: Editable?) = Unit
+            })
+            mount(input)
+        }
+        val field = compose.onNodeWithTag("form.emoji.input")
+        field.performTextInputSelection(TextRange(1, 3))
+        compose.runOnIdle { changes.clear() }
+        field.performTextInput("😁")
+        compose.runOnIdle {
+            assertEquals("前😁后", input.text.toString())
+            assertEquals(listOf(Triple(1, 2, 2)), changes)
+            assertEquals(3, input.selectionStart)
+        }
+    }
+
+    @Test fun textEditingBridgePreservesCompositionRangesAndMapsFilteredSelection() {
+        lateinit var input: EditText
+        compose.runOnUiThread {
+            input = EditText(compose.activity)
+            input.setText("前后")
+            var value = TextFieldValue("前后", TextRange(1))
+            value = applyNativeTextEdit(input, value, TextFieldValue("前ni后", TextRange(3), TextRange(1, 3)))
+            assertEquals(TextRange(1, 3), value.composition)
+            value = applyNativeTextEdit(input, value, TextFieldValue("前nin后", TextRange(4), TextRange(1, 4)))
+            assertEquals("前nin后", input.text.toString())
+            assertEquals(TextRange(1, 4), value.composition)
+            value = applyNativeTextEdit(input, value, TextFieldValue("前你后", TextRange(2), TextRange(1, 2)))
+            assertEquals(TextRange(1, 2), value.composition)
+            value = applyNativeTextEdit(input, value, value.copy(composition = null))
+            assertEquals(null, value.composition)
+            value = applyNativeTextEdit(input, value, TextFieldValue("前你好后", TextRange(3)))
+            assertEquals("前你好后", input.text.toString())
+            assertEquals(3, input.selectionStart)
+
+            input.setText("前后")
+            input.filters = arrayOf(InputFilter.LengthFilter(6))
+            value = applyNativeTextEdit(input, TextFieldValue("前后", TextRange(1)),
+                TextFieldValue("前abcdef后", TextRange(7), TextRange(1, 7)))
+            assertEquals("前abcd后", value.text)
+            assertEquals(TextRange(5), value.selection)
+            assertEquals(TextRange(1, 5), value.composition)
+        }
+    }
+
+    @Test fun textEditingBridgeUsesReplacementBufferAndSelectionChosenByNativeWatcher() {
+        compose.runOnUiThread {
+            val input = EditText(compose.activity)
+            input.setText("ab")
+            input.setSelection(2)
+            var formatting = false
+            input.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                override fun afterTextChanged(s: Editable?) {
+                    if (!formatting && s != null && s.length > 2) {
+                        formatting = true
+                        try {
+                            input.setText(s.take(2))
+                            input.setSelection(2)
+                        } finally { formatting = false }
+                    }
+                }
+            })
+            val value = applyNativeTextEdit(input, TextFieldValue("ab", TextRange(2)),
+                TextFieldValue("abc", TextRange(3), TextRange(2, 3)))
+            assertEquals("ab", input.text.toString())
+            assertEquals("ab", value.text)
+            assertEquals(TextRange(2), value.selection)
+            assertEquals(2, input.selectionStart)
+            assertEquals(null, value.composition)
+        }
+    }
+
+    @Test fun textEditingBridgeHonorsWatcherChangesOutsideTheEditedRegion() {
+        compose.runOnUiThread {
+            val input = EditText(compose.activity)
+            input.setText("ab")
+            input.setSelection(1)
+            var formatting = false
+            input.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                override fun afterTextChanged(s: Editable?) {
+                    if (!formatting && s != null && s.toString() == "axb") {
+                        formatting = true
+                        try {
+                            s.append('!')
+                            input.setSelection(2)
+                        } finally { formatting = false }
+                    }
+                }
+            })
+            val value = applyNativeTextEdit(input, TextFieldValue("ab", TextRange(1)),
+                TextFieldValue("axb", TextRange(2), TextRange(1, 2)))
+            assertEquals("axb!", input.text.toString())
+            assertEquals("axb!", value.text)
+            assertEquals(TextRange(2), value.selection)
+            assertEquals(2, input.selectionStart)
+            assertEquals(null, value.composition)
+        }
     }
 
     @Test fun switchesAndButtonsShareJavaCallbacksAndDynamicEnabledState() {

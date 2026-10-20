@@ -4,6 +4,8 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
+import com.douai.module.config.BackupLimitException;
+import com.douai.module.config.BackupValidationException;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -73,44 +75,70 @@ public final class AnalyticsBackup {
 
     /** Pure validation. Does not open this installation's analytics database. */
     public static Snapshot inspect(JSONObject payload) {
+        BackupValidationException.Reason reason = BackupValidationException.Reason.HEADER_SHAPE;
+        String field = "";
         try {
             checkBytes(payload);
             exact(payload, "version", "capturedAt", "tables", "context");
+            reason = BackupValidationException.Reason.ANALYTICS_VERSION;
+            field = "version";
             if (integer(payload.get("version"), 1, 1) != 1) throw invalid();
+            reason = BackupValidationException.Reason.CAPTURED_AT_RANGE;
+            field = "capturedAt";
             long captured = integer(payload.get("capturedAt"), 0, System.currentTimeMillis() + 300_000);
             LocalDate lastDay = Instant.ofEpochMilli(captured).atOffset(ZoneOffset.ofHours(18)).toLocalDate();
+            reason = BackupValidationException.Reason.ANALYTICS_CELL;
+            field = "tables";
             JSONObject tables = payload.getJSONObject("tables");
             if (tables.length() != TABLES.size()) throw invalid();
+            field = "context";
             JSONObject self = payload.getJSONObject("context"); exact(self, "purpose", "feedback");
-            LocalPortraitContext.State state = LocalPortraitContext.backupState(
-                    text(self.get("purpose"), 240, true), text(self.get("feedback"), 8, true));
+            field = "context.purpose";
+            String purpose = text(self.get("purpose"), 240, true);
+            field = "context.feedback";
+            String feedback = text(self.get("feedback"), 8, true);
+            field = "context";
+            LocalPortraitContext.State state = LocalPortraitContext.backupState(purpose, feedback);
             Map<String, List<Object[]>> result = new LinkedHashMap<>(); int rows = 0;
             Set<String> visits = new HashSet<>();
             long views = 0, features = 0; String first = "", last = "";
             for (Table table : TABLES) {
+                field = table.name;
                 JSONArray incoming = tables.getJSONArray(table.name);
                 if (incoming.length() > table.maxRows || incoming.length() > MAX_ROWS - rows) throw invalid();
                 List<Object[]> values = new ArrayList<>(); Set<List<Object>> keys = new HashSet<>();
                 for (int index = 0; index < incoming.length(); index++) {
+                    field = table.name;
                     JSONArray row = incoming.getJSONArray(index);
                     if (row.length() != table.columns.length) throw invalid();
                     Object[] cells = new Object[row.length()];
                     for (int column = 0; column < cells.length; column++) {
+                        field = table.name + "." + table.columns[column];
                         cells[column] = validateCell(table.name, table.columns[column], row.get(column), captured, lastDay);
                     }
                     List<Object> key = new ArrayList<>(); for (int column : table.key) key.add(cells[column]);
+                    field = table.name;
                     if (!keys.add(key)) throw invalid();
                     if (table.name.equals("daily")) {
+                        field = "daily.ads";
                         if ((Long) cells[3] > (Long) cells[1]) throw invalid();
-                        views = Math.addExact(views, (Long) cells[1]); features = Math.addExact(features, (Long) cells[2]);
+                        field = "daily.views";
+                        views = Math.addExact(views, (Long) cells[1]);
+                        field = "daily.features";
+                        features = Math.addExact(features, (Long) cells[2]);
                         String day = (String) cells[0];
                         if (first.isEmpty() || day.compareTo(first) < 0) first = day;
                         if (last.isEmpty() || day.compareTo(last) > 0) last = day;
                     }
                     if (table.name.equals("visits")) visits.add((String) cells[0]);
-                    if (table.name.equals("visit_topics") && !visits.contains(cells[0])) throw invalid();
+                    if (table.name.equals("visit_topics")) {
+                        field = "visit_topics.token";
+                        if (!visits.contains(cells[0])) throw invalid();
+                    }
                     if (table.name.equals("meta")) {
+                        field = "meta.key";
                         if (!List.of("first_seen", "collection_start", "queue_dropped").contains(cells[0])) throw invalid();
+                        field = "meta.value";
                         if (!cells[0].equals("queue_dropped") && (Long) cells[1] > captured) throw invalid();
                         if (cells[0].equals("queue_dropped") && (Long) cells[1] > MAX_COUNT) throw invalid();
                     }
@@ -123,8 +151,9 @@ public final class AnalyticsBackup {
                     + result.get("visits").size() + " 条可见片段，" + rows + " 条记录"
                     + ((!state.purpose.isEmpty() || !state.feedback.isEmpty()) ? "；含侧写自述/反馈" : "；无侧写自述/反馈");
             return new Snapshot(result, state, captured, rows, summary);
-        } catch (IllegalArgumentException failure) { throw failure; }
-        catch (Exception failure) { throw invalid(); }
+        } catch (Exception failure) {
+            throw BackupValidationException.wrap(BackupValidationException.Section.ANALYTICS, reason, field, failure);
+        }
     }
 
     /**
@@ -264,6 +293,6 @@ public final class AnalyticsBackup {
     private static void checkBytes(JSONObject object) {
         if (object == null || object.toString().getBytes(StandardCharsets.UTF_8).length > MAX_BYTES) throw tooLarge();
     }
-    private static IllegalArgumentException tooLarge() { return new IllegalArgumentException("本地分析数据超过 30 MiB 或记录数量限制，未导出不完整快照"); }
+    private static IllegalArgumentException tooLarge() { return new BackupLimitException(BackupLimitException.Section.ANALYTICS); }
     private static IllegalArgumentException invalid() { return new IllegalArgumentException("本地分析备份格式无效、数据越界或内容不完整"); }
 }

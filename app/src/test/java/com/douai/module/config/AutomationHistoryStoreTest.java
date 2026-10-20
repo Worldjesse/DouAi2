@@ -171,6 +171,12 @@ public final class AutomationHistoryStoreTest {
         assertEquals(-1, loaded.requestImageCount);
         assertFalse(loaded.modelRequestSent);
         assertEquals(AutomationHistoryStore.DELIVERY_UNKNOWN, loaded.deliveryMode);
+        assertEquals(AutomationHistoryStore.Reason.NONE, loaded.reason);
+        assertEquals(AutomationHistoryStore.Stage.NONE, loaded.stage);
+        assertEquals(-1, loaded.queueMillis);
+        assertEquals(-1, loaded.mediaMillis);
+        assertEquals(-1, loaded.generationMillis);
+        assertEquals(-1, loaded.sendMillis);
         store.upsert(entry("legacy", "comment", "sent", 10, "作品内容", "评论内容"));
         loaded = new AutomationHistoryStore(context).read("comment").get(0);
         assertEquals(-1, loaded.requestImageCount);
@@ -275,6 +281,71 @@ public final class AutomationHistoryStoreTest {
         assertEquals(1, store.read("reply").size());
         assertEquals(-1, store.read("reply").get(0).requestImageCount);
         assertFalse(store.read("reply").get(0).modelRequestSent);
+    }
+
+    @Test public void diagnosticsRoundTripWithoutChangingSubmittedOrUnknownStatus() {
+        for (String status : new String[]{"pending", "sending", "submitted", "unknown", "sent", "failed", "cancelled"}) {
+            AutomationHistoryStore.Entry original = entry(status, "comment", status, 10, "作品内容", "生成评论");
+            AutomationHistoryStore.Entry annotated = original.withDiagnostics(
+                    AutomationHistoryStore.Reason.SUBMITTED_UNCONFIRMED, AutomationHistoryStore.Stage.SEND,
+                    12, 34, 56, 78);
+            assertEquals(status, original.status);
+            assertEquals(-1, original.sendMillis);
+            store.upsert(annotated);
+            store.markModelRequestSent("comment", status, 2);
+        }
+        for (AutomationHistoryStore.Entry loaded : new AutomationHistoryStore(context).read("comment")) {
+            assertEquals(loaded.id, loaded.status);
+            assertEquals(AutomationHistoryStore.Reason.SUBMITTED_UNCONFIRMED, loaded.reason);
+            assertEquals(AutomationHistoryStore.Stage.SEND, loaded.stage);
+            assertEquals(12, loaded.queueMillis);
+            assertEquals(34, loaded.mediaMillis);
+            assertEquals(56, loaded.generationMillis);
+            assertEquals(78, loaded.sendMillis);
+            assertEquals("作品内容", loaded.input);
+            assertEquals("生成评论", loaded.output);
+            assertEquals(2, loaded.requestImageCount);
+            assertTrue(loaded.modelRequestSent);
+        }
+    }
+
+    @Test public void unknownDiagnosticTextAndMalformedDurationsAreDiscardedWithoutDroppingHistory() throws Exception {
+        String secret = "Bearer private-key https://secret.example/?token=hidden";
+        JSONObject json = new JSONObject().put("id", "unsafe").put("kind", "reply")
+                .put("status", "submitted").put("createdAt", 1).put("updatedAt", 2)
+                .put("reason", secret).put("stage", new JSONObject().put("secret", secret))
+                .put("queueMillis", "123").put("mediaMillis", 1.5)
+                .put("generationMillis", Long.MAX_VALUE).put("sendMillis", -2);
+        context.getSharedPreferences("douai_automation_history", Context.MODE_PRIVATE).edit()
+                .putString("entries_v1", new JSONArray().put(json).toString()).commit();
+        AutomationHistoryStore.Entry loaded = store.read("reply").get(0);
+        assertEquals("submitted", loaded.status);
+        assertEquals(AutomationHistoryStore.Reason.NONE, loaded.reason);
+        assertEquals(AutomationHistoryStore.Stage.NONE, loaded.stage);
+        assertEquals(-1, loaded.queueMillis);
+        assertEquals(-1, loaded.mediaMillis);
+        assertEquals(-1, loaded.generationMillis);
+        assertEquals(-1, loaded.sendMillis);
+        assertFalse(AutomationDiagnostics.details(loaded).contains(secret));
+        store.upsert(loaded);
+        assertFalse(context.getSharedPreferences("douai_automation_history", Context.MODE_PRIVATE)
+                .getString("entries_v1", "").contains(secret));
+    }
+
+    @Test public void diagnosticsRequireBoundedDurationsAndEmitOnlyKnownEnumNames() {
+        AutomationHistoryStore.Entry annotated = entry("bounded", "reply", "failed", 10, "", "")
+                .withDiagnostics(AutomationHistoryStore.Reason.AI_RATE_LIMITED, AutomationHistoryStore.Stage.GENERATION,
+                        -2, Long.MAX_VALUE, 0, -1);
+        store.upsert(annotated);
+        AutomationHistoryStore.Entry loaded = new AutomationHistoryStore(context).read("reply").get(0);
+        assertEquals(-1, loaded.queueMillis);
+        assertEquals(-1, loaded.mediaMillis);
+        assertEquals(0, loaded.generationMillis);
+        assertEquals(-1, loaded.sendMillis);
+        String source = context.getSharedPreferences("douai_automation_history", Context.MODE_PRIVATE)
+                .getString("entries_v1", "");
+        assertTrue(source.contains("\"reason\":\"ai_rate_limited\""));
+        assertTrue(source.contains("\"stage\":\"generation\""));
     }
 
     private static AutomationHistoryStore.Entry entry(String id, String kind, String status,

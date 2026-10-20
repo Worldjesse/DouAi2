@@ -121,7 +121,8 @@ class AutomationHistoryMiuixTest {
             store.upsert(AutomationHistoryStore.Entry(
                 "comment-reply", AutomationHistoryStore.COMMENT_REPLY, "video", "评论者", "收到的评论", "评论回复正文",
                 "模型", "submitted", 2, 2, AutomationHistoryStore.DELIVERY_TEXT,
-            ))
+            ).withDiagnostics(AutomationHistoryStore.Reason.SUBMITTED_UNCONFIRMED,
+                AutomationHistoryStore.Stage.SEND, 12, -1, 34, 30000))
             store.upsert(AutomationHistoryStore.Entry(
                 "feed-comment", AutomationHistoryStore.COMMENT, "video", "作品作者", "作品", "自动评论",
                 "模型", "sent", 3, 3,
@@ -139,6 +140,11 @@ class AutomationHistoryMiuixTest {
         compose.runOnIdle {
             assertTrue(containsText(detail.window!!.decorView, "来源：评论回复"))
             assertTrue(containsText(detail.window!!.decorView, "收到的评论"))
+            assertTrue(containsText(detail.window!!.decorView, "状态：已提交"))
+            assertTrue(containsText(detail.window!!.decorView, "原因：已提交，结果未确认"))
+            assertTrue(containsText(detail.window!!.decorView, "阶段：发送"))
+            assertTrue(containsText(detail.window!!.decorView, "发送确认等待耗时：30000 ms"))
+            assertFalse(containsText(detail.window!!.decorView, "状态：发送成功"))
         }
         compose.runOnUiThread { detail.dismiss() }
         compose.onNodeWithTag("miuix.dialog.button.${Dialog.BUTTON_NEUTRAL}").performClick()

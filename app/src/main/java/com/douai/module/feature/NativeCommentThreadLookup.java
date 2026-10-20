@@ -21,6 +21,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 
 /** Resolves incomplete notices through the host's own-comment and reply-list read requests. */
 final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadLookup {
@@ -30,6 +31,7 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
     private static final int ROOTS_PER_ROUND = 8;
     private static final int MAX_ROOTS = 100;
     private static final long ROUND_TIMEOUT = TimeUnit.SECONDS.toNanos(60);
+    private static final long ROOT_TTL = TimeUnit.SECONDS.toNanos(60);
 
     static final class Hint {
         final String noticeId, aid, incomingId, senderUid;
@@ -50,6 +52,7 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
     }
 
     private final Consumer<String> log;
+    private final LongSupplier cacheClock;
     private final Method ownFetch, threadFetch, contextFactory, workResolver, commentUser;
     private final Method taskWait, taskResult, taskFaulted, taskError, taskCancelled;
     private final Constructor<?> builderConstructor, requestConstructor;
@@ -61,6 +64,7 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
     private final Field builderContext, builderRoot, builderCursor, builderCount, builderMerge, builderComment, builderUid;
     private final Object stateLock = new Object();
     private final LinkedHashMap<String, Root> roots = new LinkedHashMap<>();
+    private final Map<String, RootCoverage> coveredRoots = new LinkedHashMap<>();
     private long rootAccount;
     private int rootOffset;
     private boolean ownMorePending;
@@ -68,7 +72,13 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
     private volatile Future<?> activeFuture;
 
     NativeCommentThreadLookup(HostScanReport report, ClassLoader loader, Consumer<String> log) throws Exception {
+        this(report, loader, log, System::nanoTime);
+    }
+
+    NativeCommentThreadLookup(HostScanReport report, ClassLoader loader, Consumer<String> log,
+                              LongSupplier cacheClock) throws Exception {
         this.log = log;
+        this.cacheClock = cacheClock;
         ownFetch = HostTargets.method(report, "comment_reply_own_fetch", loader);
         Class<?> ownProvider = HostTargets.type(report, "comment_reply_own_provider", loader);
         provider = HostTargets.field(ownProvider, "b");
@@ -137,26 +147,40 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
     }
 
     @Override public synchronized List<Match> resolve(long account, List<Hint> hints, BooleanSupplier valid) throws Exception {
-        try { return resolveNow(account, hints, valid); }
-        catch (LinkageError unavailable) { throw new IllegalStateException("thread_lookup_linkage", unavailable); }
+        long started = System.nanoTime();
+        try { return resolveNow(account, hints, valid, started + ROUND_TIMEOUT, true, started, new HashSet<>()); }
+        catch (Exception failure) {
+            synchronized (stateLock) { coveredRoots.clear(); }
+            throw failure;
+        } catch (LinkageError unavailable) {
+            synchronized (stateLock) { coveredRoots.clear(); }
+            throw new IllegalStateException("thread_lookup_linkage", unavailable);
+        }
     }
 
-    private List<Match> resolveNow(long account, List<Hint> hints, BooleanSupplier valid) throws Exception {
-        long deadline = System.nanoTime() + ROUND_TIMEOUT;
+    private List<Match> resolveNow(long account, List<Hint> hints, BooleanSupplier valid,
+                                   long deadline, boolean allowCachedWindow, long lookupStarted,
+                                   Set<String> revoked) throws Exception {
         check(valid, deadline);
         if (account <= 0 || hints == null || hints.isEmpty()) return Collections.emptyList();
         String me = Long.toString(account);
         synchronized (stateLock) {
-            if (rootAccount != account) { roots.clear(); rootOffset = 0; rootAccount = account; }
+            if (rootAccount != account) { roots.clear(); coveredRoots.clear(); rootOffset = 0; rootAccount = account; }
         }
         List<Hint> pending = new ArrayList<>();
         for (Hint hint : hints) if (validHint(hint, me)) pending.add(hint);
         if (pending.isEmpty()) return Collections.emptyList();
         safeLog("Comment reply own comments read started: hints=" + pending.size());
-        int ownPages = loadOwnRoots(me, valid, deadline);
+        long ownStarted = System.nanoTime();
+        OwnLoad ownLoad = loadOwnRoots(me, valid, deadline, pending,
+                allowCachedWindow && covers(pending, me), revoked);
+        int ownPages = ownLoad.pages;
+        long ownMillis = elapsedMillis(ownStarted);
         List<Root> selected = selectRoots(pending);
         safeLog("Comment reply own comments ready: pages=" + ownPages + "; cached_roots=" + roots.size()
-                + "; own_more=" + (ownMorePending ? 1 : 0) + "; selected_roots=" + selected.size());
+                + "; own_more=" + (ownMorePending ? 1 : 0) + "; selected_roots=" + selected.size()
+                + "; own_ms=" + ownMillis + "; cache=" + (ownLoad.cachedWindow ? "fresh_head" : "refresh"));
+        long threadStarted = System.nanoTime();
         List<Match> matches = new ArrayList<>();
         Set<String> matched = new HashSet<>();
         int replyPages = 0;
@@ -222,12 +246,24 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
                     || !match.hint.senderUid.equals(userId(match.incoming))) throw contract();
         }
         safeLog("Comment reply thread lookup: own_pages=" + ownPages + "; roots=" + selected.size()
-                + "; reply_pages=" + replyPages + "; hints=" + pending.size() + "; matches=" + matches.size());
+                + "; reply_pages=" + replyPages + "; hints=" + pending.size() + "; matches=" + matches.size()
+                + "; thread_ms=" + elapsedMillis(threadStarted) + "; lookup_ms=" + elapsedMillis(lookupStarted));
+        if (ownLoad.cachedWindow && matched.size() < pending.size()) {
+            // A sparse hint may describe a new root under the same work. Never let a cache miss
+            // delay discovery until TTL expiry, and retain this round's original deadline.
+            safeLog("Comment reply own window cache miss; refreshing within current deadline");
+            return resolveNow(account, hints, valid, deadline, false, lookupStarted, revoked);
+        }
         return matches;
     }
 
-    private int loadOwnRoots(String me, BooleanSupplier valid, long deadline) throws Exception {
+    private OwnLoad loadOwnRoots(String me, BooleanSupplier valid, long deadline,
+                                 List<Hint> hints, boolean canReuseWindow, Set<String> revoked) throws Exception {
         long cursor = 0;
+        Set<String> confirmed = new LinkedHashSet<>();
+        // Keep negative evidence across this resolve's cache-miss refresh; a later independent
+        // resolve starts with a new set and can observe an original becoming visible again.
+        boolean progressed = true, ended = false;
         Set<Long> seenCursors = new HashSet<>();
         int stalled = 0;
         int pages = 0;
@@ -247,20 +283,39 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
                 if (!noticeClass.isInstance(item)) continue;
                 Object comment = payloadComment.get(item), work = payloadWork.get(item);
                 if (!commentClass.isInstance(comment)) continue;
-                if (!workClass.isInstance(work)) { forget(string(cid.get(comment))); continue; }
+                if (!workClass.isInstance(work)) {
+                    String rejected = string(cid.get(comment));
+                    revoked.add(rejected); forget(rejected); continue;
+                }
                 Root root = new Root(work, comment, string(workAid.get(work)), string(cid.get(comment)), createdAt.getLong(comment));
-                if (payloadInvisible.getInt(item) == 0 && validRoot(root, me)) remember(root);
-                else forget(root.cid);
+                if (!revoked.contains(root.cid) && payloadInvisible.getInt(item) == 0 && validRoot(root, me)) {
+                    remember(root);
+                    confirmed.add(root.aid + ":" + root.cid);
+                } else { revoked.add(root.cid); forget(root.cid); }
             }
-            if (!ownMore.getBoolean(response)) break;
+            if (!ownMore.getBoolean(response)) { ended = true; break; }
             long next = ownMin.getLong(response);
-            if (next < 0) break;
+            if (next < 0) { progressed = false; break; }
             if (next == cursor || seenCursors.contains(next)) {
+                progressed = false;
                 if (++stalled >= 3) break;
             } else stalled = 0;
+            if (page == 0 && canReuseWindow && progressed && covers(hints, me)) {
+                // The live head can revoke cached ownership. It cannot prolong the verified window.
+                return new OwnLoad(pages, true);
+            }
             cursor = next;
         }
-        return pages;
+        check(valid, deadline);
+        if (progressed && (ended || pages == OWN_PAGES)) {
+            long now = cacheClock.getAsLong();
+            synchronized (stateLock) {
+                if (!closed) for (String key : confirmed) {
+                    if (roots.containsKey(key)) coveredRoots.put(key, new RootCoverage(now, valid));
+                }
+            }
+        }
+        return new OwnLoad(pages, false);
     }
 
     private void remember(Root root) {
@@ -273,14 +328,65 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
                 for (Map.Entry<String, Root> item : roots.entrySet()) {
                     if (oldest == null || item.getValue().createdAt < oldest.getValue().createdAt) oldest = item;
                 }
-                if (oldest != null) roots.remove(oldest.getKey());
+                if (oldest != null) { coveredRoots.remove(oldest.getKey()); roots.remove(oldest.getKey()); }
             }
         }
     }
 
     private void forget(String commentId) {
         if (!nonzero(commentId)) return;
-        synchronized (stateLock) { roots.entrySet().removeIf(item -> commentId.equals(item.getValue().cid)); }
+        synchronized (stateLock) {
+            roots.entrySet().removeIf(item -> {
+                if (!commentId.equals(item.getValue().cid)) return false;
+                coveredRoots.remove(item.getKey());
+                return true;
+            });
+        }
+    }
+
+    private boolean covers(List<Hint> hints, String me) throws Exception {
+        List<Root> candidates;
+        Map<String, RootCoverage> coverage;
+        synchronized (stateLock) {
+            candidates = new ArrayList<>(roots.values());
+            coverage = new LinkedHashMap<>(coveredRoots);
+        }
+        long now = cacheClock.getAsLong();
+        for (Hint hint : hints) {
+            String work = nonzero(hint.aid) ? hint.aid : string(aid.get(hint.target));
+            if (!nonzero(work)) return false;
+            String expectedRoot = string(rootId.get(hint.target));
+            boolean found = false;
+            for (Root root : candidates) {
+                if (!work.equals(root.aid) || nonzero(expectedRoot) && !expectedRoot.equals(root.cid)
+                        || !validRoot(root, me)) continue;
+                RootCoverage recorded = coverage.get(root.aid + ":" + root.cid);
+                if (recorded == null || now - recorded.at < 0 || now - recorded.at >= ROOT_TTL) continue;
+                // The prior guard captures the caller's account/configuration epoch. Call it outside
+                // stateLock so invalidation never inverts the owning hook's lock order.
+                if (!recorded.valid.getAsBoolean()) continue;
+                found = true;
+                break;
+            }
+            if (!found) return false;
+        }
+        return true;
+    }
+
+    private static long elapsedMillis(long started) {
+        return TimeUnit.NANOSECONDS.toMillis(Math.max(0, System.nanoTime() - started));
+    }
+
+    private static final class OwnLoad {
+        final int pages;
+        final boolean cachedWindow;
+        OwnLoad(int pages, boolean cachedWindow) { this.pages = pages; this.cachedWindow = cachedWindow; }
+    }
+
+    private static final class RootCoverage {
+        final long at;
+        final BooleanSupplier valid;
+        RootCoverage(long at, BooleanSupplier valid) { this.at = at; this.valid = valid; }
     }
 
     private List<Root> selectRoots(List<Hint> hints) throws Exception {
@@ -451,7 +557,7 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
         closed = true;
         Future<?> future = activeFuture;
         if (future != null) future.cancel(true);
-        synchronized (stateLock) { roots.clear(); rootAccount = 0; rootOffset = 0; }
+        synchronized (stateLock) { roots.clear(); coveredRoots.clear(); rootAccount = 0; rootOffset = 0; }
     }
 
     private static final class Root {

@@ -12,6 +12,7 @@ import android.view.View;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.SubmissionLedger;
 import com.douai.module.scan.HostScanReport;
 import io.github.libxposed.api.XposedInterface;
 
@@ -29,6 +30,13 @@ import java.util.function.Supplier;
 
 /** Queues original works and publishes through the host's permission checks. */
 public final class AutoCommentHook implements Application.ActivityLifecycleCallbacks, AutoCloseable {
+    // Callback persistence is shared by hook generations and never blocks the host's main thread.
+    private static final java.util.concurrent.ThreadPoolExecutor RESULTS_IO = new java.util.concurrent.ThreadPoolExecutor(
+            1, 1, 0L, java.util.concurrent.TimeUnit.MILLISECONDS, new java.util.concurrent.ArrayBlockingQueue<>(64), action -> {
+                Thread thread = new Thread(action, "DouAi-comment-ledger");
+                thread.setDaemon(true);
+                return thread;
+            });
     private final Context context;
     private final Application application;
     private final ClassLoader loader;
@@ -47,6 +55,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
     private final AutoCommentQueue<Task> queue;
     private final NativeCommentPublisher publisher;
     private final AutomationRateLimiter rateLimiter;
+    private final SubmissionLedger submissions;
     private final AutoCloseable followListUpdates;
     private final Field holderRoot;
     private final Method holderAweme;
@@ -73,6 +82,8 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         this.imageAweme = imageAweme;
         this.publisher = publisher;
         rateLimiter = new AutomationRateLimiter(this.context);
+        submissions = new SubmissionLedger(this.context.getSharedPreferences(
+                "douai_comment_submissions", Context.MODE_PRIVATE), 1000);
         this.log = log;
         this.mediaReads = mediaReads;
         queue = new AutoCommentQueue<>(new AutoCommentQueue.Scheduler() {
@@ -201,7 +212,8 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                 safeLog("Automatic comment selection skipped: target/account/foreground unavailable"); return;
             }
             String identity = "comment:" + account + ':' + aid;
-            if (context.getSharedPreferences("douai_comment_state", Context.MODE_PRIVATE).contains(identity)) return;
+            if (context.getSharedPreferences("douai_comment_state", Context.MODE_PRIVATE).contains(identity)
+                    || submissions.contains(SubmissionLedger.identity(identity))) return;
             Task task = new Task(generation.get(), account, aid, identity, work, workInput(work),
                     workAuthor(work), options);
             String authorId = string(modelValue(author, "uid", "getUid"));
@@ -231,6 +243,8 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
 
     private void attempt(Task task, int attempt, Consumer<String> result) {
         if (!valid(task)) { result.accept("cancelled"); return; }
+        if (task.queueMillis < 0) task.queueMillis = Math.max(0, android.os.SystemClock.elapsedRealtime() - task.createdElapsed);
+        task.reason = AutomationHistoryStore.Reason.NONE;
         task.attempt = attempt;
         int modeAttempt = task.textFallback ? attempt - task.fallbackAfterAttempt
                 : voice(task) && task.text != null ? task.voiceFailures + 1 : attempt;
@@ -268,6 +282,8 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
 
     private void generate(Task task, int attempt, Consumer<String> result, GenerationAttempt operation) {
             String stage = "work_content";
+            long generationStarted = android.os.SystemClock.elapsedRealtime();
+            long previousGenerationMillis = Math.max(0, task.generationMillis);
             int characters = task.text == null ? 0 : task.text.length();
             try {
                 operation.check();
@@ -277,11 +293,15 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                     if ("ai".equals(task.options.text("comment_mode", "ai"))) {
                         AiModelSettings models = AiModelSettings.read(task.options);
                         task.model = models.selected().modelName;
+                        task.stage = AutomationHistoryStore.Stage.MEDIA;
+                        long mediaStarted = android.os.SystemClock.elapsedRealtime();
                         List<ChatImage> images = AutomationCommentMedia.load(context, task.work, task.options,
                                 operation.mediaCancellation);
+                        task.mediaMillis = Math.max(0, android.os.SystemClock.elapsedRealtime() - mediaStarted);
                         if (!valid(task)) { result.accept("cancelled"); return; }
                         if (!hasWorkContent(task.work) && images.isEmpty()) {
                             safeLog("Automatic comment skipped: captured work has no usable content");
+                            task.reason = AutomationHistoryStore.Reason.INVALID_RESPONSE;
                             result.accept("cancelled");
                             return;
                         }
@@ -290,6 +310,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                         ai.clearHistory();
                         operation.check();
                         stage = "model_request";
+                        task.stage = AutomationHistoryStore.Stage.GENERATION;
                         String output = ai.reply(task.identity, task.input, images, models,
                                 CommentOutputPolicy.task(task.options.text("comment_prompt",
                                         "根据当前作品自然地写一条评论。")), false, "", imageCount -> {
@@ -304,6 +325,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                         String comment = CommentOutputPolicy.parse(output, task.options.enabled(LocalOptions.COMMENT_VOICE));
                         if (comment.isEmpty()) {
                             safeLog("Automatic comment skipped: model returned an empty comment");
+                            task.reason = AutomationHistoryStore.Reason.INVALID_RESPONSE;
                             result.accept("cancelled");
                             return;
                         }
@@ -321,6 +343,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                     task.voiceAttempt = task.attempt;
                     dispatcher.commentStage(task.id, "generating");
                     stage = "speech";
+                    task.stage = AutomationHistoryStore.Stage.SPEECH;
                     SpeechPreparation.Audio prepared = speechPreparer.prepare(context, text, task.options, Long.MAX_VALUE,
                             () -> !operation.cancelled && valid(task));
                     synchronized (operation) {
@@ -338,18 +361,28 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                     main.removeCallbacks(operation.timeout);
                     safeLog("Automatic comment generation completed; chars=" + characters
                             + "; audioMillis=" + (task.audio == null ? 0 : task.audio.duration));
+                    task.generationMillis = previousGenerationMillis + Math.max(0, android.os.SystemClock.elapsedRealtime() - generationStarted);
                     prepare(task, result);
                 }
             } catch (Exception failure) {
+                if (task.reason != AutomationHistoryStore.Reason.GENERATION_TIMEOUT) {
+                    task.reason = failure instanceof SpeechPreparation.Failure ? AutomationHistoryStore.Reason.SPEECH_FAILED
+                            : task.stage == AutomationHistoryStore.Stage.MEDIA ? AutomationHistoryStore.Reason.MEDIA_FAILED
+                            : AutomationHistoryStore.Reason.GENERATION_FAILED;
+                }
                 String http = "";
                 java.util.regex.Matcher status = java.util.regex.Pattern.compile("HTTP ([0-9]{3})").matcher(String.valueOf(failure.getMessage()));
                 if (status.find()) http = "; HTTP=" + status.group(1);
+                if ("; HTTP=401".equals(http) || "; HTTP=403".equals(http)) task.reason = AutomationHistoryStore.Reason.AI_AUTH_FAILED;
+                else if ("; HTTP=429".equals(http)) task.reason = AutomationHistoryStore.Reason.AI_RATE_LIMITED;
+                else if (!http.isEmpty()) task.reason = AutomationHistoryStore.Reason.AI_HTTP_ERROR;
                 String detail = failure instanceof SpeechPreparation.Failure
                         ? ((SpeechPreparation.Failure) failure).diagnostic() : "stage=" + stage;
                 safeLog("Automatic comment generation failed: " + failure.getClass().getSimpleName() + http
                         + "; " + detail + "; chars=" + characters + "; attempt=" + attempt + "/3");
                 result.accept(valid(task) ? "failed" : "cancelled");
             } finally {
+                task.generationMillis = previousGenerationMillis + Math.max(0, android.os.SystemClock.elapsedRealtime() - generationStarted);
                 main.removeCallbacks(operation.timeout);
                 operation.release();
             }
@@ -382,6 +415,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
 
     private void markCancelled(Task task) {
         if (task == null || task.terminal) return;
+        if (task.reason == AutomationHistoryStore.Reason.NONE) task.reason = AutomationHistoryStore.Reason.CANCELLED;
         task.cancelled = true;
         GenerationAttempt operation = task.generationAttempt;
         if (operation != null) operation.cancel();
@@ -390,15 +424,36 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
     private void publish(Task task, Consumer<String> result) {
         if (voice(task)) task.voiceAttempt = task.attempt;
         dispatcher.commentStage(task.id, "publishing");
+        task.stage = AutomationHistoryStore.Stage.SEND;
         AutomationRateLimiter.Reservation[] reservation = new AutomationRateLimiter.Reservation[1];
         if (voice(task) && task.audio == null || !voice(task) && (task.text == null
                 || task.text.trim().isEmpty() || !task.textFallback && task.text.length() > 1000)) {
             result.accept("failed");
             return;
         }
+        // Dispatcher calls actions on its worker. Persist before posting the native invocation to main.
+        String identity = SubmissionLedger.identity(task.identity);
+        String attempt = java.util.UUID.randomUUID().toString();
+        if (!valid(task)) { result.accept("cancelled"); return; }
+        if (!submissions.reserve(identity, attempt, System.currentTimeMillis())) {
+            task.reason = AutomationHistoryStore.Reason.PERSISTENCE_FAILED;
+            result.accept("cancelled");
+            return;
+        }
+        task.uncertain = false;
+        task.sendStarted = android.os.SystemClock.elapsedRealtime();
+        long previousSendMillis = Math.max(0, task.sendMillis);
+        task.queueMillis = Math.max(0, task.sendStarted - task.createdElapsed - Math.max(0, task.generationMillis) - previousSendMillis);
+        java.util.concurrent.atomic.AtomicBoolean invoked = new java.util.concurrent.atomic.AtomicBoolean();
         publisher.send(task.work, task.aid, task.text, task.audio, () -> valid(task), () -> {
+            if (!submissions.isReserved(identity, attempt)) return false;
             reservation[0] = rateLimiter.tryReserve(AutomationHistoryStore.COMMENT, task.account, task.authorId, options);
-            return reservation[0] != null;
+            if (reservation[0] == null) {
+                task.reason = AutomationHistoryStore.Reason.ALLOWANCE_EXHAUSTED;
+                return false;
+            }
+            invoked.set(true);
+            return true;
         }, () -> {
             inFlight.put(task.identity, task.id);
             rememberSubmission(task);
@@ -411,18 +466,48 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                 }
             }, 600_000);
         }, status -> {
-            if ("failed".equals(status) || "cancelled".equals(status)) rateLimiter.release(reservation[0]);
-            if ("failed".equals(status) && inFlight.remove(task.identity, task.id)) {
-                context.getSharedPreferences("douai_comment_state", Context.MODE_PRIVATE).edit().remove(task.identity).apply();
-            } else if ("sent".equals(status)) inFlight.remove(task.identity, task.id);
-            if (task.audio != null && ("sent".equals(status) || "cancelled".equals(status)
-                    || task.terminal && "failed".equals(status))) {
-                task.audio.delete();
-                task.audio = null;
+            try {
+                RESULTS_IO.execute(() -> {
+                    String outcome = status;
+                    task.sendMillis = previousSendMillis + Math.max(0, android.os.SystemClock.elapsedRealtime() - task.sendStarted);
+                    if ("cancelled".equals(status) && !invoked.get()) submissions.abandon(identity, attempt);
+                    else if ("sent".equals(status)) submissions.complete(identity, attempt, "sent", System.currentTimeMillis());
+                    else if ("failed".equals(status) && !task.uncertain
+                            && submissions.complete(identity, attempt, "failed", System.currentTimeMillis())) {
+                        // Only a definite failure with a durably released reservation can retry.
+                    } else {
+                        submissions.complete(identity, attempt, "unknown", System.currentTimeMillis());
+                        outcome = "submitted";
+                    }
+                    String durableOutcome = outcome;
+                    main.post(() -> publishResult(task, durableOutcome, reservation[0], result));
+                });
+            } catch (java.util.concurrent.RejectedExecutionException full) {
+                task.reason = AutomationHistoryStore.Reason.PERSISTENCE_FAILED;
+                // The pre-send durable reservation remains. Never infer rejection from an IO backlog.
+                main.post(() -> publishResult(task, invoked.get() ? "submitted" : "cancelled", reservation[0], result));
             }
-            if (task.terminal && ("sent".equals(status) || "failed".equals(status))) dispatcher.recordOutcome(entry(task, status));
-            result.accept(status);
         });
+    }
+
+    private void publishResult(Task task, String status, AutomationRateLimiter.Reservation reservation,
+                               Consumer<String> result) {
+        if ("submitted".equals(status)) {
+            task.uncertain = true;
+            task.reason = AutomationHistoryStore.Reason.SUBMITTED_UNCONFIRMED;
+        } else if ("failed".equals(status)) task.reason = AutomationHistoryStore.Reason.SEND_FAILED;
+        else if ("sent".equals(status)) { task.reason = AutomationHistoryStore.Reason.NONE; task.stage = AutomationHistoryStore.Stage.COMPLETE; }
+        if ("failed".equals(status) || "cancelled".equals(status)) rateLimiter.release(reservation);
+        if ("failed".equals(status) && inFlight.remove(task.identity, task.id)) {
+            context.getSharedPreferences("douai_comment_state", Context.MODE_PRIVATE).edit().remove(task.identity).apply();
+        } else if ("sent".equals(status)) inFlight.remove(task.identity, task.id);
+        if (task.audio != null && ("sent".equals(status) || "cancelled".equals(status)
+                || task.terminal && "failed".equals(status))) {
+            task.audio.delete();
+            task.audio = null;
+        }
+        if (task.terminal && ("sent".equals(status) || "failed".equals(status))) dispatcher.recordOutcome(entry(task, status));
+        result.accept(status);
     }
 
     private void finished(Task task, String status, int attempts) {
@@ -430,6 +515,10 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         task.terminal = true;
         if ("cancelled".equals(status) && task.id.equals(inFlight.get(task.identity))) status = "submitted";
         if ("cancelled".equals(status)) task.cancelled = true;
+        if ("submitted".equals(status)) {
+            task.uncertain = true;
+            task.reason = AutomationHistoryStore.Reason.SUBMITTED_UNCONFIRMED;
+        }
         if (task.audio != null && !"submitted".equals(status)) { task.audio.delete(); task.audio = null; }
         safeLog("Automatic comment queue outcome=" + status + "; attempts=" + attempts);
         if ("sent".equals(status) || "submitted".equals(status)) rememberSubmission(task);
@@ -453,7 +542,9 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
     private static AutomationHistoryStore.Entry entry(Task task, String status) {
         return new AutomationHistoryStore.Entry(task.id, AutomationHistoryStore.COMMENT, task.aid, task.name,
                 task.input, task.text == null ? "" : task.text, task.model, status, task.createdAt,
-                System.currentTimeMillis(), task.requestImageCount, task.modelRequestSent, deliveryMode(task));
+                System.currentTimeMillis(), task.requestImageCount, task.modelRequestSent, deliveryMode(task))
+                .withDiagnostics(task.reason, task.stage,
+                        task.queueMillis, task.mediaMillis, task.generationMillis, task.sendMillis);
     }
 
     static String workInput(Object work) {
@@ -577,6 +668,10 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         final String authorId;
         final LocalOptions options;
         final long createdAt = System.currentTimeMillis();
+        final long createdElapsed = android.os.SystemClock.elapsedRealtime();
+        volatile long queueMillis = -1, mediaMillis = -1, generationMillis = -1, sendMillis = -1, sendStarted;
+        volatile AutomationHistoryStore.Reason reason = AutomationHistoryStore.Reason.NONE;
+        volatile AutomationHistoryStore.Stage stage = AutomationHistoryStore.Stage.QUEUE;
         volatile String text;
         volatile String model = "";
         volatile int requestImageCount;
@@ -588,6 +683,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         volatile int voiceFailures;
         volatile int fallbackAfterAttempt;
         volatile boolean terminal;
+        volatile boolean uncertain;
         volatile boolean cancelled;
         volatile GenerationAttempt generationAttempt;
         volatile SpeechPreparation.Audio audio;
@@ -618,6 +714,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                 synchronized (this) {
                     if (future.isDone() || generated || cancelled) return;
                     safeLog("Automatic comment generation deadline reached; attempt=" + attempt + "/3");
+                    task.reason = AutomationHistoryStore.Reason.GENERATION_TIMEOUT;
                     cancel();
                     complete.accept(valid(task) ? "failed" : "cancelled");
                 }

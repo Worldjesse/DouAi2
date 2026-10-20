@@ -92,13 +92,14 @@ final class ConfigSecrets {
 
     private static boolean isEndpointField(String key) {
         return ThirdPartyDownloadSettings.GET_TEMPLATE.equals(key) || SpeechSettings.GET_TEMPLATE.equals(key)
-                || SpeechSettings.VOICE_GET_TEMPLATE.equals(key) || "streak_content_api".equals(key);
+                || SpeechSettings.VOICE_GET_TEMPLATE.equals(key) || SpeechSettings.MINIMAX_BASE_URL.equals(key)
+                || "streak_content_api".equals(key);
     }
 
     private static String redactEndpoint(String value) {
         if (value.isEmpty() || OMITTED.equals(value)) return value;
         try {
-            String concrete = value.replaceAll("\\{[a-zA-Z_][a-zA-Z0-9_]*}", "douai-placeholder");
+            String concrete = value.replaceAll("\\{[a-zA-Z_][a-zA-Z0-9_]*\\}", "douai-placeholder");
             java.net.URI uri = java.net.URI.create(concrete);
             if (uri.getHost() == null || !("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()))) return OMITTED;
             return redactText(value);
@@ -141,7 +142,7 @@ final class ConfigSecrets {
 
     private static boolean placeholder(String value) {
         String decoded = decoded(value);
-        return decoded.isEmpty() || decoded.matches("\\{[a-zA-Z_][a-zA-Z0-9_]*}") || OMITTED.equals(value);
+        return decoded.isEmpty() || decoded.matches("\\{[a-zA-Z_][a-zA-Z0-9_]*\\}") || OMITTED.equals(value);
     }
 
     private static boolean publicPath(String value) {
@@ -156,6 +157,7 @@ final class ConfigSecrets {
 
     static String endpointKey(String key) {
         if (key.startsWith("third_party_")) return ThirdPartyDownloadSettings.GET_TEMPLATE;
+        if (key.startsWith("tts_minimax_")) return SpeechSettings.MINIMAX_BASE_URL;
         if (key.startsWith("tts_voice_")) return SpeechSettings.VOICE_GET_TEMPLATE;
         if (key.startsWith("tts_")) return SpeechSettings.GET_TEMPLATE;
         if (key.equals("streak_content_api")) return key;
@@ -167,6 +169,7 @@ final class ConfigSecrets {
         if (value instanceof String) return redactEndpoint((String) value);
         if (SpeechSettings.GET_TEMPLATE.equals(key)) return redactText(SpeechSettings.DEFAULT_GET_TEMPLATE);
         if (SpeechSettings.VOICE_GET_TEMPLATE.equals(key)) return redactText(SpeechSettings.DEFAULT_VOICE_GET_TEMPLATE);
+        if (SpeechSettings.MINIMAX_BASE_URL.equals(key)) return SpeechSettings.DEFAULT_MINIMAX_BASE_URL;
         if (ThirdPartyDownloadSettings.GET_TEMPLATE.equals(key)) return redactText(ThirdPartyDownloadSettings.DEFAULT_GET_TEMPLATE);
         return "";
     }

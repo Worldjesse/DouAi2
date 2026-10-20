@@ -8,6 +8,7 @@ import java.util.Map;
 
 /** An editing session for reply/comment settings; closing it invalidates late control callbacks. */
 public final class AutomationMessageSettings implements SettingsStore {
+    public static final int DEFAULT_NOTICE_SECONDS = 3;
     private final SettingsStore store;
     private final Runnable changed;
     private boolean closed;

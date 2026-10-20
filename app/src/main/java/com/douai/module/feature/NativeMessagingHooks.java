@@ -11,6 +11,9 @@ import android.widget.Toast;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.AutomationHistoryStore;
+import com.douai.module.config.AutomationHistoryStore.Reason;
+import com.douai.module.config.AutomationHistoryStore.Stage;
+import com.douai.module.config.SubmissionLedger;
 import com.douai.module.scan.HostScanReport;
 import io.github.libxposed.api.XposedInterface;
 import org.json.JSONObject;
@@ -30,7 +33,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -40,15 +49,26 @@ import java.util.function.Supplier;
 
 /** Observes committed incoming messages and submits opt-in tasks through the native IM SDK. */
 public final class NativeMessagingHooks implements AutoCloseable {
+    private static final ThreadPoolExecutor RESULTS_IO = new ThreadPoolExecutor(1, 1, 30,
+            TimeUnit.SECONDS, new ArrayBlockingQueue<>(64), action -> {
+                Thread thread = new Thread(action, "DouAi-reply-results");
+                thread.setDaemon(true);
+                return thread;
+            });
     private final Context context;
     private final SharedPreferences state;
     private final StreakSendLedger streakLedger;
+    private final SubmissionLedger replyLedger;
     private final AutomationRateLimiter rateLimiter;
     private final Consumer<String> log;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ScheduledThreadPoolExecutor worker = new ScheduledThreadPoolExecutor(1);
     private final ScheduledThreadPoolExecutor streakWorker = new ScheduledThreadPoolExecutor(1);
     private static final long REPLY_GENERATION_TIMEOUT_MILLIS = 120_000;
+    private static final long REPLY_QUEUE_TIMEOUT_MILLIS = 120_000;
+    private final ReplyScheduler<ReplyTask> replyQueue = new ReplyScheduler<>(100);
+    private ScheduledFuture<?> replyPump;
+    private long replyPumpAt = Long.MAX_VALUE;
     private final Object replyLock = new Object();
     private ReplyTask activeReply;
     private final AtomicLong generation = new AtomicLong();
@@ -118,6 +138,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
         this.dispatcher.setOptions(options);
         state = context.getSharedPreferences("douai_message_state", Context.MODE_PRIVATE);
         streakLedger = new StreakSendLedger(state);
+        replyLedger = new SubmissionLedger(context.getSharedPreferences("douai_reply_submissions", Context.MODE_PRIVATE), 1000);
         rateLimiter = new AutomationRateLimiter(context);
         resetToken = state.getString("streak.reset_token", "");
         recall = new BehaviorHookGroup("prevent_message_recall", this.log);
@@ -146,6 +167,10 @@ public final class NativeMessagingHooks implements AutoCloseable {
 
     public boolean supports(String key) {
         return "prevent_message_recall".equals(key) ? recall.isActive() : receive.isActive();
+    }
+
+    public String installationFailure(String key) {
+        return "prevent_message_recall".equals(key) ? recall.installationFailure() : receive.installationFailure();
     }
 
     public static Map<String, String> availableContacts() { return contacts; }
@@ -428,6 +453,10 @@ public final class NativeMessagingHooks implements AutoCloseable {
         String conversation = incoming.conversation;
         String text = incoming.text;
         String identity = account + ":" + conversation + ":" + incoming.serverId;
+        if (replyLedger.contains(SubmissionLedger.identity(identity))) {
+            safeLog("Automatic reply receipt skipped source=" + source + " reason=submission_claimed");
+            return;
+        }
         synchronized (seen) {
             if (seen.put(identity, true) != null) {
                 safeLog("Automatic reply receipt skipped source=" + source + " reason=duplicate");
@@ -436,73 +465,145 @@ public final class NativeMessagingHooks implements AutoCloseable {
         }
         long epoch = generation.get();
         int delay = Math.max(2, Math.min(3600, current.integer("reply_delay_seconds", 2)));
-        if (worker.getQueue().size() >= 100) {
-            synchronized (seen) { seen.remove(identity); }
-            safeLog("Automatic reply receipt skipped source=" + source + " reason=queue_full");
-            return;
+        ReplyTask operation = new ReplyTask(account, epoch, identity, incoming, delay, values, current);
+        synchronized (replyLock) {
+            if (!replyQueue.offer(conversation, operation, operation.readyAt)) {
+                synchronized (seen) { seen.remove(identity); }
+                operation.reason = Reason.QUEUE_FULL;
+                operation.reportFailure();
+                safeLog("Automatic reply receipt skipped source=" + source + " reason=queue_full");
+                return;
+            }
+            pendingReplies.add(operation);
+            scheduleReplyPump();
         }
-        ReplyTask operation = new ReplyTask(account, epoch, identity, incoming, delay);
-        pendingReplies.add(operation);
         safeLog("Automatic reply receipt queued source=" + source + " kind=" + (incoming.group ? "group" : "private"));
         main.postDelayed(operation.watchdog, 1000);
+    }
+
+    /** Called with replyLock held; only one generation and one delayed wakeup can exist. */
+    private void scheduleReplyPump() {
+        if (closed || activeReply != null) return;
+        long readyAt = replyQueue.nextReadyAt();
+        if (replyPump != null && !replyPump.isDone()) {
+            if (replyPumpAt <= readyAt) return;
+            replyPump.cancel(false);
+        }
+        replyPump = null;
+        replyPumpAt = readyAt;
+        if (readyAt == Long.MAX_VALUE) return;
         try {
-            operation.attach(worker.schedule(() -> {
-            if (!operation.begin()) { operation.release(); return; }
-            try {
-                if (!replyStillAllowed(values, account, current)) return;
-                if (!rateLimiter.canSend(AutomationHistoryStore.REPLY, account, recipient, options)) return;
-                operation.conversation = resolveReplyConversation(operation);
-                if (operation.conversation == null) {
-                    synchronized (seen) { seen.remove(identity); }
-                    safeLog("Automatic reply skipped reason=conversation_unavailable");
-                    return;
-                }
-                if (!operation.current()) return;
-                String modelName = "";
-                AiModelSettings models = "ai".equals(current.text("reply_mode", "fixed")) ? AiModelSettings.read(current) : null;
-                List<ChatImage> images = models == null ? Collections.emptyList()
-                        : AutomationReplyMedia.loadIncoming(context, incoming.imageUrls, incoming.videoUrl,
-                                current, operation.mediaCancellation);
-                if (!operation.current()) return;
-                String secondary = current.text("reply_prompt", "自然简洁地回复对方，只输出回复正文。");
-                String response;
-                if (models != null) {
-                    modelName = models.selected().modelName;
-                    operation.modelName = modelName;
-                    response = ai.reply("reply:" + account + ":" + conversation, text, images, models,
-                            secondary, false, "", imageCount -> {
-                                operation.requestImageCount = imageCount;
-                                operation.modelRequestSent = true;
-                            });
-                } else response = ReplyPolicy.reply(text, current, random);
-                if (!operation.current()) return;
-                if (!replyStillAllowed(values, account, current)) return;
-                if (response == null || response.trim().isEmpty()) return;
-                String name = incoming.group ? groups.getOrDefault(conversation, conversation)
-                        : contacts.getOrDefault(Long.toString(incoming.sender), Long.toString(incoming.sender));
-                BooleanSupplier valid = () -> operation.current() && replyStillAllowed(values, account, current)
-                        && conversationExists(conversation, incoming.group, operation.conversation)
-                        && rateLimiter.canSend(AutomationHistoryStore.REPLY, account, recipient, options);
-                SpeechPreparation.Audio audio;
-                if (current.enabled("reply_voice")) {
-                    if (audioSender == null) throw new IllegalStateException("Native audio sender unavailable");
-                    audio = speechPreparer.prepare(context, response, current, 120_000, valid);
-                    if (!valid.getAsBoolean()) { audio.delete(); return; }
-                } else audio = null;
-                if (!operation.handoff()) { if (audio != null) audio.delete(); return; }
-                java.util.concurrent.atomic.AtomicBoolean submitted = new java.util.concurrent.atomic.AtomicBoolean();
-                dispatcher.prepare(new AutomationHistoryStore.Entry(identity, AutomationHistoryStore.REPLY, conversation, name,
-                        input(incoming), response, modelName, "pending", operation.createdAt, System.currentTimeMillis(),
-                        operation.requestImageCount, operation.modelRequestSent,
-                        audio == null ? AutomationHistoryStore.DELIVERY_TEXT : AutomationHistoryStore.DELIVERY_VOICE),
-                        valid,
-                        done -> {
-                            if (!valid.getAsBoolean()) { done.accept("cancelled"); return; }
-                            AtomicReference<AutomationRateLimiter.Reservation> reservation = new AtomicReference<>();
-                            try {
-                                Consumer<Boolean> acknowledged = success -> {
+            replyPump = worker.schedule(this::drainReplyQueue,
+                    Math.max(0, readyAt - SystemClock.elapsedRealtime()), TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            List<ReplyTask> abandoned;
+            synchronized (pendingReplies) { abandoned = new ArrayList<>(pendingReplies); }
+            for (ReplyTask task : abandoned) task.cancel(false);
+        }
+    }
+
+    private void drainReplyQueue() {
+        ReplyTask operation;
+        synchronized (replyLock) {
+            replyPump = null;
+            replyPumpAt = Long.MAX_VALUE;
+            operation = replyQueue.poll(SystemClock.elapsedRealtime());
+            if (operation == null) { scheduleReplyPump(); return; }
+            activeReply = operation;
+        }
+        FutureTask<Void> execution = new FutureTask<>(() -> {
+            generateReply(operation);
+            return null;
+        });
+        operation.attach(execution);
+        try { execution.run(); }
+        finally {
+            synchronized (replyLock) {
+                if (activeReply == operation) activeReply = null;
+                scheduleReplyPump();
+            }
+        }
+    }
+
+    private void generateReply(ReplyTask operation) {
+        long account = operation.account;
+        long epoch = operation.epoch;
+        ReplyPolicy.Incoming incoming = operation.incoming;
+        String identity = operation.identity;
+        String conversation = incoming.conversation;
+        String recipient = Long.toString(incoming.sender);
+        String text = incoming.text;
+        LocalOptions current = operation.settings;
+        ContentValues values = operation.values;
+        if (!operation.begin()) { operation.release(); return; }
+        try {
+            if (!replyStillAllowed(values, account, current)) return;
+            if (!rateLimiter.canSend(AutomationHistoryStore.REPLY, account, recipient, options)) return;
+            operation.conversation = resolveReplyConversation(operation);
+            if (operation.conversation == null) {
+                synchronized (seen) { seen.remove(identity); }
+                safeLog("Automatic reply skipped reason=conversation_unavailable");
+                return;
+            }
+            if (!operation.current()) return;
+            String modelName = "";
+            AiModelSettings models = "ai".equals(current.text("reply_mode", "fixed")) ? AiModelSettings.read(current) : null;
+            operation.stage = Stage.MEDIA;
+            long mediaStarted = SystemClock.elapsedRealtime();
+            operation.stageStarted = mediaStarted;
+            List<ChatImage> images = models == null ? Collections.emptyList()
+                    : AutomationReplyMedia.loadIncoming(context, incoming.imageUrls, incoming.videoUrl,
+                            current, operation.mediaCancellation);
+            operation.mediaMillis = SystemClock.elapsedRealtime() - mediaStarted;
+            if (!operation.current()) return;
+            String secondary = current.text("reply_prompt", "自然简洁地回复对方，只输出回复正文。");
+            String response;
+            operation.stage = Stage.GENERATION;
+            long generationStarted = SystemClock.elapsedRealtime();
+            operation.stageStarted = generationStarted;
+            if (models != null) {
+                modelName = models.selected().modelName;
+                operation.modelName = modelName;
+                response = ai.reply("reply:" + account + ":" + conversation, text, images, models,
+                        secondary, false, "", imageCount -> {
+                            operation.requestImageCount = imageCount;
+                            operation.modelRequestSent = true;
+                        });
+            } else response = ReplyPolicy.reply(text, current, random);
+            operation.generationMillis = SystemClock.elapsedRealtime() - generationStarted;
+            if (!operation.current()) return;
+            if (!replyStillAllowed(values, account, current)) return;
+            if (response == null || response.trim().isEmpty()) return;
+            String name = incoming.group ? groups.getOrDefault(conversation, conversation)
+                    : contacts.getOrDefault(Long.toString(incoming.sender), Long.toString(incoming.sender));
+            BooleanSupplier valid = () -> operation.current() && replyStillAllowed(values, account, current)
+                    && conversationExists(conversation, incoming.group, operation.conversation)
+                    && rateLimiter.canSend(AutomationHistoryStore.REPLY, account, recipient, options);
+            SpeechPreparation.Audio audio;
+            if (current.enabled("reply_voice")) {
+                if (audioSender == null) throw new IllegalStateException("Native audio sender unavailable");
+                operation.stage = Stage.SPEECH;
+                audio = speechPreparer.prepare(context, response, current, 120_000, valid);
+                if (!valid.getAsBoolean()) { audio.delete(); return; }
+            } else audio = null;
+            if (!operation.handoff()) { if (audio != null) audio.delete(); return; }
+            java.util.concurrent.atomic.AtomicBoolean submitted = new java.util.concurrent.atomic.AtomicBoolean();
+            operation.response = response;
+            operation.outputName = name;
+            operation.voice = audio != null;
+            operation.stage = Stage.QUEUE;
+            dispatcher.prepare(operation.entry("pending"),
+                    valid,
+                    done -> {
+                        if (!valid.getAsBoolean()) { done.accept("cancelled"); return; }
+                        AtomicReference<AutomationRateLimiter.Reservation> reservation = new AtomicReference<>();
+                        try {
+                            Consumer<Boolean> acknowledged = success -> {
+                                operation.acknowledgmentReceived = true;
+                                submitReplyResult(operation, () -> {
                                     AutomationRateLimiter.Reservation active = reservation.get();
-                                    if (!success && active != null) rateLimiter.release(active);
+                                    String outcome = operation.nativeOutcome(success, active != null);
+                                    if (!success && active != null && !"submitted".equals(outcome)) rateLimiter.release(active);
                                     if (success && models != null) {
                                         synchronized (sendLock) {
                                             // Selection changes clear history under this same lock. An older send's late
@@ -514,34 +615,92 @@ public final class NativeMessagingHooks implements AutoCloseable {
                                             }
                                         }
                                     }
-                                    done.accept(success ? "sent" : active == null ? "cancelled" : "failed");
-                                };
-                                BooleanSupplier reserve = () -> {
-                                    if (!operation.current()
-                                            || !replyStillAllowed(values, account, options)) return false;
-                                    reservation.set(rateLimiter.tryReserve(AutomationHistoryStore.REPLY,
-                                            account, recipient, options));
-                                    return reservation.get() != null;
-                                };
-                                if (audio == null) sendText(conversation, response, account, epoch,
-                                        incoming.group, acknowledged, reserve, operation.conversation);
-                                else sendAudio(conversation, audio, account, epoch, incoming.group,
-                                        acknowledged, reserve, submitted, operation.conversation);
-                            } catch (IllegalAccessException | IllegalArgumentException failure) {
-                                AutomationRateLimiter.Reservation active = reservation.get();
-                                if (active != null) rateLimiter.release(active);
-                                throw failure;
+                                    done.accept(outcome);
+                                }, () -> done.accept(operation.nativeInvoked ? "submitted" : "cancelled"));
+                            };
+                            BooleanSupplier reserve = () -> {
+                                if (!operation.current()
+                                        || !replyStillAllowed(values, account, options)) return false;
+                                reservation.set(rateLimiter.tryReserve(AutomationHistoryStore.REPLY,
+                                        account, recipient, options));
+                                if (reservation.get() == null) { operation.reason = Reason.ALLOWANCE_EXHAUSTED; return false; }
+                                if (!replyLedger.reserve(operation.ledgerIdentity, operation.attempt, System.currentTimeMillis())) {
+                                    rateLimiter.release(reservation.get());
+                                    reservation.set(null);
+                                    operation.reason = Reason.LEDGER_WRITE_FAILED;
+                                    return false;
+                                }
+                                operation.reserved = true;
+                                operation.stage = Stage.SEND;
+                                operation.sendStarted = SystemClock.elapsedRealtime();
+                                return true;
+                            };
+                            if (audio == null) sendText(conversation, response, account, epoch,
+                                    incoming.group, acknowledged, reserve, operation.conversation, operation::invokingNative);
+                            else sendAudio(conversation, audio, account, epoch, incoming.group,
+                                    acknowledged, reserve, submitted, operation.conversation, operation::invokingNative);
+                        } catch (Exception failure) {
+                            if (operation.acknowledgmentReceived) return;
+                            if (operation.nativeInvoked) {
+                                operation.unknown = true;
+                                operation.reason = Reason.SUBMITTED_UNCONFIRMED;
+                                submitReplyResult(operation, () -> {
+                                    replyLedger.complete(operation.ledgerIdentity, operation.attempt, "unknown", System.currentTimeMillis());
+                                    done.accept("submitted");
+                                }, () -> done.accept("submitted"));
+                            } else {
+                                if (operation.reason == Reason.NONE) operation.reason = Reason.SEND_FAILED;
+                                submitReplyResult(operation, () -> {
+                                    operation.abandon();
+                                    AutomationRateLimiter.Reservation active = reservation.get();
+                                    if (active != null) rateLimiter.release(active);
+                                    done.accept("failed");
+                                }, () -> done.accept("cancelled"));
                             }
-                        }, outcome -> { if (audio != null && !submitted.get()) audio.delete(); });
-            } catch (Exception failure) {
-                if (operation.current()) operation.reportFailure();
-                safeLog("Automatic reply failed: " + failure.getClass().getSimpleName());
-            } finally {
-                operation.release();
+                        }
+                    }, outcome -> {
+                        if ("submitted".equals(outcome)) {
+                            operation.unknown = true;
+                            operation.reason = Reason.SUBMITTED_UNCONFIRMED;
+                        }
+                        submitReplyResult(operation, () -> {
+                            if ("submitted".equals(outcome)) {
+                                replyLedger.complete(operation.ledgerIdentity, operation.attempt, "unknown", System.currentTimeMillis());
+                            } else if (!operation.nativeInvoked) operation.abandon();
+                            if (audio != null && !submitted.get()) audio.delete();
+                            operation.recordOutcome(outcome);
+                        }, () -> {
+                            if (audio != null && !submitted.get()) audio.delete();
+                        });
+                    });
+        } catch (Exception failure) {
+            if (operation.current()) {
+                operation.reason = operation.stage == Stage.MEDIA ? Reason.MEDIA_FAILED
+                        : operation.stage == Stage.SPEECH ? Reason.SPEECH_FAILED : Reason.GENERATION_FAILED;
+                if (operation.stage == Stage.GENERATION && failure instanceof ChatCompletionClient.ReplyFailure) {
+                    ChatCompletionClient.ReplyFailure replyFailure = (ChatCompletionClient.ReplyFailure) failure;
+                    int status = replyFailure.httpStatus();
+                    operation.reason = replyFailure.kind() != ChatCompletionClient.ReplyFailure.Kind.HTTP ? Reason.INVALID_RESPONSE
+                            : status == 401 || status == 403 ? Reason.AI_AUTH_FAILED
+                            : status == 429 ? Reason.AI_RATE_LIMITED : Reason.AI_HTTP_ERROR;
+                }
+                operation.reportFailure();
             }
-            }, delay, TimeUnit.SECONDS));
-        } catch (java.util.concurrent.RejectedExecutionException rejected) {
-            operation.cancel(false);
+            safeLog("Automatic reply failed: " + failure.getClass().getSimpleName());
+        } finally {
+            operation.release();
+        }
+    }
+
+    private void submitReplyResult(ReplyTask operation, Runnable result, Runnable overloaded) {
+        try { RESULTS_IO.execute(result); }
+        catch (RejectedExecutionException full) {
+            if (operation.nativeInvoked) {
+                operation.unknown = true;
+                operation.reason = Reason.SUBMITTED_UNCONFIRMED;
+            } else if (operation.reason == Reason.NONE) operation.reason = Reason.CANCELLED;
+            safeLog("Automatic reply result queue is full; outcome remains conservative");
+            overloaded.run();
         }
     }
 
@@ -556,6 +715,11 @@ public final class NativeMessagingHooks implements AutoCloseable {
         final long account;
         final long epoch;
         final String identity;
+        final String ledgerIdentity;
+        final String attempt = UUID.randomUUID().toString();
+        final ContentValues values;
+        final LocalOptions settings;
+        final long readyAt;
         final ReplyPolicy.Incoming incoming;
         final Object sdkContext;
         volatile Object conversation;
@@ -570,14 +734,24 @@ public final class NativeMessagingHooks implements AutoCloseable {
         volatile int requestImageCount = -1;
         volatile boolean modelRequestSent;
         volatile String modelName = "";
+        volatile Reason reason = Reason.NONE;
+        volatile Stage stage = Stage.QUEUE;
+        volatile long queueMillis = -1, mediaMillis = -1, generationMillis = -1, sendStarted = -1, stageStarted = -1;
+        volatile boolean began, reserved, nativeInvoked, voice, unknown, acknowledgmentReceived;
+        volatile String response = "", outputName = "";
+        volatile String acknowledgedOutcome;
 
-        ReplyTask(long account, long epoch, String identity, ReplyPolicy.Incoming incoming, int delay) {
+        ReplyTask(long account, long epoch, String identity, ReplyPolicy.Incoming incoming, int delay, ContentValues values, LocalOptions settings) {
             this.account = account;
             this.epoch = epoch;
             this.identity = identity;
+            ledgerIdentity = SubmissionLedger.identity(identity);
+            this.values = new ContentValues(values);
+            this.settings = settings;
             this.incoming = incoming;
             sdkContext = sdk;
-            deadline = SystemClock.elapsedRealtime() + delay * 1000L + REPLY_GENERATION_TIMEOUT_MILLIS;
+            readyAt = SystemClock.elapsedRealtime() + delay * 1000L;
+            deadline = readyAt + REPLY_QUEUE_TIMEOUT_MILLIS;
         }
 
         void attach(java.util.concurrent.Future<?> value) {
@@ -595,7 +769,9 @@ public final class NativeMessagingHooks implements AutoCloseable {
             if (SystemClock.elapsedRealtime() >= deadline) { cancel(true); return false; }
             synchronized (replyLock) {
                 if (!current()) return false;
-                deadline = Math.min(deadline, SystemClock.elapsedRealtime() + REPLY_GENERATION_TIMEOUT_MILLIS);
+                began = true;
+                queueMillis = Math.max(0, SystemClock.elapsedRealtime() - readyAt);
+                deadline = SystemClock.elapsedRealtime() + REPLY_GENERATION_TIMEOUT_MILLIS;
                 activeReply = this;
                 return true;
             }
@@ -635,11 +811,13 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 if (value != null) value.cancel(true);
             }
             main.removeCallbacks(watchdog);
+            replyQueue.remove(this);
             pendingReplies.remove(this);
             if (timeout && generation.get() == epoch && ownUid() == account
                     && automatic("native_auto_reply", options)) {
+                reason = began ? Reason.GENERATION_TIMEOUT : Reason.QUEUE_EXPIRED;
                 reportFailure();
-                safeLog("Automatic reply generation deadline reached");
+                safeLog(began ? "Automatic reply generation deadline reached" : "Automatic reply queue deadline reached");
             }
         }
 
@@ -647,14 +825,68 @@ public final class NativeMessagingHooks implements AutoCloseable {
             synchronized (this) { finished = true; }
             synchronized (replyLock) { if (activeReply == this) activeReply = null; }
             main.removeCallbacks(watchdog);
+            replyQueue.remove(this);
             pendingReplies.remove(this);
+        }
+
+        void invokingNative() {
+            if (!replyLedger.isReserved(ledgerIdentity, attempt)) {
+                reason = Reason.LEDGER_WRITE_FAILED;
+                throw new IllegalStateException("Reply reservation unavailable");
+            }
+            nativeInvoked = true;
+        }
+
+        void abandon() {
+            if (reserved && !nativeInvoked) replyLedger.abandon(ledgerIdentity, attempt);
+        }
+
+        String nativeOutcome(boolean success, boolean allowanceReserved) {
+            if (!success && unknown && nativeInvoked) {
+                replyLedger.complete(ledgerIdentity, attempt, "unknown", System.currentTimeMillis());
+                reason = Reason.SUBMITTED_UNCONFIRMED;
+                acknowledgedOutcome = "submitted";
+                return acknowledgedOutcome;
+            }
+            if (reserved) {
+                if (nativeInvoked) {
+                    boolean persisted = replyLedger.complete(ledgerIdentity, attempt, success ? "sent" : "failed", System.currentTimeMillis());
+                    if (!success && !persisted) {
+                        reason = Reason.SUBMITTED_UNCONFIRMED;
+                        acknowledgedOutcome = "submitted";
+                        return acknowledgedOutcome;
+                    }
+                } else abandon();
+            }
+            reason = success ? Reason.NONE : nativeInvoked ? Reason.SEND_FAILED
+                    : reason == Reason.NONE ? Reason.INVALIDATED : reason;
+            acknowledgedOutcome = success ? "sent" : allowanceReserved ? "failed" : "cancelled";
+            return acknowledgedOutcome;
+        }
+
+        AutomationHistoryStore.Entry entry(String status) {
+            return new AutomationHistoryStore.Entry(identity, AutomationHistoryStore.REPLY,
+                    incoming.conversation, outputName.isEmpty() ? Long.toString(incoming.sender) : outputName,
+                    input(incoming), response, modelName, status, createdAt, System.currentTimeMillis(),
+                    requestImageCount, modelRequestSent, voice ? AutomationHistoryStore.DELIVERY_VOICE : AutomationHistoryStore.DELIVERY_TEXT)
+                    .withDiagnostics(reason, stage, queueMillis, mediaMillis, generationMillis,
+                            sendStarted < 0 ? -1 : Math.max(0, SystemClock.elapsedRealtime() - sendStarted));
+        }
+
+        void recordOutcome(String status) {
+            // Dispatcher already owns normal completion, preview admission and cumulative timings.
+            if (reason == Reason.NONE || reason == Reason.CANCELLED || reason == Reason.SEND_FAILED
+                    || reason == Reason.SUBMITTED_UNCONFIRMED) return;
+            dispatcher.recordOutcomeReason(entry(status));
         }
 
         void reportFailure() {
             if (!failureReported.compareAndSet(false, true)) return;
-            dispatcher.reportFinalFailure(new AutomationHistoryStore.Entry(identity, AutomationHistoryStore.REPLY,
-                    incoming.conversation, Long.toString(incoming.sender), input(incoming), "", modelName,
-                    "failed", createdAt, System.currentTimeMillis(), requestImageCount, modelRequestSent));
+            long now = SystemClock.elapsedRealtime();
+            if (!began) queueMillis = Math.max(0, now - readyAt);
+            if (stage == Stage.MEDIA && mediaMillis < 0 && stageStarted >= 0) mediaMillis = Math.max(0, now - stageStarted);
+            if (stage == Stage.GENERATION && generationMillis < 0 && stageStarted >= 0) generationMillis = Math.max(0, now - stageStarted);
+            dispatcher.reportFinalFailure(entry("failed"));
         }
     }
 
@@ -739,6 +971,12 @@ public final class NativeMessagingHooks implements AutoCloseable {
 
     private void sendText(String id, String text, long account, long epoch, boolean group,
                           Consumer<Boolean> done, BooleanSupplier beforeNativeSend, Object resolved) throws Exception {
+        sendText(id, text, account, epoch, group, done, beforeNativeSend, resolved, () -> { });
+    }
+
+    private void sendText(String id, String text, long account, long epoch, boolean group,
+                          Consumer<Boolean> done, BooleanSupplier beforeNativeSend, Object resolved,
+                          Runnable invoking) throws Exception {
         if (closed || !receive.isActive() || ownUid() != account || generation.get() != epoch
                 || sdk == null || text == null || text.trim().isEmpty()
                 || text.length() > 4000) { done.accept(false); return; }
@@ -772,6 +1010,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
             if (generation.get() != epoch || ownUid() != account || !receive.isActive()
                     || closed || sdk != activeSdk) { done.accept(false); return; }
             if (!beforeNativeSend.getAsBoolean()) { done.accept(false); return; }
+            invoking.run();
             send.invoke(handler, message, Collections.emptyMap());
         }
     }
@@ -785,6 +1024,13 @@ public final class NativeMessagingHooks implements AutoCloseable {
     private void sendAudio(String id, SpeechPreparation.Audio audio, long account, long epoch, boolean group,
                            Consumer<Boolean> done, BooleanSupplier beforeNativeSend,
                            java.util.concurrent.atomic.AtomicBoolean submitted, Object resolved) throws Exception {
+        sendAudio(id, audio, account, epoch, group, done, beforeNativeSend, submitted, resolved, () -> { });
+    }
+
+    private void sendAudio(String id, SpeechPreparation.Audio audio, long account, long epoch, boolean group,
+                           Consumer<Boolean> done, BooleanSupplier beforeNativeSend,
+                           java.util.concurrent.atomic.AtomicBoolean submitted, Object resolved,
+                           Runnable invoking) throws Exception {
         NativeAudioMessageSender sender = audioSender;
         if (closed || !receive.isActive() || sender == null || ownUid() != account
                 || generation.get() != epoch || sdk == null) { done.accept(false); return; }
@@ -807,6 +1053,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 done.accept(false); return;
             }
             if (!beforeNativeSend.getAsBoolean()) { done.accept(false); return; }
+            invoking.run();
             submitted.set(true);
             sender.submit(message, content, audio, done,
                     () -> !closed && receive.isActive() && generation.get() == epoch && ownUid() == account

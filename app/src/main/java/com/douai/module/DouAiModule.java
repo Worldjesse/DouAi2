@@ -147,6 +147,8 @@ public final class DouAiModule extends XposedModule {
     private volatile String nativeCommentSpeechHookFailure;
     private volatile String directMessageSpeechHookFailure;
     private volatile String immersiveModeFailure;
+    private volatile long hostScanMillis = -1;
+    private volatile long hostHeapUsedBytes = -1;
 
     @Override
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
@@ -237,6 +239,7 @@ public final class DouAiModule extends XposedModule {
             configurationReady = true;
             ensureImmersiveModeController(hostContext, extendedSettings == null
                     ? ExtendedSettings.readSystemBars(preferences) : extendedSettings);
+            long scanStarted = android.os.SystemClock.elapsedRealtime();
             HostScanReport report = new HostScanner().scanCached(
                     archives, rules, new HostScanCache(cacheFile), new HostScanner.ProgressListener() {
                         @Override
@@ -263,6 +266,9 @@ public final class DouAiModule extends XposedModule {
                             if (controller != null) controller.onDexScanned(completed, total, dexName);
                         }
                     }, installationIdentity(archives));
+            hostScanMillis = Math.max(0, android.os.SystemClock.elapsedRealtime() - scanStarted);
+            Runtime runtime = Runtime.getRuntime();
+            hostHeapUsedBytes = runtime.totalMemory() - runtime.freeMemory();
             hostScanReport = report;
             log(3, TAG, "Host scan complete: " + report.summary());
             installFeatureHooksIfReady();
@@ -436,6 +442,8 @@ public final class DouAiModule extends XposedModule {
         Bundle snapshot = new Bundle();
         snapshot.putBoolean("complete", report != null);
         snapshot.putLong("completed_at", System.currentTimeMillis());
+        snapshot.putLong("host_scan_millis", hostScanMillis);
+        snapshot.putLong("host_java_heap_used_bytes", hostHeapUsedBytes);
         if (failure != null) snapshot.putString("failure", failure);
         if (report != null) {
             snapshot.putString("identity", report.getHostIdentity());
@@ -1031,6 +1039,8 @@ public final class DouAiModule extends XposedModule {
                 && nativeMessagingHooks.supports("prevent_message_recall"));
         snapshot.putBoolean("feature.native_auto_reply.installed", nativeMessagingHooks != null
                 && nativeMessagingHooks.supports("native_reply"));
+        snapshot.putString("feature.native_auto_reply.failure", nativeMessagingHooks == null ? ""
+                : nativeMessagingHooks.installationFailure("native_reply"));
         snapshot.putBoolean("feature.media_model.installed", mediaModelHook != null);
         snapshot.putBoolean("feature.comment_enhancements.installed", commentEnhancementsHook != null);
         snapshot.putBoolean("feature.comment_voice.installed", commentVoiceHook != null);

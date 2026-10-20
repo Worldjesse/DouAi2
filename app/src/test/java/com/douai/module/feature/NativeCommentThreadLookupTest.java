@@ -73,6 +73,145 @@ public final class NativeCommentThreadLookupTest {
         assertTrue(sent.LJIIJJI > 0);
     }
 
+    @Test public void repeatedHintReusesTheVerifiedOwnWindowButStillReadsFreshHeadAndThread() throws Exception {
+        for (int round = 0; round < 2; round++) {
+            own.pages.add(ownPage(true, 10, payload(original("root", "work"))));
+            for (int page = 1; page < 5; page++) own.pages.add(ownPage(true, 10 + page));
+            ThreadApi.enqueue("root", threadPage(false, 0, "", incoming("reply", "root", "work")));
+        }
+        assertEquals(1, lookup.resolve(100, hints("reply"), () -> true).size());
+        assertEquals(5, own.starts.size());
+        assertEquals(1, lookup.resolve(100, hints("reply"), () -> true).size());
+        assertEquals("A warm scan must validate the head without reading all five own pages again", 6, own.starts.size());
+        assertEquals("A cached original must never replace the live reply-list request", 2, ThreadApi.calls.size());
+    }
+
+    @Test public void aNewIncomingReplyUnderTheVerifiedWorkAlsoReusesTheOwnWindow() throws Exception {
+        own.pages.add(ownPage(true, 10, payload(original("root", "work"))));
+        for (int page = 1; page < 5; page++) own.pages.add(ownPage(true, 10 + page));
+        own.pages.add(ownPage(true, 10, payload(original("root", "work"))));
+        for (int page = 1; page < 5; page++) own.pages.add(ownPage(true, 10 + page));
+        ThreadApi.enqueue("root", threadPage(false, 0, "", incoming("first", "root", "work")));
+        ThreadApi.enqueue("root", threadPage(false, 0, "", incoming("second", "root", "work")));
+        assertEquals(1, lookup.resolve(100, hints("first"), () -> true).size());
+        assertEquals(1, lookup.resolve(100, hints("second"), () -> true).size());
+        assertEquals(6, own.starts.size());
+        assertEquals(2, ThreadApi.calls.size());
+    }
+
+    @Test public void aHintForAnUnverifiedWorkRefreshesTheWindowImmediately() throws Exception {
+        own.pages.add(ownPage(true, 10, payload(original("root", "work"))));
+        for (int page = 1; page < 5; page++) own.pages.add(ownPage(true, 10 + page));
+        for (int page = 0; page < 4; page++) own.pages.add(ownPage(true, 20 + page));
+        own.pages.add(ownPage(true, 24, payload(original("new-root", "new-work"))));
+        ThreadApi.enqueue("root", threadPage(false, 0, "", incoming("first", "root", "work")));
+        ThreadApi.enqueue("new-root", threadPage(false, 0, "", incoming("second", "new-root", "new-work")));
+        assertEquals(1, lookup.resolve(100, hints("first"), () -> true).size());
+        List<NativeCommentThreadLookup.Hint> newWork = Collections.singletonList(hint("notice-new", "new-work", "second", "200",
+                incoming("second", "0", "new-work")));
+        assertEquals(1, lookup.resolve(100, newWork, () -> true).size());
+        assertEquals(10, own.starts.size());
+        assertEquals(2, ThreadApi.calls.size());
+    }
+
+    @Test public void freshHeadDoesNotExtendTheOriginalWindowsSixtySecondLifetime() throws Exception {
+        java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong();
+        lookup = new NativeCommentThreadLookup(report(), getClass().getClassLoader(), diagnostics::add, clock::get);
+        enqueueOwnWindow("root", "work");
+        own.pages.add(ownPage(true, 10, payload(original("root", "work"))));
+        enqueueOwnWindow("root", "work");
+        for (int i = 0; i < 3; i++) ThreadApi.enqueue("root", threadPage(false, 0, "", incoming("reply", "root", "work")));
+        assertEquals(1, lookup.resolve(100, hints("reply"), () -> true).size());
+        clock.set(TimeUnit.SECONDS.toNanos(59));
+        assertEquals(1, lookup.resolve(100, hints("reply"), () -> true).size());
+        assertEquals(6, own.starts.size());
+        clock.set(TimeUnit.SECONDS.toNanos(60));
+        assertEquals(1, lookup.resolve(100, hints("reply"), () -> true).size());
+        assertEquals(11, own.starts.size());
+        assertTrue(diagnostics.stream().anyMatch(value -> value.contains("cache=fresh_head")));
+    }
+
+    @Test public void aPreviousConfigurationGuardCannotAuthorizeTheNextEpochsCacheHit() throws Exception {
+        AtomicBoolean oldEpoch = new AtomicBoolean(true);
+        enqueueOwnWindow("root", "work"); enqueueOwnWindow("root", "work");
+        ThreadApi.enqueue("root", threadPage(false, 0, "", incoming("reply", "root", "work")));
+        ThreadApi.enqueue("root", threadPage(false, 0, "", incoming("reply", "root", "work")));
+        assertEquals(1, lookup.resolve(100, hints("reply"), oldEpoch::get).size());
+        oldEpoch.set(false);
+        assertEquals(1, lookup.resolve(100, hints("reply"), () -> true).size());
+        assertEquals(10, own.starts.size());
+    }
+
+    @Test public void stalledPaginationNeverMarksItsPartialOwnWindowFresh() throws Exception {
+        own.fallback = ownPage(true, 0, payload(original("root", "work")));
+        ThreadApi.enqueue("root", threadPage(false, 0, "", incoming("reply", "root", "work")));
+        assertEquals(1, lookup.resolve(100, hints("reply"), () -> true).size());
+        int firstReads = own.starts.size();
+        enqueueOwnWindow("root", "work");
+        ThreadApi.enqueue("root", threadPage(false, 0, "", incoming("reply", "root", "work")));
+        assertEquals(1, lookup.resolve(100, hints("reply"), () -> true).size());
+        assertEquals(firstReads + 5, own.starts.size());
+    }
+
+    @Test public void aFreshThreadMissRefreshesTheOwnWindowWithoutWaitingForCacheExpiry() throws Exception {
+        enqueueOwnWindow("root", "work");
+        own.pages.add(ownPage(true, 10, payload(original("root", "work"))));
+        enqueueOwnWindow("new-root", "work");
+        ThreadApi.enqueue("root", threadPage(false, 0, "", incoming("first", "root", "work")));
+        ThreadApi.enqueue("root", threadPage(false, 0, ""));
+        ThreadApi.enqueue("root", threadPage(false, 0, ""));
+        ThreadApi.enqueue("new-root", threadPage(false, 0, "", incoming("second", "new-root", "work")));
+        assertEquals(1, lookup.resolve(100, hints("first"), () -> true).size());
+        List<NativeCommentThreadLookup.Match> matches = lookup.resolve(100, hints("second"), () -> true);
+        assertEquals(1, matches.size());
+        assertEquals("new-root", HostTargets.read(matches.get(0).original, "cid"));
+        assertEquals(11, own.starts.size());
+    }
+
+    @Test public void freshHeadRevocationCannotBeUndoneByAnOlderWindowPage() throws Exception {
+        enqueueOwnWindow("root", "work");
+        ThreadApi.enqueue("root", threadPage(false, 0, "", incoming("reply", "root", "work")));
+        assertEquals(1, lookup.resolve(100, hints("reply"), () -> true).size());
+        CommentNotice hidden = payload(original("root", "work")); hidden.commentUnvisible = 1;
+        own.pages.add(ownPage(true, 10, hidden));
+        own.pages.add(ownPage(true, 11, payload(original("root", "work"))));
+        for (int page = 2; page < 5; page++) own.pages.add(ownPage(true, 10 + page));
+        ThreadApi.enqueue("root", threadPage(false, 0, "", incoming("reply", "root", "work")));
+        int reads = ThreadApi.calls.size();
+        assertTrue(lookup.resolve(100, hints("reply"), () -> true).isEmpty());
+        assertEquals(reads, ThreadApi.calls.size());
+    }
+
+    @Test public void freshHeadRevocationSurvivesTheSameResolvesCacheMissRefresh() throws Exception {
+        own.pages.add(ownPage(true, 10, payload(original("root-a", "work")), payload(original("root-b", "work"))));
+        for (int page = 1; page < 5; page++) own.pages.add(ownPage(true, 10 + page));
+        ThreadApi.enqueue("root-a", threadPage(false, 0, "", incoming("first", "root-a", "work")));
+        assertEquals(1, lookup.resolve(100, hints("first"), () -> true).size());
+
+        CommentNotice hidden = payload(original("root-a", "work")); hidden.commentUnvisible = 1;
+        own.pages.add(ownPage(true, 10, hidden, payload(original("root-b", "work"))));
+        // The miss refresh no longer includes A at its head, but an older page repeats A.
+        own.pages.add(ownPage(true, 10, payload(original("root-b", "work"))));
+        own.pages.add(ownPage(true, 11, payload(original("root-a", "work"))));
+        for (int page = 2; page < 5; page++) own.pages.add(ownPage(true, 10 + page));
+        ThreadApi.enqueue("root-b", threadPage(false, 0, ""));
+        ThreadApi.enqueue("root-b", threadPage(false, 0, ""));
+        ThreadApi.enqueue("root-a", threadPage(false, 0, "", incoming("second", "root-a", "work")));
+
+        assertTrue("A full refresh within the same resolve must retain the fresh head's revocation",
+                lookup.resolve(100, hints("second"), () -> true).isEmpty());
+        assertEquals(1, ThreadApi.calls.stream().filter(call -> "root-a".equals(call.LJII)).count());
+        own.pages.add(ownPage(false, 0, payload(original("root-a", "work"))));
+        ThreadApi.enqueue("root-b", threadPage(false, 0, ""));
+        assertEquals("A later independent resolve may accept a freshly visible original again", 1,
+                lookup.resolve(100, hints("second"), () -> true).size());
+    }
+
+    private void enqueueOwnWindow(String root, String work) {
+        own.pages.add(ownPage(true, 10, payload(original(root, work))));
+        for (int page = 1; page < 5; page++) own.pages.add(ownPage(true, 10 + page));
+    }
+
     @Test public void obfuscatedHostTaskCompletesAReplyReadWithoutStandardBoltsMethodNames() throws Exception {
         own.pages.add(ownPage(false, 0, payload(original("root", "work"))));
         Task task = new Task(threadPage(false, 0, "", incoming("reply", "root", "work")));

@@ -280,7 +280,8 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
                 rebuildAutomationPanel(panel, build[0]);
             });
             if (repository.getBoolean(kind + "_tip", false)) {
-                addEditableOption(panel, "提示超时（秒）", "", repository.getString(kind + "_notice_seconds", "8"), true, true, value -> {
+                addEditableOption(panel, "提示超时（秒）", "", repository.getString(kind + "_notice_seconds",
+                        Integer.toString(AutomationMessageSettings.DEFAULT_NOTICE_SECONDS)), true, true, value -> {
                     repository.putString(kind + "_notice_seconds", value);
                 });
             }
@@ -371,7 +372,8 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
             media[0].setEnabled(ai);
         });
         addOption(panel, "评论内容", "", null, true, this::showCommentContentSettings);
-        addSwitch(panel, "语音评论", "", repository.getBoolean(LocalOptions.COMMENT_VOICE, false), true,
+        addSwitch(panel, "语音评论", "AI 语音评论尽量简洁，最终使用完整正文，不截断音频；实际上传失败仍遵循原回退与防重。",
+                repository.getBoolean(LocalOptions.COMMENT_VOICE, false), true,
                 value -> repository.putBoolean(LocalOptions.COMMENT_VOICE, value));
         OptionRow[] scope = new OptionRow[1];
         scope[0] = addOption(panel, "作品范围", "", scopeLabel(ContentScopePolicy.scopeMode("comment", repository.scope("comment"))),

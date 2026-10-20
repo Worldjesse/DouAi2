@@ -104,19 +104,32 @@ public final class SpeechPreparationTest {
         audio.delete();
     }
 
-    @Test public void commentTransfersTheOriginalFileWithoutImEncodingOrDurationClipping() throws Exception {
+    @Test public void commentTransfersCapturedLongAudioWithoutAssumingRecorderLimitIsAnUploadLimit() throws Exception {
+        File source = temporary.newFile("captured-33516ms.mp3");
+        SpeechPreparation.Audio audio = SpeechPreparation.prepareComment(null, "hello", options, Long.MAX_VALUE,
+                () -> true, (context, text, settings, completed) -> {
+                    completed.accept(new LocalSpeechSynthesis.Result(source, 33_516), null);
+                    return () -> { };
+                });
+        assertEquals(33_516, audio.duration);
+        assertEquals(source, audio.file);
+        assertTrue(source.exists());
+        audio.delete();
+    }
+
+    @Test public void commentTransfersValidOriginalFileWithoutImEncodingOrDurationClipping() throws Exception {
         File source = temporary.newFile("comment.mp3");
         AtomicReference<BiConsumer<LocalSpeechSynthesis.Result, String>> callback = new AtomicReference<>();
         SpeechPreparation.Audio audio = SpeechPreparation.prepareComment(null, "hello", options, Long.MAX_VALUE,
                 () -> true, (context, text, settings, completed) -> {
                     callback.set(completed);
-                    completed.accept(new LocalSpeechSynthesis.Result(source, 180_001), null);
-                    return () -> completed.accept(new LocalSpeechSynthesis.Result(source, 180_001), null);
+                    completed.accept(new LocalSpeechSynthesis.Result(source, 28_260), null);
+                    return () -> completed.accept(new LocalSpeechSynthesis.Result(source, 28_260), null);
                 });
         assertEquals(source, audio.file);
-        assertEquals(180_001, audio.duration);
+        assertEquals(28_260, audio.duration);
         assertTrue(source.exists());
-        callback.get().accept(new LocalSpeechSynthesis.Result(source, 180_001), null);
+        callback.get().accept(new LocalSpeechSynthesis.Result(source, 28_260), null);
         assertTrue(source.exists());
         File late = temporary.newFile("unexpected.mp3");
         callback.get().accept(new LocalSpeechSynthesis.Result(late, 1000), null);
@@ -162,5 +175,26 @@ public final class SpeechPreparationTest {
         assertTrue(encoding.diagnostic().contains("reason=unsupported_pcm"));
         assertTrue(encoding.diagnostic().contains("sourceMillis=25000"));
         assertFalse(source.exists());
+    }
+
+    @Test public void providerAndHttpDiagnosticCodesAreNumericWithoutKeepingResponseText() {
+        SpeechPreparation.Failure limited = new SpeechPreparation.Failure("synthesis", 0, 0,
+                new IllegalArgumentException("MiniMax 语音接口返回错误码 1002，private-text https://provider/?key=private-key"));
+        assertEquals(1002, limited.providerCode());
+        assertEquals(-1, limited.httpCode());
+        assertTrue(limited.diagnostic().contains("providerCode=1002"));
+        assertFalse(limited.diagnostic().contains("private"));
+        assertFalse(limited.diagnostic().contains("provider/"));
+        assertFalse(limited.durationLimited());
+        SpeechPreparation.Failure unavailable = new SpeechPreparation.Failure("synthesis", 0, 0,
+                new IllegalStateException("MiniMax 语音 POST 返回 HTTP 429"));
+        assertEquals(429, unavailable.httpCode());
+        assertEquals(-1, unavailable.providerCode());
+        assertTrue(unavailable.diagnostic().contains("httpCode=429"));
+        SpeechPreparation.Failure arbitrary = new SpeechPreparation.Failure("synthesis", 0, 0,
+                new IllegalStateException("provider response 1002 private-key HTTP 429"));
+        assertEquals(-1, arbitrary.httpCode());
+        assertEquals(-1, arbitrary.providerCode());
+        assertFalse(arbitrary.diagnostic().contains("private"));
     }
 }

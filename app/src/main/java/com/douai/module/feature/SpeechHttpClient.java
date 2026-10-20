@@ -12,6 +12,7 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.StringReader;
 import java.net.HttpURLConnection;
 import java.net.URI;
@@ -30,7 +31,7 @@ import java.util.concurrent.CancellationException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Bounded, cancellable GET transport for speech and a separately configured voice list. */
+/** Bounded, cancellable transport shared by speech providers and voice lists. */
 public final class SpeechHttpClient {
     public static final int MAX_AUDIO_BYTES = 20 * 1024 * 1024;
     public static final int MAX_TEXT_BYTES = 2 * 1024 * 1024;
@@ -52,7 +53,7 @@ public final class SpeechHttpClient {
         public final byte[] bytes;
         public final String contentType;
 
-        private Resource(byte[] bytes, String contentType) {
+        Resource(byte[] bytes, String contentType) {
             this.bytes = bytes;
             this.contentType = contentType == null ? "" : contentType;
         }
@@ -133,6 +134,12 @@ public final class SpeechHttpClient {
             return text;
         }
 
+        public String postJson(String url, String headers, String body) throws IOException {
+            String text = fetch(url, headers, MAX_TEXT_BYTES, body).text();
+            ensureActive();
+            return text;
+        }
+
         public List<VoiceCatalog.Entry> fetchVoices(SpeechSettings settings) throws IOException {
             String url = resolveTemplate(settings.voiceGetTemplate, "", settings.selectedVoice);
             String body = fetchText(url, settings.voiceHeaders);
@@ -143,8 +150,13 @@ public final class SpeechHttpClient {
         }
 
         private Resource fetch(String url, String headersJson, int limit) throws IOException {
+            return fetch(url, headersJson, limit, null);
+        }
+
+        private Resource fetch(String url, String headersJson, int limit, String body) throws IOException {
             URI endpoint = endpoint(url);
             Map<String, String> headers = headers(headersJson);
+            String operation = body == null ? "第三方语音 GET" : "MiniMax 语音 POST";
             synchronized (this) {
                 ensureActive();
                 if (inProgress) throw new IllegalStateException("第三方语音请求正在进行");
@@ -155,7 +167,7 @@ public final class SpeechHttpClient {
             try {
                 opened = (HttpURLConnection) endpoint.toURL().openConnection();
                 synchronized (this) { ensureActive(); connection = opened; }
-                opened.setRequestMethod("GET");
+                opened.setRequestMethod(body == null ? "GET" : "POST");
                 opened.setInstanceFollowRedirects(false);
                 opened.setConnectTimeout(15_000);
                 opened.setReadTimeout(30_000);
@@ -163,13 +175,24 @@ public final class SpeechHttpClient {
                 for (Map.Entry<String, String> header : headers.entrySet()) {
                     opened.setRequestProperty(header.getKey(), header.getValue());
                 }
+                if (body != null) {
+                    byte[] encoded = body.getBytes(StandardCharsets.UTF_8);
+                    if (encoded.length > MAX_TEXT_BYTES) throw new IllegalArgumentException("MiniMax 语音请求过大");
+                    opened.setDoOutput(true);
+                    opened.setFixedLengthStreamingMode(encoded.length);
+                    opened.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                    try (OutputStream output = opened.getOutputStream()) {
+                        ensureActive();
+                        output.write(encoded);
+                    }
+                }
                 int status = opened.getResponseCode();
                 ensureActive();
                 if (System.nanoTime() > deadline) throw new SocketTimeoutException();
                 if (status >= 300 && status < 400) {
-                    throw new IllegalArgumentException("第三方语音 GET 不跟随重定向，请填写最终地址");
+                    throw new IllegalArgumentException(operation + " 不跟随重定向，请填写最终地址");
                 }
-                if (status < 200 || status >= 300) throw new IOException("第三方语音 GET 返回 HTTP " + status);
+                if (status < 200 || status >= 300) throw new IOException(operation + " 返回 HTTP " + status);
                 if (opened.getContentLengthLong() > limit) throw tooLarge(limit);
                 byte[] bytes;
                 try (InputStream input = opened.getInputStream(); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
@@ -189,19 +212,20 @@ public final class SpeechHttpClient {
                 return new Resource(bytes, opened.getContentType());
             } catch (SocketTimeoutException ignored) {
                 ensureActive();
-                throw new IOException("第三方语音 GET 请求超时");
+                throw new IOException(operation + " 请求超时");
             } catch (IOException failure) {
                 ensureActive();
                 // Never retain URL-bearing transport exceptions or provider response bodies.
                 String message = failure.getMessage();
-                if (message != null && message.matches("第三方语音 GET 返回 HTTP [0-9]{3}")) {
+                if (message != null && message.matches("(?:第三方语音 GET|MiniMax 语音 POST) 返回 HTTP [0-9]{3}")) {
                     throw new IOException(message);
                 }
-                throw new IOException("第三方语音 GET 请求失败");
+                throw new IOException(operation + " 请求失败");
             } catch (IllegalArgumentException failure) {
                 ensureActive();
-                if (failure.getMessage() != null && failure.getMessage().startsWith("第三方语音")) throw failure;
-                throw new IllegalArgumentException("第三方语音 GET 请求无效");
+                if (failure.getMessage() != null && (failure.getMessage().startsWith("第三方语音")
+                        || failure.getMessage().startsWith("MiniMax 语音"))) throw failure;
+                throw new IllegalArgumentException(operation + " 请求无效");
             } finally {
                 synchronized (this) { connection = null; inProgress = false; }
                 if (opened != null) opened.disconnect();

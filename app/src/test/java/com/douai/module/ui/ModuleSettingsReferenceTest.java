@@ -113,7 +113,32 @@ public final class ModuleSettingsReferenceTest {
         }
     }
 
-    @Test public void settingsSwitchRowsKeepTheirTitlesAndCurrentValuesWithoutExplanatorySubtitles() {
+    @Test public void searchFindsAiSpeechAndDownloadPathsAndOnlyNavigates() {
+        Map<String, Object> saved = new HashMap<>(store.values);
+        EditText search = home.findViewWithTag("settings.search");
+        String[][] cases = {{"API Key", "ai", "扩展功能 > AI 模型设置", "settings.option.添加模型配置"},
+                {"minimax", "speech", "扩展功能 > 文本转语音设置", "settings.option.语音来源"},
+                {"保存目录", "download-directory", "下载相关 > 保存位置", "settings.option.保存位置"},
+                {"去水印", "download-watermark", "下载相关 > 无水印下载图集或者视频", "settings.toggle.无水印下载图集或者视频"}};
+        for (String[] item : cases) {
+            search.setText(item[0]);
+            View result = home.findViewWithTag("settings.search.result." + item[1]);
+            assertNotNull(item[0], result);
+            assertEquals(View.VISIBLE, result.getVisibility());
+            assertTrue(containsText(result, item[2]));
+            result.performClick();
+            Dialog destination = ShadowDialog.getLatestDialog();
+            assertTrue(destination.isShowing());
+            assertNotNull(destination.getWindow().getDecorView().findViewWithTag(item[3]));
+            assertEquals(saved, store.values);
+            screen.dismissChildPages();
+        }
+        search.setText("");
+        assertEquals(View.GONE, home.findViewWithTag("settings.search.results").getVisibility());
+        assertEquals(saved, store.values);
+    }
+
+    @Test public void settingsSwitchRowsKeepCompactLabelsAndVoiceCommentExplainsItsContentPolicy() {
         store.putString("playback_speed", "1.75");
         for (String category : new String[]{"BASIC", "INTERFACE", "FILTER", "DOWNLOAD", "AUTOPLAY",
                 "AUTO_REPLY", "AUTO_COMMENT", "COMMENT", "STREAK", "MESSAGE", "SPOOF"}) {
@@ -125,7 +150,13 @@ public final class ModuleSettingsReferenceTest {
                 for (int index = 0; index < labels.getChildCount(); index++) {
                     if (labels.getChildAt(index).getVisibility() == View.VISIBLE) visibleLabels++;
                 }
-                assertEquals(category + ": " + control.getContentDescription(), 1, visibleLabels);
+                boolean voiceComment = "语音评论".contentEquals(control.getContentDescription());
+                assertEquals(category + ": " + control.getContentDescription(), voiceComment ? 2 : 1, visibleLabels);
+                if (voiceComment) {
+                    assertTrue(containsText(labels, "最终使用完整正文，不截断音频"));
+                    assertTrue(containsText(labels, "实际上传失败仍遵循原回退与防重"));
+                    assertFalse(containsText(labels, "30秒"));
+                }
             }
             if ("AUTOPLAY".equals(category)) {
                 assertEquals("1.75", ((TextView) page.findViewWithTag("settings.value.倍速数值")).getText().toString());
@@ -978,10 +1009,11 @@ public final class ModuleSettingsReferenceTest {
         toggle(delivery, "悬浮提示").setChecked(true);
         option(delivery, "提示超时（秒）").performClick();
         AlertDialog editor = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertEquals("3", collect(editor.getWindow().getDecorView(), EditText.class).get(0).getText().toString());
         setEditorInput(editor, "提示超时（秒）", "999");
         editor.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
         assertTrue(editor.isShowing());
-        assertEquals("8", store.getString("reply_notice_seconds", "8"));
+        assertFalse(store.values.containsKey("reply_notice_seconds"));
         editor.dismiss();
         screen.dismissChildPages();
         View comment = openCategory("AUTO_COMMENT");
@@ -1003,6 +1035,30 @@ public final class ModuleSettingsReferenceTest {
         ShadowLooper.idleMainLooper();
         assertEquals("评论提示词", store.getString("comment_prompt", ""));
         assertEquals("回复提示词\n".repeat(4000), store.getString("reply_prompt", ""));
+    }
+
+    @Test public void noticeDurationEditorShowsThreeWithoutWritingAndPreservesSavedEightForBothKinds() {
+        for (String[] feature : new String[][]{{"reply", "AUTO_REPLY"}, {"comment", "AUTO_COMMENT"}}) {
+            String key = feature[0] + "_notice_seconds";
+            store.putBoolean(feature[0] + "_tip", true);
+            for (String saved : new String[]{null, "8"}) {
+                if (saved == null) store.values.remove(key);
+                else store.putString(key, saved);
+                View category = openCategory(feature[1]);
+                option(category, "发送与记录").performClick();
+                View delivery = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+                TextView shown = delivery.findViewWithTag("settings.value.提示超时（秒）");
+                assertEquals(saved == null ? "3" : "8", shown.getText().toString());
+                option(delivery, "提示超时（秒）").performClick();
+                Dialog editor = ShadowDialog.getLatestDialog();
+                assertEquals(saved == null ? "3" : "8",
+                        collect(editor.getWindow().getDecorView(), EditText.class).get(0).getText().toString());
+                editor.dismiss();
+                screen.dismissChildPages();
+                if (saved == null) assertFalse(store.values.containsKey(key));
+                else assertEquals("8", store.getString(key, ""));
+            }
+        }
     }
 
     @Test

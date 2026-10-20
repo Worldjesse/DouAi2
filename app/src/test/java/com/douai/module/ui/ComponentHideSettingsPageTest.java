@@ -110,7 +110,8 @@ public final class ComponentHideSettingsPageTest {
         View home = screen.createView();
         activity.setContentView(home);
 
-        EditText search = (EditText) findDescription(home, "搜索设置分类");
+        EditText search = home.findViewWithTag("settings.search");
+        assertNotNull(search);
         for (String query : Arrays.asList("本地数据分析", "配置备份", "数据备份")) {
             search.setText(query);
             assertEquals(query, View.VISIBLE, findDescription(home, "扩展功能").getVisibility());

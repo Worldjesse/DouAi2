@@ -180,6 +180,238 @@ public final class LocalAnalyticsDialogTest {
         assertEquals(AI_TEXTS[2], text("analytics.analysis.text.types"));
     }
 
+    @Test public void completedAiResultIsReadableInsideTheReportWithoutExpandingEveryChart() {
+        source.data = fixture();
+        drain();
+        View chart = find("analytics.types.chart");
+        find("analytics.analysis.request").performClick();
+        finishAnalysis();
+        TextView result = find("analytics.analysis.result");
+        assertTrue("The report must directly show the completed analysis", result.isShown());
+        for (String section : AI_TEXTS) assertTrue("The visible report must include every existing AI section",
+                result.getText().toString().contains(section));
+        assertTrue(result.isTextSelectable());
+        assertEquals(View.GONE, find("analytics.section.body.types").getVisibility());
+        assertSame(chart, find("analytics.types.chart"));
+        assertEquals(1, analysis.requests.size());
+        assertEquals(1, analysis.requests.get(0).runs);
+    }
+
+    @Test public void fullReportImageShareIsAvailableWithoutAiAndDoesNotRequestAiAgain() {
+        source.data = fixture();
+        drain();
+        View imageShare = find("analytics.report.share.image");
+        assertNotNull("The complete report must be shareable as an image before requesting AI", imageShare);
+        assertTrue(text("analytics.report.share.note").contains("一张长图 PNG 或一份 PDF"));
+        imageShare.performClick();
+        ((AlertDialog) ShadowDialog.getLatestDialog()).dismiss();
+        drain();
+        assertTrue(analysis.requests.isEmpty());
+        assertTrue(imageShare.isEnabled());
+    }
+
+    @Test public void reportExportOffersOneLongPngOrPdfWithoutStartingAnotherAiRequest() {
+        source.data = fixture(); drain();
+        TextView export = find("analytics.report.share.image");
+        assertEquals("导出/分享报告", export.getText().toString());
+        export.performClick(); ShadowLooper.idleMainLooper();
+        AlertDialog formats = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertNotSame(page.dialog(), formats);
+        assertNotNull(formats.getListView());
+        assertEquals("长图 PNG", formats.getListView().getAdapter().getItem(0));
+        assertEquals("PDF 文档", formats.getListView().getAdapter().getItem(1));
+        formats.dismiss();
+        assertTrue(analysis.requests.isEmpty());
+        assertNull(((ShadowActivity) Shadow.extract(activity)).getNextStartedActivity());
+    }
+
+    @Test public void paperReportCaptureDoesNotRelayoutTheOnscreenChartsOrChangeTheirFoldState() {
+        source.data = fixture(); drain(); expandSection("types");
+        View root = find("analytics.root");
+        root.measure(View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY));
+        root.layout(0, 0, 360, 600);
+        View chart = find("analytics.types.chart");
+        java.util.concurrent.atomic.AtomicInteger relayouts = new java.util.concurrent.atomic.AtomicInteger();
+        chart.addOnLayoutChangeListener((view, l, t, r, b, ol, ot, or, ob) -> relayouts.incrementAndGet());
+        ScrollView scroll = find("analytics.scroll"); scroll.scrollTo(0, 120);
+        int previousScroll = scroll.getScrollY();
+        page.captureReportImage(1080, 4096);
+        assertEquals("Export must build a detached report rather than resize the live UI", 0, relayouts.get());
+        assertEquals(View.VISIBLE, find("analytics.section.body.types").getVisibility());
+        assertEquals(previousScroll, scroll.getScrollY());
+        assertSame(chart, find("analytics.types.chart"));
+    }
+
+    @Test public void paperReportArtifactsContainCompleteLongAiInOnePngAndOnePdf() throws Exception {
+        source.data = portraitFixture();
+        JSONObject answer = new JSONObject(analysisResponse());
+        String detail = "只依据本地样本解释内容接触，次数不等于实际观看时长，未记录的时段保持未知。".repeat(5);
+        for (String key : AI_KEYS) answer.put(key, detail);
+        answer.put("portraitTitle", "一份完整的阶段报告");
+        answer.put("portrait", "本地记录覆盖 42 位作者和 17 个话题，采集边界必须与侧写同时展示。".repeat(4));
+        answer.put("contrasts", "与前期对照存在采集缺口，不能由计数变化直接推断动机。");
+        answer.put("questions", "哪些内容来自主动搜索，哪些来自首页推荐？");
+        answer.put("hours", detail + "报告尾部完整性标记：最后一段时段分析仍完整保留。");
+        analysis.response = answer.toString();
+        drain(); find("analytics.analysis.request").performClick(); finishAnalysis();
+        assertNull(find("analytics.analysis.error"));
+        assertEquals(View.GONE, find("analytics.section.body.types").getVisibility());
+        View chart = find("analytics.portrait.rhythm.chart");
+        ReportImageExport.Document light = page.captureReportImage(1080, 4096);
+        writeReportFiles(light, "paper-report-light");
+        RuntimeEnvironment.setQualifiers("+night"); ModuleTheme.bind(find("analytics.root"));
+        ReportImageExport.Document dark = page.captureReportImage(1080, 4096);
+        writeReportFiles(dark, "paper-report-dark-host");
+        assertEquals(light.longPngHeight(), dark.longPngHeight());
+        assertEquals(light.pdfPageCount(), dark.pdfPageCount());
+        assertEquals(View.GONE, find("analytics.section.body.types").getVisibility());
+        assertSame(chart, find("analytics.portrait.rhythm.chart"));
+        assertEquals(1, analysis.requests.size());
+    }
+
+    @Test public void paperRendererKeepsAllUniqueSectionsAndOneFullAiResultWithoutControlsOrActivity() throws Exception {
+        AnalyticsAiAnalysis.Result result = AnalyticsAiAnalysis.parseResult(analysisResponse());
+        View paper = ReportPresentation.build(activity, portraitFixture(), "最近 7 天", 1_792_550_000_000L,
+                result, "测试模型", "最近 7 天", 1_792_549_000_000L);
+        assertNull(paper.getParent());
+        assertFalse(paper.getContext() instanceof Activity);
+        assertEquals(160, paper.getResources().getConfiguration().densityDpi);
+        assertEquals(1f, paper.getResources().getConfiguration().fontScale, 0);
+        String content = paperText(paper);
+        for (String title : List.of("我的本地使用报告", "浏览足迹", "内容构成", "话题排行", "接触来源曲线",
+                "星期 × 小时", "话题迁移", "从接触到行动", "作者排行", "话题排行", "模块功能排行",
+                "最近记录", "使用历程", "来源与阅读边界")) assertTrue(title, content.contains(title));
+        for (String value : AI_TEXTS) assertEquals("AI paragraphs must appear once", 1, occurrences(content, value));
+        assertFalse(content.contains("点选")); assertFalse(content.contains("请求 AI 分析"));
+        assertNoPaperControls(paper);
+        paper.measure(View.MeasureSpec.makeMeasureSpec(540, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        paper.layout(0, 0, 540, paper.getMeasuredHeight());
+        assertNoClippedText(paper);
+    }
+
+    @Test public void paperRendererUsesFixedLightColorsEvenWhenHostIsDarkAndLargeFont() throws Exception {
+        AnalyticsSnapshot snapshot = portraitFixture();
+        long now = 1_792_550_000_000L;
+        View light = ReportPresentation.build(activity, snapshot, "最近 7 天", now, null, null, "", 0);
+        Bitmap before = paperBitmap(light);
+        RuntimeEnvironment.setQualifiers("+night");
+        activity.getResources().getConfiguration().fontScale = 1.6f;
+        View darkHost = ReportPresentation.build(activity, snapshot, "最近 7 天", now, null, null, "", 0);
+        Bitmap after = paperBitmap(darkHost);
+        try {
+            assertEquals(before.getHeight(), after.getHeight());
+            assertTrue("Paper export must be independent from host theme/font", before.sameAs(after));
+            assertEquals(android.graphics.Color.WHITE, after.getPixel(0, 0));
+            assertTrue(paperText(darkHost).contains("尚无 AI 分析结果"));
+        } finally { before.recycle(); after.recycle(); }
+    }
+
+    @Test public void paperRendererPreservesCoverageWithoutDayBucketsAndAvoidsEmptyPortraitCharts() {
+        View paper = ReportPresentation.build(activity, AnalyticsSnapshot.empty(), "最近 7 天", 1_792_550_000_000L,
+                null, null, "", 0);
+        String content = paperText(paper);
+        assertTrue(content.contains("尚无可用记录；采集默认关闭。"));
+        assertTrue(content.contains("这份侧写知道什么、还不知道什么"));
+        assertTrue(content.contains("尚无 AI 分析结果"));
+        assertNull(paper.findViewWithTag("analytics.portrait.calendar.chart"));
+        assertNull(paper.findViewWithTag("analytics.portrait.comparison.chart"));
+    }
+
+    private static Bitmap paperBitmap(View paper) {
+        paper.measure(View.MeasureSpec.makeMeasureSpec(540, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        paper.layout(0, 0, 540, paper.getMeasuredHeight());
+        Bitmap bitmap = Bitmap.createBitmap(540, paper.getHeight(), Bitmap.Config.ARGB_8888);
+        paper.draw(new Canvas(bitmap)); return bitmap;
+    }
+
+    private static String paperText(View view) {
+        StringBuilder text = new StringBuilder();
+        if (view instanceof TextView) text.append(((TextView) view).getText()).append('\n');
+        if (view instanceof ViewGroup) for (int i = 0; i < ((ViewGroup) view).getChildCount(); i++)
+            text.append(paperText(((ViewGroup) view).getChildAt(i)));
+        return text.toString();
+    }
+    private static int occurrences(String value, String needle) {
+        int count = 0; for (int from = 0; (from = value.indexOf(needle, from)) >= 0; from += needle.length()) count++;
+        return count;
+    }
+    private static void assertNoPaperControls(View view) {
+        assertFalse(view instanceof android.widget.Button); assertFalse(view instanceof android.widget.EditText);
+        assertFalse(view instanceof android.widget.Spinner); assertFalse(view instanceof android.widget.CompoundButton);
+        assertFalse(view.isClickable());
+        if (view instanceof ViewGroup) for (int i = 0; i < ((ViewGroup) view).getChildCount(); i++)
+            assertNoPaperControls(((ViewGroup) view).getChildAt(i));
+    }
+
+    @Test public void closingBeforeImageCallbackDeletesSavedPagesAndCannotOpenTheChooser() throws Exception {
+        source.data = fixture(); drain();
+        ReportImageExportTest.MediaProvider provider = ReportImageExportTest.provider(activity);
+        chooseReportFormat(0);
+        worker.runNext(); // PNGs are saved; the chooser callback has not reached the main thread.
+        assertTrue(provider.inserts > 0);
+        page.close();
+        while (!worker.tasks.isEmpty()) worker.runNext();
+        ShadowLooper.idleMainLooper();
+        provider.awaitDeleted(provider.inserts);
+        assertTrue(provider.files.isEmpty()); assertEquals(provider.inserts, provider.deletes);
+        assertNull(((ShadowActivity) Shadow.extract(activity)).getNextStartedActivity());
+        assertTrue(analysis.requests.isEmpty());
+    }
+
+    @Test public void changingRangeRejectsThePreviousImageCallbackAndClearsItsAiResult() throws Exception {
+        source.data = fixture(); drain();
+        find("analytics.analysis.request").performClick(); finishAnalysis();
+        ReportImageExportTest.MediaProvider provider = ReportImageExportTest.provider(activity);
+        chooseReportFormat(0); worker.runNext();
+        find("analytics.range.30").performClick(); drain();
+        provider.awaitDeleted(provider.inserts);
+        assertTrue(provider.files.isEmpty()); assertEquals(provider.inserts, provider.deletes);
+        assertNull(((ShadowActivity) Shadow.extract(activity)).getNextStartedActivity());
+        assertNull(find("analytics.analysis.result")); assertEquals(1, analysis.requests.size());
+    }
+
+    @Test public void closingAfterChooserHandoffKeepsAllReportImagesReadable() {
+        source.data = fixture(); drain();
+        ReportImageExportTest.MediaProvider provider = ReportImageExportTest.provider(activity);
+        chooseReportFormat(0); drain();
+        Intent chooser = ((ShadowActivity) Shadow.extract(activity)).getNextStartedActivity();
+        assertNotNull(chooser); assertEquals(Intent.ACTION_CHOOSER, chooser.getAction());
+        page.close(); while (!worker.tasks.isEmpty()) worker.runNext();
+        assertEquals(0, provider.deletes); assertEquals(provider.inserts, provider.files.size());
+        for (File file : provider.files.values()) assertTrue(file.length() > 0);
+        assertTrue(analysis.requests.isEmpty());
+    }
+
+    private void chooseReportFormat(int index) {
+        find("analytics.report.share.image").performClick();
+        AlertDialog formats = (AlertDialog) ShadowDialog.getLatestDialog();
+        formats.getListView().performItemClick(null, index, index); ShadowLooper.idleMainLooper();
+    }
+
+    private static void writeReportFiles(ReportImageExport.Document document, String prefix) throws Exception {
+        File root = new File(".").getCanonicalFile();
+        while (root != null && !new File(root, "gradlew.bat").isFile()) root = root.getParentFile();
+        assertNotNull("Project root for export artifacts", root);
+        File directory = new File(root, "artifacts/diagnostics-0.2.4/report-exports");
+        assertTrue(directory.isDirectory() || directory.mkdirs());
+        File png = new File(directory, prefix + ".png"), pdf = new File(directory, prefix + ".pdf");
+        try (FileOutputStream output = new FileOutputStream(png)) { document.write(ReportImageExport.Format.LONG_PNG, output, () -> true); }
+        Bitmap decoded = android.graphics.BitmapFactory.decodeFile(png.getAbsolutePath());
+        assertNotNull(decoded); assertEquals(1080, decoded.getWidth()); assertEquals(document.longPngHeight(), decoded.getHeight());
+        assertTrue(decoded.getHeight() > 4096);
+        decoded.recycle();
+        try (FileOutputStream output = new FileOutputStream(pdf)) { document.write(ReportImageExport.Format.PDF, output, () -> true); }
+        assertTrue(pdf.length() > 1000); assertTrue(document.pdfPageCount() > 1);
+        JSONObject index = new JSONObject().put("png", png.getName()).put("pdf", pdf.getName())
+                .put("pngWidth", 1080).put("pngHeight", document.longPngHeight()).put("pdfPages", document.pdfPageCount());
+        try (FileOutputStream output = new FileOutputStream(new File(directory, prefix + "-index.json"))) {
+            output.write(index.toString(2).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+
     @Test public void collapsingPortraitPreservesInlineEvidenceAndChartSelection() {
         source.data = portraitFixture();
         drain();
@@ -314,7 +546,7 @@ public final class LocalAnalyticsDialogTest {
         assertNull(find("analytics.analysis.share"));
         finishAnalysis();
         assertEquals(1, analysis.requests.get(0).runs);
-        assertEquals("分析已显示在各图表下方", text("analytics.analysis.result"));
+        for (String section : AI_TEXTS) assertTrue(text("analytics.analysis.result").contains(section));
         for (int index = 0; index < AI_KEYS.length; index++) {
             TextView sectionText = find("analytics.analysis.text." + AI_KEYS[index]);
             assertEquals(AI_TEXTS[index], sectionText.getText().toString());

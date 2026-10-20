@@ -78,6 +78,16 @@ public final class ModuleSettingsScreen {
     private MiuixSettingsViews.Home miuixHome;
     private MiuixComponentHidePage miuixComponentHidePage;
     private Context miuixRowContext;
+    private LinearLayout featureSearchResults;
+    private static final SearchEntry[] FEATURE_SEARCH = {
+            new SearchEntry("ai", "AI 模型与接口", "扩展功能 > AI 模型设置", "模型 API Key 密钥 提示词 OpenAI Claude Gemini DeepSeek 流式 推理", 0),
+            new SearchEntry("speech", "文本转语音与 MiniMax", "扩展功能 > 文本转语音设置", "TTS MiniMax 语音 音色 合成 语速 音量 音调 发音字典", 1),
+            new SearchEntry("download-mode", "下载方式", "下载相关 > 下载方式", "下载 官方 第三方 解析 API", 2),
+            new SearchEntry("download-directory", "保存位置", "下载相关 > 保存位置", "下载 保存目录 保存路径 文件夹 SAF", 2),
+            new SearchEntry("download-tasks", "下载任务", "下载相关 > 下载任务", "下载 进度 失败 任务", 2),
+            new SearchEntry("download-name", "文件名模板", "下载相关 > 文件名模板", "下载 文件名 命名 模板", 2),
+            new SearchEntry("download-watermark", "无水印下载", "下载相关 > 无水印下载图集或者视频", "下载 去水印 无水印 视频 图集", 2)
+    };
 
     public ModuleSettingsScreen(Context context, SettingsStore repository) {
         this(context, repository, null);
@@ -148,6 +158,16 @@ public final class ModuleSettingsScreen {
         String[] searchTerms = new String[categories.length];
         for (int index = 0; index < categories.length; index++) searchTerms[index] = categories[index].searchText();
         miuixHome.setSearchTerms(searchTerms);
+        String[] ids = new String[FEATURE_SEARCH.length], featureTitles = new String[FEATURE_SEARCH.length];
+        String[] paths = new String[FEATURE_SEARCH.length], terms = new String[FEATURE_SEARCH.length];
+        for (int index = 0; index < FEATURE_SEARCH.length; index++) {
+            SearchEntry entry = FEATURE_SEARCH[index];
+            ids[index] = entry.id;
+            featureTitles[index] = entry.title;
+            paths[index] = entry.path;
+            terms[index] = entry.searchText();
+        }
+        miuixHome.setFeatureSearch(ids, featureTitles, paths, terms, this::openFeatureSearch);
         View home = miuixHome.getView();
         home.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
             @Override public void onViewAttachedToWindow(View view) { }
@@ -168,12 +188,18 @@ public final class ModuleSettingsScreen {
         search.setSingleLine(true);
         search.setTextSize(15);
         search.setHint("搜索功能");
-        search.setContentDescription("搜索设置分类");
+        search.setContentDescription("搜索设置分类和功能");
+        search.setTag("settings.search");
         search.setPadding(dp(16), dp(8), dp(16), dp(8));
         search.setBackground(makeRounded(Color.rgb(238, 239, 243), LINE, dp(24)));
         LinearLayout.LayoutParams params = matchWrap();
         params.topMargin = dp(18);
         content.addView(search, params);
+        featureSearchResults = new LinearLayout(context);
+        featureSearchResults.setOrientation(LinearLayout.VERTICAL);
+        featureSearchResults.setTag("settings.search.results");
+        featureSearchResults.setVisibility(View.GONE);
+        content.addView(featureSearchResults, matchWrap());
         search.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
@@ -182,9 +208,37 @@ public final class ModuleSettingsScreen {
                     row.view.setVisibility(query.isEmpty() || row.category.searchText().toLowerCase(java.util.Locale.ROOT).contains(query)
                             ? View.VISIBLE : View.GONE);
                 }
+                showFeatureSearch(query);
             }
             @Override public void afterTextChanged(Editable s) { }
         });
+    }
+
+    private void showFeatureSearch(String query) {
+        featureSearchResults.removeAllViews();
+        featureSearchResults.setVisibility(query.isEmpty() ? View.GONE : View.VISIBLE);
+        if (query.isEmpty()) return;
+        for (int index = 0; index < FEATURE_SEARCH.length; index++) {
+            SearchEntry entry = FEATURE_SEARCH[index];
+            if (!entry.searchText().toLowerCase(java.util.Locale.ROOT).contains(query)) continue;
+            TextView row = text(entry.title + "\n" + entry.path, 15, TEXT, false);
+            row.setTag("settings.search.result." + entry.id);
+            row.setContentDescription(entry.title + "，" + entry.path);
+            row.setPadding(dp(16), dp(12), dp(16), dp(12));
+            row.setFocusable(true);
+            final int selected = index;
+            row.setOnClickListener(ignored -> openFeatureSearch(selected));
+            featureSearchResults.addView(row, matchWrap());
+        }
+    }
+
+    private void openFeatureSearch(int index) {
+        if (index < 0 || index >= FEATURE_SEARCH.length) return;
+        switch (FEATURE_SEARCH[index].destination) {
+            case 0: showAiModelSettings(); break;
+            case 1: showSpeechSettings(); break;
+            default: openCategory(Category.DOWNLOAD); break;
+        }
     }
 
     private void addCategoryList() {
@@ -194,6 +248,10 @@ public final class ModuleSettingsScreen {
         LinearLayout.LayoutParams listParams = matchWrap();
         listParams.topMargin = dp(14);
         content.addView(list, listParams);
+        if (featureSearchResults != null) {
+            content.removeView(featureSearchResults);
+            content.addView(featureSearchResults, matchWrap());
+        }
         categoryRows.clear();
         for (Category category : Category.values()) {
             LinearLayout row = new LinearLayout(context);
@@ -1811,6 +1869,16 @@ public final class ModuleSettingsScreen {
         String searchText() {
             return this == EXTENSION ? title + " AI 模型设置 文本转语音设置 本地数据分析 数据备份 配置备份" : title;
         }
+    }
+
+    /** Small navigation index: entries never read or mutate the user's saved values. */
+    private static final class SearchEntry {
+        final String id, title, path, terms;
+        final int destination;
+        SearchEntry(String id, String title, String path, String terms, int destination) {
+            this.id = id; this.title = title; this.path = path; this.terms = terms; this.destination = destination;
+        }
+        String searchText() { return title + " " + path + " " + terms; }
     }
 
     private static final class CategoryRow {

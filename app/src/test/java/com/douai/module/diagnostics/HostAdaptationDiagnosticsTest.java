@@ -69,6 +69,35 @@ public final class HostAdaptationDiagnosticsTest {
         assertTrue(HostAdaptationDiagnostics.describe(snapshot).contains("读取失败，未验证"));
     }
 
+    @Test public void performanceEvidenceDistinguishesCachedWorkAndWholeHostHeap() {
+        Bundle snapshot = new Bundle();
+        assertFalse(HostAdaptationDiagnostics.describe(snapshot).contains("耗时："));
+        snapshot.putBoolean("cache_hit", true);
+        snapshot.putLong("host_scan_millis", 12);
+        snapshot.putLong("host_java_heap_used_bytes", 32 * 1024 * 1024L);
+        String detail = HostAdaptationDiagnostics.describe(snapshot);
+        assertTrue(detail.contains("缓存读取耗时：12 ms"));
+        assertTrue(detail.contains("32 MiB"));
+        assertTrue(detail.contains("不能单独归因于模块"));
+        assertFalse(detail.contains("性能已验证"));
+    }
+
+    @Test public void newCapabilitiesExposeIndependentRuleAndInstallationEvidence() {
+        Bundle snapshot = new Bundle();
+        snapshot.putBoolean("feature.local_analytics.installed", true);
+        snapshot.putBoolean("feature.media_model.installed", true);
+        snapshot.putString("feature.native_auto_reply.failure", "NoSuchMethodException: fixture.Sender.send()");
+        HostAdaptationDiagnostics.append(snapshot, version("40.6.0", 400601L),
+                HostAdaptation.VERIFIED_RULES_FINGERPRINT, report("adv_im_global_received"));
+        assertFalse(snapshot.getBoolean("capability.native_auto_reply.rules_unique"));
+        assertTrue(snapshot.getString("capability.native_auto_reply.rule_gaps").contains("adv_im_global_received=AMBIGUOUS"));
+        assertEquals("NoSuchMethodException: fixture.Sender.send()",
+                snapshot.getString("capability.native_auto_reply.installation_failure"));
+        assertTrue(snapshot.getBoolean("capability.local_analytics.installed"));
+        assertTrue(snapshot.getBoolean("capability.media_model.rules_unique"));
+        assertTrue(HostAdaptationDiagnostics.describe(snapshot).contains("实际行为仍需真机确认"));
+    }
+
     @Test public void speechRuleGapIdentifiesAffectedCapabilityWithoutHidingOtherCapabilities() {
         Bundle snapshot = new Bundle();
         snapshot.putBoolean("feature.comment_tts.installed", true);

@@ -21,6 +21,16 @@ public final class AutomationHistoryStore {
     public static final String DELIVERY_UNKNOWN = "unknown";
     public static final String DELIVERY_TEXT = "text";
     public static final String DELIVERY_VOICE = "voice";
+    /** Diagnostic values are closed vocabularies: never store exception text, URLs or credentials. */
+    public enum Reason {
+        NONE, QUEUE_FULL, QUEUE_EXPIRED, INVALIDATED, CANCELLED, SETTINGS_CHANGED,
+        MEDIA_FAILED, GENERATION_TIMEOUT, GENERATION_FAILED, SPEECH_FAILED,
+        SEND_FAILED, SUBMITTED_UNCONFIRMED, LEDGER_WRITE_FAILED, PERSISTENCE_FAILED,
+        ALLOWANCE_EXHAUSTED, DUPLICATE, AI_HTTP_ERROR, AI_RATE_LIMITED, AI_AUTH_FAILED,
+        INVALID_RESPONSE
+    }
+    public enum Stage { NONE, QUEUE, MEDIA, GENERATION, SPEECH, SEND, COMPLETE }
+    private static final long MAX_DIAGNOSTIC_MILLIS = 7L * 24 * 60 * 60 * 1000;
     private static final String FILE = "douai_automation_history";
     private static final String KEY = "entries_v1";
     private static final int MAX_PER_KIND = 200;
@@ -100,7 +110,8 @@ public final class AutomationHistoryStore {
     private static Entry requestMetadata(Entry entry, int imageCount) {
         return new Entry(entry.id, entry.kind, entry.targetId, entry.targetName,
                 entry.input, entry.output, entry.modelName, entry.status, entry.createdAt, entry.updatedAt,
-                imageCount, true, entry.deliveryMode);
+                imageCount, true, entry.deliveryMode).withDiagnostics(entry.reason, entry.stage,
+                entry.queueMillis, entry.mediaMillis, entry.generationMillis, entry.sendMillis);
     }
 
     private static void trimKind(List<Entry> entries, String kind) {
@@ -134,7 +145,11 @@ public final class AutomationHistoryStore {
                             json.optString("modelName"), json.optString("status"),
                             json.optLong("createdAt"), json.optLong("updatedAt"),
                             json.optInt("requestImageCount", -1), json.optBoolean("modelRequestSent", false),
-                            json.optString("deliveryMode", DELIVERY_UNKNOWN)));
+                            json.optString("deliveryMode", DELIVERY_UNKNOWN)).withDiagnostics(
+                            diagnosticEnum(Reason.class, json.opt("reason"), Reason.NONE),
+                            diagnosticEnum(Stage.class, json.opt("stage"), Stage.NONE),
+                            diagnosticMillis(json.opt("queueMillis")), diagnosticMillis(json.opt("mediaMillis")),
+                            diagnosticMillis(json.opt("generationMillis")), diagnosticMillis(json.opt("sendMillis"))));
                 } catch (IllegalArgumentException ignored) { }
             }
         } catch (JSONException ignored) { }
@@ -160,7 +175,11 @@ public final class AutomationHistoryStore {
                         .put("modelName", entry.modelName).put("status", entry.status)
                         .put("createdAt", entry.createdAt).put("updatedAt", entry.updatedAt)
                         .put("requestImageCount", entry.requestImageCount).put("modelRequestSent", entry.modelRequestSent)
-                        .put("deliveryMode", entry.deliveryMode));
+                        .put("deliveryMode", entry.deliveryMode)
+                        .put("reason", entry.reason.name().toLowerCase(java.util.Locale.ROOT))
+                        .put("stage", entry.stage.name().toLowerCase(java.util.Locale.ROOT))
+                        .put("queueMillis", entry.queueMillis).put("mediaMillis", entry.mediaMillis)
+                        .put("generationMillis", entry.generationMillis).put("sendMillis", entry.sendMillis));
             } catch (JSONException impossible) { throw new IllegalStateException(impossible); }
         }
         return array.toString();
@@ -179,6 +198,23 @@ public final class AutomationHistoryStore {
         return text.substring(0, end);
     }
 
+    private static <T extends Enum<T>> T diagnosticEnum(Class<T> type, Object value, T fallback) {
+        if (!(value instanceof String)) return fallback;
+        for (T candidate : type.getEnumConstants()) {
+            if (candidate.name().toLowerCase(java.util.Locale.ROOT).equals(value)) return candidate;
+        }
+        return fallback;
+    }
+
+    private static long diagnosticMillis(Object value) {
+        if (!(value instanceof Integer) && !(value instanceof Long)) return -1;
+        return boundedMillis(((Number) value).longValue());
+    }
+
+    private static long boundedMillis(long value) {
+        return value >= -1 && value <= MAX_DIAGNOSTIC_MILLIS ? value : -1;
+    }
+
     public static final class Entry {
         public final String id;
         public final String kind;
@@ -193,6 +229,12 @@ public final class AutomationHistoryStore {
         public final int requestImageCount;
         public final boolean modelRequestSent;
         public final String deliveryMode;
+        public final Reason reason;
+        public final Stage stage;
+        public final long queueMillis;
+        public final long mediaMillis;
+        public final long generationMillis;
+        public final long sendMillis;
 
         public Entry(String id, String kind, String targetId, String targetName,
                      String input, String output, String modelName, String status,
@@ -219,6 +261,15 @@ public final class AutomationHistoryStore {
                      String input, String output, String modelName, String status,
                      long createdAt, long updatedAt, int requestImageCount, boolean modelRequestSent,
                      String deliveryMode) {
+            this(id, kind, targetId, targetName, input, output, modelName, status, createdAt, updatedAt,
+                    requestImageCount, modelRequestSent, deliveryMode, Reason.NONE, Stage.NONE, -1, -1, -1, -1);
+        }
+
+        private Entry(String id, String kind, String targetId, String targetName,
+                      String input, String output, String modelName, String status,
+                      long createdAt, long updatedAt, int requestImageCount, boolean modelRequestSent,
+                      String deliveryMode, Reason reason, Stage stage,
+                      long queueMillis, long mediaMillis, long generationMillis, long sendMillis) {
             requireKind(kind);
             if (id == null || id.isEmpty()) throw new IllegalArgumentException("Entry ID is required");
             if (!"pending".equals(status) && !"cancelled".equals(status) && !"sent".equals(status)
@@ -240,6 +291,20 @@ public final class AutomationHistoryStore {
             this.modelRequestSent = this.requestImageCount >= 0 && modelRequestSent;
             this.deliveryMode = DELIVERY_TEXT.equals(deliveryMode) || DELIVERY_VOICE.equals(deliveryMode)
                     ? deliveryMode : DELIVERY_UNKNOWN;
+            this.reason = reason == null ? Reason.NONE : reason;
+            this.stage = stage == null ? Stage.NONE : stage;
+            this.queueMillis = boundedMillis(queueMillis);
+            this.mediaMillis = boundedMillis(mediaMillis);
+            this.generationMillis = boundedMillis(generationMillis);
+            this.sendMillis = boundedMillis(sendMillis);
+        }
+
+        /** Adds only controlled diagnostics; delivery status and existing content are unchanged. */
+        public Entry withDiagnostics(Reason reason, Stage stage, long queueMillis, long mediaMillis,
+                                     long generationMillis, long sendMillis) {
+            return new Entry(id, kind, targetId, targetName, input, output, modelName, status,
+                    createdAt, updatedAt, requestImageCount, modelRequestSent, deliveryMode,
+                    reason, stage, queueMillis, mediaMillis, generationMillis, sendMillis);
         }
     }
 }

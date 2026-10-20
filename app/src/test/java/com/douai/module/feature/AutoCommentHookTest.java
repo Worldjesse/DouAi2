@@ -10,6 +10,7 @@ import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.SubmissionLedger;
 import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
@@ -64,6 +65,7 @@ public final class AutoCommentHookTest {
         FollowListSnapshot.reset();
         activity = Robolectric.buildActivity(Activity.class).setup().get();
         activity.getSharedPreferences("douai_comment_state", Context.MODE_PRIVATE).edit().clear().commit();
+        activity.getSharedPreferences("douai_comment_submissions", Context.MODE_PRIVATE).edit().clear().commit();
         activity.getSharedPreferences("douai_automation_history", Context.MODE_PRIVATE).edit().clear().commit();
         activity.getSharedPreferences("douai_automation_limits", Context.MODE_PRIVATE).edit().clear().commit();
         FrameLayout root = new FrameLayout(activity);
@@ -341,8 +343,57 @@ public final class AutoCommentHookTest {
         Request.complete(Request.instances.get(0), false); flushDispatch();
         advanceSeconds(10);
         assertEquals(1, Request.attempts);
-        assertEquals("failed", entry("work").status);
+        assertEquals("submitted", entry("work").status);
         assertNull(notice());
+    }
+
+    @Test public void unknownThenLateFailureKeepsQuotaHistoryAndReservationConservative() throws Throwable {
+        Request.autoCallback = false;
+        generate(); flushDispatch(); advanceSeconds(30);
+        assertEquals("submitted", entry("work").status);
+        Request.complete(Request.instances.get(0), false); flushDispatch();
+        assertEquals("submitted", entry("work").status);
+        assertEquals(AutomationHistoryStore.Reason.SUBMITTED_UNCONFIRMED, entry("work").reason);
+        assertTrue(activity.getSharedPreferences("douai_comment_state", Context.MODE_PRIVATE)
+                .contains("comment:100:work"));
+        assertTrue(new SubmissionLedger(activity.getSharedPreferences("douai_comment_submissions", Context.MODE_PRIVATE), 1000)
+                .contains(SubmissionLedger.identity("comment:100:work")));
+        selectWork(); advanceSeconds(30);
+        assertEquals(1, Request.attempts);
+    }
+
+    @Test public void submissionReservationIsDurableBeforeHostInvocation() throws Throwable {
+        Request.beforeSubmit = () -> {
+            SubmissionLedger recreated = new SubmissionLedger(activity.getSharedPreferences(
+                    "douai_comment_submissions", Context.MODE_PRIVATE), 1000);
+            assertTrue(recreated.contains(SubmissionLedger.identity("comment:100:work")));
+            // This callback runs inside the host method, before acceptedRequest can save the legacy marker.
+            assertFalse(activity.getSharedPreferences("douai_comment_state", Context.MODE_PRIVATE)
+                    .contains("comment:100:work"));
+        };
+        generate(); flushDispatch();
+        assertEquals(1, Request.attempts);
+        assertEquals("sent", entry("work").status);
+    }
+
+    @Test public void recreatedHookKeepsUncertainSendEvenWithoutLegacyMarker() throws Throwable {
+        Request.throwAfterSubmit = true;
+        generate(); flushDispatch();
+        assertEquals(1, Request.attempts);
+        activity.getSharedPreferences("douai_comment_state", Context.MODE_PRIVATE).edit().clear().commit();
+        hook.close(); ShadowLooper.idleMainLooper();
+        hook = AutoCommentHook.install(framework.api, report(), getClass().getClassLoader(), activity,
+                options(false), dispatcher, logs::add, () -> mediaReads.get());
+        selectWork(); advanceSeconds(10);
+        assertEquals(1, Request.attempts);
+        assertEquals("submitted", entry("work").status);
+    }
+
+    @Test public void corruptDurableReservationDoesNotRepeatTheHostSend() throws Throwable {
+        activity.getSharedPreferences("douai_comment_submissions", Context.MODE_PRIVATE).edit()
+                .putString("send." + SubmissionLedger.identity("comment:100:work"), "corrupt").commit();
+        selectWork(); advanceSeconds(10);
+        assertEquals(0, Request.attempts);
     }
 
     @Test public void fixedCommentUsesCapturedNativeWorkAndRecordsConfirmedSuccess() throws Throwable {
@@ -530,7 +581,7 @@ public final class AutoCommentHookTest {
         assertEquals(0, Request.attempts);
         assertEquals("pending", entry("work").status);
         assertEquals("cancelled", entry("another").status);
-        advanceSeconds(3);
+        advanceSeconds(2);
         assertNotNull(notice());
         advanceSeconds(8);
         assertEquals(1, Request.attempts);
@@ -705,7 +756,7 @@ public final class AutoCommentHookTest {
         assertEquals(2, Request.attempts);
     }
 
-    @Test public void unconfirmedSendConsumesQuotaWithHistoryDisabledAndLateFailureReleasesIt() throws Throwable {
+    @Test public void unconfirmedSendKeepsQuotaWithHistoryDisabledAfterLateFailure() throws Throwable {
         Map<String, Object> limited = baseOptions(false);
         limited.put("comment_daily_limit", "1");
         limited.put("comment_save_history", false);
@@ -721,7 +772,7 @@ public final class AutoCommentHookTest {
         Request.autoCallback = true;
         holder.work = work("after-failure");
         generate(); flushDispatch();
-        assertEquals(2, Request.attempts);
+        assertEquals(1, Request.attempts);
     }
 
     @Test public void loweringLimitBeforeNativeSendCancelsPreparedComment() throws Throwable {
@@ -1544,6 +1595,11 @@ public final class AutoCommentHookTest {
         for (int i = 0; i < 6; i++) {
             ShadowLooper.idleMainLooper();
             dispatchWorker.runAll();
+            try {
+                java.util.concurrent.ThreadPoolExecutor io = (java.util.concurrent.ThreadPoolExecutor)
+                        HostTargets.read(hook, "RESULTS_IO");
+                io.submit(() -> { }).get(5, TimeUnit.SECONDS);
+            } catch (Exception failure) { throw new AssertionError(failure); }
         }
     }
 
@@ -1666,6 +1722,7 @@ public final class AutoCommentHookTest {
         static boolean throwAfterSubmit;
         static boolean asyncAudioUpload;
         static boolean immediateAudioSuccess;
+        static Runnable beforeSubmit;
         static final List<Model> models = new ArrayList<>();
         static final List<Request> instances = new ArrayList<>();
         static void reset(Framework selected) {
@@ -1673,9 +1730,11 @@ public final class AutoCommentHookTest {
             throwAfterSubmit = false;
             asyncAudioUpload = false; AudioUploader.calls = 0;
             immediateAudioSuccess = false;
+            beforeSubmit = null;
             models.clear(); instances.clear();
         }
         public boolean checked(Model model) {
+            if (beforeSubmit != null) beforeSubmit.run();
             attempts++; models.add(model); instances.add(this);
             if (reject) return false;
             if (asyncAudioUpload && model.A != null && model.A.audio instanceof Audio) {

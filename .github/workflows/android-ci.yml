@@ -39,6 +39,9 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Test local verification tools
+        run: python3 -B -m unittest discover -s tools/tests -v
+
       - name: Assemble unsigned minified Release APK
         run: ./gradlew :app:assembleRelease --console=plain
 
@@ -48,73 +51,31 @@ jobs:
           DOUAI_VERIFY_RELEASE_APK: ${{ github.workspace }}/app/build/outputs/apk/release/app-release-unsigned.apk
         run: ./gradlew :app:testDebugUnitTest --console=plain
 
-      - name: Report host DEX integration coverage
+      - name: Report all host contracts
         if: always() && steps.unit_tests.outcome != 'skipped'
         shell: bash
         run: |
-          python3 - <<'PY'
-          import os
-          import sys
-          import xml.etree.ElementTree as ET
-          from pathlib import Path
-
-          report = Path("app/build/test-results/testDebugUnitTest/TEST-com.douai.module.scan.Douyin406AnchorTest.xml")
-          apk_path = os.environ.get("DOUAI_TEST_APK", "")
-          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
-
-          if not report.is_file():
-              message = "Host DEX scan: no JUnit report was produced."
-              print(message)
-              with summary.open("a", encoding="utf-8") as output:
-                  output.write(f"## Host DEX integration test\n\n**Not verified:** {message}\n")
-              sys.exit(1)
-
-          root = ET.parse(report).getroot()
-          test_case = next(
-              (case for case in root.iter("testcase")
-               if case.attrib.get("name") == "verifiedFeedAnchorsAreUniqueAcrossTheLocalHostDexSet"),
-              None,
-          )
-          if test_case is None:
-              message = "Host DEX scan: expected test case was absent from its JUnit report."
-              print(message)
-              with summary.open("a", encoding="utf-8") as output:
-                  output.write(f"## Host DEX integration test\n\n**Not verified:** {message}\n")
-              sys.exit(1)
-
-          skipped = test_case.find("skipped") is not None
-          failed = test_case.find("failure") is not None or test_case.find("error") is not None
-          apk_is_readable = bool(apk_path) and Path(apk_path).is_file()
-
-          if failed:
-              message = "Host DEX scan failed; see the unit test report."
-              print(message)
-              with summary.open("a", encoding="utf-8") as output:
-                  output.write(f"## Host DEX integration test\n\n**Failed:** {message}\n")
-              sys.exit(1)
-          elif skipped and not apk_is_readable:
-              message = "SKIPPED / UNCONFIGURED: DOUAI_TEST_APK is not set to a readable local host APK; host DEX anchors were not verified."
-              print(message)
-              with summary.open("a", encoding="utf-8") as output:
-                  output.write(f"## Host DEX integration test\n\n**{message}**\n")
-          elif skipped:
-              message = "Host DEX scan was skipped even though DOUAI_TEST_APK points to a readable file."
-              print(message)
-              with summary.open("a", encoding="utf-8") as output:
-                  output.write(f"## Host DEX integration test\n\n**Not verified:** {message}\n")
-              sys.exit(1)
-          elif not apk_is_readable:
-              message = "Host DEX test reported success without a readable DOUAI_TEST_APK path."
-              print(message)
-              with summary.open("a", encoding="utf-8") as output:
-                  output.write(f"## Host DEX integration test\n\n**Not verified:** {message}\n")
-              sys.exit(1)
-          else:
-              message = "PASSED: host DEX anchors were checked against DOUAI_TEST_APK."
-              print(message)
-              with summary.open("a", encoding="utf-8") as output:
-                  output.write(f"## Host DEX integration test\n\n**{message}**\n")
-          PY
+          python3 -B tools/release_verification.py host-summary --summary app/build/reports/host-contracts.md
 
       - name: Run Release Lint
+        id: release_lint
         run: ./gradlew :app:lintRelease --console=plain
+
+      - name: Check reviewed Lint warning budget
+        if: always() && steps.release_lint.outcome != 'skipped'
+        run: python3 -B tools/lint_budget.py check --report app/build/reports/lint-results-release.xml --output app/build/reports/lint-budget.json
+
+      - name: Preserve verification reports and R8 mapping
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-${{ github.sha }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            app/build/test-results/testDebugUnitTest/TEST-*.xml
+            app/build/reports/tests/testDebugUnitTest/
+            app/build/reports/lint-results-release.*
+            app/build/reports/lint-budget.*
+            app/build/reports/host-contracts.md
+            app/build/outputs/mapping/release/

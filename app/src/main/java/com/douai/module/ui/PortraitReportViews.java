@@ -5,6 +5,7 @@ import android.content.res.Configuration;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Picture;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.view.MotionEvent;
@@ -38,8 +39,27 @@ final class PortraitReportViews {
     private final Context context;
     private final PortraitSnapshot data;
     private final Host host;
+    private final boolean paper;
     PortraitReportViews(Context context, PortraitSnapshot data, Host host) {
+        this(context, data, host, false);
+    }
+    private PortraitReportViews(Context context, PortraitSnapshot data, Host host, boolean paper) {
         this.context = context; this.data = data; this.host = host;
+        this.paper = paper;
+    }
+    /** A fresh, noninteractive report tree; never shares a View with the dialog. */
+    static void appendPaper(Context context, PortraitSnapshot data, Host host) {
+        PortraitReportViews report = new PortraitReportViews(context, data, host, true);
+        report.overview();
+        if (!data.days.isEmpty()) { report.calendar(); report.typeBands(); }
+        if (!data.topicTiles.isEmpty() || data.topicCount > 0) report.topics();
+        if (!data.authorPareto.isEmpty() || data.authorCount > 0) report.authors();
+        boolean rhythm = false;
+        for (long[] day : data.weekdayHours) for (long count : day) if (count > 0) rhythm = true;
+        if (rhythm) report.rhythm();
+        if (data.comparison != null && !data.comparison.currentStart.isEmpty()) report.comparison();
+        if (!data.featureSources.isEmpty() || !data.topicHours.isEmpty() || !data.typeActions.isEmpty()
+                || data.capturedVisits > 0 || data.finishedVisits > 0 || data.visibleMillis > 0) report.associations();
     }
 
     void overview() {
@@ -69,7 +89,7 @@ final class PortraitReportViews {
     private void calendar() {
         LinearLayout card = host.section("浏览足迹 · 日期热力图");
         List<PortraitSnapshot.Day> shown = data.days.subList(Math.max(0, data.days.size() - 84), data.days.size());
-        TextView selected = add(card, "点选日期，查看那一天的浏览与功能次数", 13, MUTED, false);
+        TextView selected = add(card, paper ? "按日期排列的本地浏览记录" : "点选日期，查看那一天的浏览与功能次数", 13, MUTED, false);
         selected.setTag("analytics.portrait.calendar.selection");
         chart(card, new CalendarChart(context, shown, value -> select(selected, value)),
                 "calendar", Math.max(108, 38 + (int) Math.ceil((shown.size() + 6) / 7.0) * 22));
@@ -95,7 +115,7 @@ final class PortraitReportViews {
             String from = shortDate(data.days.get(start).date), to = shortDate(data.days.get(end - 1).date);
             bands.add(new Band(from.equals(to) ? from : from + "—" + to, counts));
         }
-        TextView selected = add(card, "每行归一为 100%，点选色带查看原始次数", 13, MUTED, false);
+        TextView selected = add(card, paper ? "每行归一为 100%，色带表示该时段的内容构成" : "每行归一为 100%，点选色带查看原始次数", 13, MUTED, false);
         selected.setTag("analytics.portrait.types.selection");
         chart(card, new TypeChart(context, bands, colors, value -> select(selected, value)),
                 "types", Math.max(76, bands.size() * 52));
@@ -105,10 +125,10 @@ final class PortraitReportViews {
     }
 
     private void topics() {
-        LinearLayout card = host.section("你的内容世界 · 话题地图");
+        LinearLayout card = host.section(paper ? "话题排行 · 你的内容地图" : "你的内容世界 · 话题地图");
         if (data.topicTiles.isEmpty()) add(card, "暂无可识别话题，不能据此判断兴趣是否广泛。", 14, MUTED, false);
         else {
-            TextView selected = add(card, "面积代表话题出现次数，点选色块查看完整名称", 13, MUTED, false);
+            TextView selected = add(card, paper ? "面积代表话题出现次数，完整名称与次数列于图下" : "面积代表话题出现次数，点选色块查看完整名称", 13, MUTED, false);
             selected.setTag("analytics.portrait.topics.selection");
             chart(card, new TopicChart(context, data.topicTiles, value -> select(selected, value)), "topics", 230);
             for (int index = 0; index < data.topicTiles.size(); index++) {
@@ -122,7 +142,7 @@ final class PortraitReportViews {
     }
 
     private void authors() {
-        LinearLayout card = host.section("接触来源 · 作者集中曲线");
+        LinearLayout card = host.section(paper ? "作者排行 · 接触来源曲线" : "接触来源 · 作者集中曲线");
         if (data.authorPareto.isEmpty()) add(card, "暂无可识别作者，暂不能描述接触来源。", 14, MUTED, false);
         else {
             TextView selected = add(card, "按出现次数排序，曲线表示累计占比", 13, MUTED, false);
@@ -140,7 +160,7 @@ final class PortraitReportViews {
 
     private void rhythm() {
         LinearLayout card = host.section("一周节奏 · 星期 × 小时");
-        TextView selected = add(card, "点选格子查看次数；辅助功能点击可依次查看", 13, MUTED, false);
+        TextView selected = add(card, paper ? "颜色深浅表示各星期、小时的记录次数" : "点选格子查看次数；辅助功能点击可依次查看", 13, MUTED, false);
         selected.setTag("analytics.portrait.rhythm.selection");
         chart(card, new RhythmChart(context, data.weekdayHours, value -> select(selected, value)), "rhythm", 220);
         add(card, "按事件发生时的本地时间统计。夜间（0—5 时）占 " + pct(data.nightShare)
@@ -259,6 +279,10 @@ final class PortraitReportViews {
         card.addView(row, new LinearLayout.LayoutParams(-1, -2));
     }
     private void chart(LinearLayout parent, View view, String key, int height) {
+        if (paper && view instanceof Chart) {
+            ((Chart) view).paper = true;
+            view.setClickable(false); view.setFocusable(false);
+        }
         view.setTag("analytics.portrait." + key + ".chart");
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(height));
         params.topMargin = dp(8);
@@ -267,6 +291,7 @@ final class PortraitReportViews {
     }
     private void heading(LinearLayout parent, String value) {
         TextView text = add(parent, value, 16, TEXT, true);
+        if (paper) text.setTag("report.keepWithNext");
         text.setPadding(0, dp(12), 0, dp(4));
     }
     private TextView add(LinearLayout parent, String value, int size, int color, boolean bold) {
@@ -277,6 +302,12 @@ final class PortraitReportViews {
         parent.addView(text, new LinearLayout.LayoutParams(-1, -2)); return text;
     }
     private void disclosure(LinearLayout card, String label, String content, String tag) {
+        if (paper) {
+            heading(card, label.replace("查看", ""));
+            TextView evidence = add(card, content, 13, MUTED, false);
+            evidence.setTag(tag + ".text");
+            return;
+        }
         Button button = host.button(context); button.setText(label); button.setTextSize(14); button.setTextColor(ACCENT);
         button.setAllCaps(false); button.setMinHeight(dp(48)); button.setMinimumHeight(dp(48));
         button.setPadding(dp(12), dp(8), dp(12), dp(8)); button.setBackgroundColor(Color.TRANSPARENT); button.setTag(tag);
@@ -307,15 +338,52 @@ final class PortraitReportViews {
         Hit(RectF rect, String label) { this.rect = rect; this.label = label; }
     }
     private abstract static class Chart extends View {
+        boolean paper;
         final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         final List<Hit> hits = new ArrayList<>(); final Consumer<String> selection;
         int chosen = -1; float downX, downY;
+        private Picture drawing;
+        private int drawingWidth, drawingHeight;
+        private float drawingDensity, drawingFontScale;
+        private boolean drawingDark;
+
+        // Data is immutable for this chart. Cache geometry, labels and accessibility hit targets
+        // across selection redraws; record again on size, density, font scale or theme changes.
+        @Override protected final void onDraw(Canvas canvas) {
+            float density = getResources().getDisplayMetrics().density;
+            float fontScale = getResources().getDisplayMetrics().scaledDensity;
+            boolean dark = !paper && ModuleTheme.isDark(getContext());
+            if (getWidth() <= 0 || getHeight() <= 0) return;
+            if (drawing == null || drawingWidth != getWidth() || drawingHeight != getHeight()
+                    || drawingDensity != density || drawingFontScale != fontScale || drawingDark != dark) {
+                recordChart(density, fontScale, dark);
+            }
+            canvas.drawPicture(drawing);
+            selection(canvas);
+        }
+
+        private void recordChart(float density, float fontScale, boolean dark) {
+            Picture next = new Picture();
+            Canvas recorded = next.beginRecording(getWidth(), getHeight());
+            try { drawChart(recorded); }
+            finally { next.endRecording(); }
+            drawingWidth = getWidth(); drawingHeight = getHeight();
+            drawingDensity = density; drawingFontScale = fontScale; drawingDark = dark;
+            drawing = next;
+        }
+
+        abstract void drawChart(Canvas canvas);
+
+        @Override protected void onDetachedFromWindow() {
+            drawing = null;
+            super.onDetachedFromWindow();
+        }
         Chart(Context context, Consumer<String> selection) {
             super(context); this.selection = selection; setClickable(true); setFocusable(true);
             setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
         }
         float d(float value) { return value * getResources().getDisplayMetrics().density; }
-        int color(int value) { return ModuleTheme.color(getContext(), value); }
+        int color(int value) { return paper ? value : ModuleTheme.color(getContext(), value); }
         void label(Canvas canvas, String text, float x, float y, int color, float size, Paint.Align align) {
             paint.setStyle(Paint.Style.FILL); paint.setColor(color == Color.WHITE ? Color.WHITE : color(color)); paint.setTextAlign(align);
             paint.setTypeface(Typeface.DEFAULT); paint.setTextSize(size * getResources().getDisplayMetrics().scaledDensity);
@@ -353,7 +421,7 @@ final class PortraitReportViews {
         int intensity(long value, long max) {
             if (value <= 0) return color(0xFFEEEFF3);
             float strength = .18f + .82f * (float) Math.sqrt(value / (double) Math.max(1, max));
-            int background = ModuleTheme.isDark(getContext()) ? 0xFF252B31 : 0xFFEAF4FE;
+            int background = !paper && ModuleTheme.isDark(getContext()) ? 0xFF252B31 : 0xFFEAF4FE;
             return Color.rgb(Math.round(Color.red(background) * (1 - strength) + 22 * strength),
                     Math.round(Color.green(background) * (1 - strength) + 131 * strength),
                     Math.round(Color.blue(background) * (1 - strength) + 238 * strength));
@@ -363,7 +431,7 @@ final class PortraitReportViews {
     private static final class CalendarChart extends Chart {
         final List<PortraitSnapshot.Day> days;
         CalendarChart(Context context, List<PortraitSnapshot.Day> days, Consumer<String> selection) { super(context, selection); this.days = days; }
-        @Override protected void onDraw(Canvas canvas) {
+        @Override void drawChart(Canvas canvas) {
             hits.clear(); String[] labels = {"一", "二", "三", "四", "五", "六", "日"};
             float cell = getWidth() / 7f; long max = 1; for (PortraitSnapshot.Day day : days) max = Math.max(max, day.views);
             for (int column = 0; column < 7; column++) label(canvas, labels[column], (column + .5f) * cell, d(15), MUTED, 11, Paint.Align.CENTER);
@@ -380,14 +448,14 @@ final class PortraitReportViews {
                 hit(bounds, day.date + " · 浏览 " + number(day.views) + " 次 · 功能 " + number(day.features) + " 次"
                         + (day.views == 0 && day.features == 0 ? " · 无保留事件，使用情况未知" : ""));
             }
-            describe("日期热力图"); selection(canvas);
+            describe("日期热力图");
         }
     }
 
     private static final class RhythmChart extends Chart {
         final long[][] values;
         RhythmChart(Context context, long[][] values, Consumer<String> selection) { super(context, selection); this.values = values; }
-        @Override protected void onDraw(Canvas canvas) {
+        @Override void drawChart(Canvas canvas) {
             hits.clear(); long max = 1; for (long[] day : values) for (long count : day) max = Math.max(max, count);
             String[] weekdays = {"周一", "周二", "周三", "周四", "周五", "周六", "周日"};
             float left = d(29), unit = Math.max(1, getWidth() - left) / 24;
@@ -400,14 +468,14 @@ final class PortraitReportViews {
                 }
             }
             for (int hour = 0; hour < 24; hour += 6) label(canvas, hour + "时", left + hour * unit, d(15), MUTED, 10, Paint.Align.LEFT);
-            describe("星期与小时热力图"); selection(canvas);
+            describe("星期与小时热力图");
         }
     }
 
     private static final class TypeChart extends Chart {
         final List<Band> bands; final Map<String, Integer> colors;
         TypeChart(Context context, List<Band> bands, Map<String, Integer> colors, Consumer<String> selection) { super(context, selection); this.bands = bands; this.colors = colors; }
-        @Override protected void onDraw(Canvas canvas) {
+        @Override void drawChart(Canvas canvas) {
             hits.clear();
             for (int index = 0; index < bands.size(); index++) {
                 Band band = bands.get(index); long total = 0; for (long count : band.counts.values()) total += count;
@@ -422,14 +490,14 @@ final class PortraitReportViews {
                     hit(bounds, band.label + " · " + item.getKey() + " " + number(item.getValue()) + " 次 · " + pct(item.getValue() / (double) total)); x = next;
                 }
             }
-            describe("内容构成百分比色带"); selection(canvas);
+            describe("内容构成百分比色带");
         }
     }
 
     private static final class TopicChart extends Chart {
         final List<Rank> ranks;
         TopicChart(Context context, List<Rank> ranks, Consumer<String> selection) { super(context, selection); this.ranks = ranks; }
-        @Override protected void onDraw(Canvas canvas) {
+        @Override void drawChart(Canvas canvas) {
             hits.clear(); long remaining = total(ranks); RectF available = new RectF(0, d(6), getWidth(), getHeight() - d(6));
             for (int index = 0; index < ranks.size(); index++) {
                 Rank rank = ranks.get(index); if (rank.count <= 0 || remaining <= 0) continue;
@@ -446,14 +514,14 @@ final class PortraitReportViews {
                 if (tile.height() > d(46) && tile.width() > d(34)) label(canvas, number(rank.count), tile.centerX(), tile.centerY() + d(16), Color.WHITE, 11, Paint.Align.CENTER);
                 canvas.restore(); hit(tile, rank.label + " · " + number(rank.count) + " 次标签出现");
             }
-            describe("话题矩形树图"); selection(canvas);
+            describe("话题矩形树图");
         }
     }
 
     private static final class AuthorChart extends Chart {
         final List<Rank> ranks;
         AuthorChart(Context context, List<Rank> ranks, Consumer<String> selection) { super(context, selection); this.ranks = ranks; }
-        @Override protected void onDraw(Canvas canvas) {
+        @Override void drawChart(Canvas canvas) {
             hits.clear(); long total = total(ranks), accumulated = 0; float left = d(34), bottom = getHeight() - d(28), top = d(22);
             float width = getWidth() - left - d(10), lastX = left, lastY = bottom;
             for (int line = 0; line <= 2; line++) {
@@ -469,14 +537,14 @@ final class PortraitReportViews {
                 hit(new RectF(x - d(10), top, x + d(10), bottom), rank.label + " · " + number(rank.count) + " 次 · 累计 " + pct(accumulated / (double) Math.max(1, total)));
                 lastX = x; lastY = y;
             }
-            describe("作者累计占比，其他作者为合并分组"); selection(canvas);
+            describe("作者累计占比，其他作者为合并分组");
         }
     }
 
     private static final class CompareChart extends Chart {
         final PortraitSnapshot.Comparison data;
         CompareChart(Context context, PortraitSnapshot.Comparison data, Consumer<String> selection) { super(context, selection); this.data = data; }
-        @Override protected void onDraw(Canvas canvas) {
+        @Override void drawChart(Canvas canvas) {
             hits.clear(); String[] labels = {"浏览次数", "功能触发"};
             long[] current = {data.currentViews, data.currentFeatures}, previous = {data.previousViews, data.previousFeatures};
             for (int index = 0; index < 2; index++) {
@@ -491,7 +559,7 @@ final class PortraitReportViews {
                 hit(new RectF(0, y - d(14), getWidth(), y + d(40)), labels[index] + " · 前期 " + number(previous[index]) + " · 本期 " + number(current[index])
                         + (!data.currentComplete || !data.previousComplete ? " · 覆盖不完整，不能判定趋势" : ""));
             }
-            describe("前后期对照点图，每行独立刻度"); selection(canvas);
+            describe("前后期对照点图，每行独立刻度");
         }
     }
 }

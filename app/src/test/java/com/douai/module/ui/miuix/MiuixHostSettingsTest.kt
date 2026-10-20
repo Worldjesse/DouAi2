@@ -183,6 +183,30 @@ class MiuixHostSettingsTest {
     }
 
     @Test
+    @Config(sdk = [28])
+    fun featureSearchUsesTheSameAiSpeechAndDownloadPathsWithoutChangingSettings() {
+        lateinit var saved: Map<String, *>
+        compose.runOnIdle { saved = store.snapshot() }
+        val cases = listOf(
+            listOf("API Key", "ai", "扩展功能 > AI 模型设置", "settings.option.添加模型配置"),
+            listOf("minimax", "speech", "扩展功能 > 文本转语音设置", "settings.option.语音来源"),
+            listOf("保存目录", "download-directory", "下载相关 > 保存位置", "settings.option.保存位置"),
+            listOf("去水印", "download-watermark", "下载相关 > 无水印下载图集或者视频", "settings.toggle.无水印下载图集或者视频"),
+        )
+        cases.forEach { (query, id, path, option) ->
+            compose.onNodeWithTag("settings.search").performTextReplacement(query)
+            compose.onNodeWithText(path).assertIsDisplayed()
+            compose.onNodeWithTag("settings.search.result.$id").performScrollTo().performClick()
+            compose.onNodeWithTag(option).assertExists()
+            compose.runOnIdle { assertEquals(saved, store.snapshot()) }
+            compose.runOnUiThread { screen.dismissChildPages() }
+        }
+        compose.onNodeWithTag("settings.search").performTextReplacement("")
+        compose.onNodeWithTag("settings.search.result.ai").assertDoesNotExist()
+        compose.runOnIdle { assertEquals(saved, store.snapshot()) }
+    }
+
+    @Test
     @Config(sdk = [28], qualifiers = "w320dp-h640dp-notnight-mdpi")
     fun localAnalyticsUsesMiuixControlsAndReturnsToExtensionsInLightMode() {
         verifyLocalAnalyticsMiuixPage("light")

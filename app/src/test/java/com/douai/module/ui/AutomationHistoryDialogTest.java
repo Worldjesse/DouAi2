@@ -214,6 +214,28 @@ public final class AutomationHistoryDialogTest {
         }
     }
 
+    @Test public void historyDetailShowsControlledDiagnosticsWhileKeepingSubmittedUnconfirmed() throws Exception {
+        store.upsert(new AutomationHistoryStore.Entry("diagnostic", "reply", "target", "用户", "消息", "回复",
+                "模型", "submitted", 1, 1).withDiagnostics(AutomationHistoryStore.Reason.SUBMITTED_UNCONFIRMED,
+                AutomationHistoryStore.Stage.SEND, 10, -1, 20, 30000));
+        page.dialog().show();
+        ShadowLooper.idleMainLooper();
+        worker.runNextOnThread();
+        ShadowLooper.idleMainLooper();
+        ListView list = list();
+        list.getAdapter().getView(0, null, list).performClick();
+        AlertDialog detail = (AlertDialog) org.robolectric.shadows.ShadowDialog.getLatestDialog();
+        View body = detail.getWindow().getDecorView();
+        assertTrue(containsText(body, "状态：已提交"));
+        assertTrue(containsText(body, "原因：已提交，结果未确认"));
+        assertTrue(containsText(body, "阶段：发送"));
+        assertTrue(containsText(body, "排队耗时：10 ms"));
+        assertTrue(containsText(body, "生成耗时：20 ms"));
+        assertTrue(containsText(body, "发送确认等待耗时：30000 ms"));
+        assertFalse(containsText(body, "媒体读取耗时"));
+        assertFalse(containsText(body, "状态：发送成功"));
+    }
+
     private ListView list() {
         return page.dialog().getWindow().getDecorView().findViewWithTag("automation.history");
     }

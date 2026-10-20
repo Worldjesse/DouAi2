@@ -5,7 +5,14 @@ import android.graphics.Color
 import android.graphics.Canvas
 import android.content.ClipboardManager
 import android.content.Context
+import android.text.Editable
+import android.text.Spanned
+import android.text.TextWatcher
 import android.view.View
+import android.view.ViewGroup
+import android.widget.BaseAdapter
+import android.widget.EditText
+import android.widget.ListView
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
@@ -45,6 +52,7 @@ import java.io.File
 import java.util.ArrayDeque
 import java.util.concurrent.AbstractExecutorService
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], qualifiers = "w360dp-h720dp-mdpi")
@@ -305,6 +313,93 @@ class MiuixEditorsInteractionTest {
         assertEquals(listOf("前后中间内容"), session.prompts)
     }
 
+    @Test fun promptVisibleMiddleInsertionOnlyChangesTheNativeEditRangeAndKeepsDraftUnsaved() {
+        var saved: String? = null
+        val original = "前后" + "内容".repeat(1000)
+        lateinit var native: EditText
+        val mutations = mutableListOf<Triple<Int, Int, Int>>()
+        val retainedSpan = Any()
+        compose.runOnUiThread {
+            prompt = PromptEditorDialog(compose.activity, "提示词增量", original, { saved = it }, true)
+            prompt!!.show()
+            native = nativeInput(prompt!!)
+            native.text.setSpan(retainedSpan, 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            watchEdits(native, mutations)
+        }
+        val visible = compose.onNodeWithTag("settings.input.提示词增量")
+        visible.performTextInputSelection(TextRange(2))
+        visible.performTextInput("中间")
+        compose.runOnIdle {
+            assertEquals("A middle insertion must not replace the whole native prompt", listOf(Triple(2, 0, 2)), mutations)
+            assertEquals(4, native.selectionStart)
+            assertEquals(4, native.selectionEnd)
+            assertEquals(0, native.text.getSpanStart(retainedSpan))
+            assertEquals(1, native.text.getSpanEnd(retainedSpan))
+            assertEquals("前后中间" + "内容".repeat(1000), native.text.toString())
+            assertEquals(null, saved)
+        }
+        compose.onNodeWithTag("prompt.cancel").performClick()
+        compose.runOnIdle { assertEquals(null, saved) }
+    }
+
+    @Test fun chatVisibleMiddleInsertionOnlyChangesTheNativeEditRangeWithoutMovingItsCursorToTheEnd() {
+        openChat()
+        val original = "前后" + "内容".repeat(1000)
+        val visible = compose.onNodeWithTag("ai.chat.input")
+        visible.performTextReplacement(original)
+        lateinit var native: EditText
+        val mutations = mutableListOf<Triple<Int, Int, Int>>()
+        val retainedSpan = Any()
+        compose.runOnUiThread {
+            native = nativeInput(chat!!)
+            native.text.setSpan(retainedSpan, 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            watchEdits(native, mutations)
+        }
+        visible.performTextInputSelection(TextRange(2))
+        visible.performTextInput("中间")
+        compose.runOnIdle {
+            assertEquals("Composer edits must preserve the unchanged suffix", listOf(Triple(2, 0, 2)), mutations)
+            assertEquals(4, native.selectionStart)
+            assertEquals(4, native.selectionEnd)
+            assertEquals(0, native.text.getSpanStart(retainedSpan))
+            assertEquals(1, native.text.getSpanEnd(retainedSpan))
+            assertEquals("前后中间" + "内容".repeat(1000), native.text.toString())
+            assertTrue("Typing must not send a message", session.prompts.isEmpty())
+        }
+    }
+
+    @Test fun chatDraftTypingDoesNotMaterializeEveryExistingTranscriptRow() {
+        openChat()
+        repeat(2) { round ->
+            compose.onNodeWithTag("ai.chat.input").performTextReplacement("已有消息$round")
+            compose.onNodeWithTag("ai.chat.send").performClick()
+            completeRequest()
+        }
+        val materializations = AtomicInteger()
+        compose.runOnUiThread {
+            val field = AiTestChatDialog::class.java.getDeclaredField("messages").apply { isAccessible = true }
+            val messages = field.get(chat!!) as ListView
+            val previous = messages.adapter
+            assertEquals(4, previous.count)
+            messages.adapter = object : BaseAdapter() {
+                override fun getCount() = previous.count
+                override fun getItem(position: Int): Any = previous.getItem(position)
+                override fun getItemId(position: Int) = previous.getItemId(position)
+                override fun getView(position: Int, recycled: View?, parent: ViewGroup): View {
+                    materializations.incrementAndGet()
+                    return previous.getView(position, recycled, parent)
+                }
+            }
+        }
+        compose.waitForIdle()
+        val beforeTyping = materializations.get()
+        compose.onNodeWithTag("ai.chat.input").performTextInput("下一条草稿")
+        compose.runOnIdle {
+            assertEquals("A draft-only edit must not rebuild detached history rows", beforeTyping, materializations.get())
+            assertEquals(listOf("已有消息0", "已有消息1"), session.prompts)
+        }
+    }
+
     // API 28 uses Miuix's path renderer; native Canvas snapshots cannot render RuntimeShader on API 33+.
     @Test @Config(sdk = [28], qualifiers = "w296dp-h560dp-mdpi")
     fun narrowEditorsKeepControlsInsideTheirFloatingWindows() { verifyEditorLayoutAndPreview() }
@@ -394,6 +489,19 @@ class MiuixEditorsInteractionTest {
     }
 
     private fun completeRequest() { compose.runOnUiThread { worker.runNext() }; compose.waitForIdle() }
+
+    private fun nativeInput(dialog: android.app.Dialog): EditText = dialog.javaClass
+        .getDeclaredField("input").apply { isAccessible = true }.get(dialog) as EditText
+
+    private fun watchEdits(input: EditText, mutations: MutableList<Triple<Int, Int, Int>>) {
+        input.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                mutations += Triple(start, before, count)
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+    }
 
     private fun image(): ChatImage {
         val bitmap = Bitmap.createBitmap(96, 64, Bitmap.Config.ARGB_8888)

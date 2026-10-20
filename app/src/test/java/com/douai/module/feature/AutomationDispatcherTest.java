@@ -66,6 +66,37 @@ public final class AutomationDispatcherTest {
         ShadowLooper.idleMainLooper();
     }
 
+    @Test public void sourceReasonAmendmentPreservesDispatcherMetadataAndRejectsAStaleStatus() {
+        dispatcher.setOptions(options(false, true));
+        AutomationHistoryStore.Entry original = new AutomationHistoryStore.Entry("reason-patch", "reply", "u", "user",
+                "input", "output", "model", "cancelled", 1, 2, 2, true,
+                AutomationHistoryStore.DELIVERY_VOICE).withDiagnostics(AutomationHistoryStore.Reason.CANCELLED,
+                AutomationHistoryStore.Stage.SEND, 123, 23, 34, 45);
+        dispatcher.recordOutcome(original);
+        AutomationHistoryStore.Entry source = new AutomationHistoryStore.Entry("reason-patch", "reply", "other", "other",
+                "", "", "", "cancelled", 1, 3).withDiagnostics(AutomationHistoryStore.Reason.LEDGER_WRITE_FAILED,
+                AutomationHistoryStore.Stage.QUEUE, -1, -1, -1, -1);
+        dispatcher.recordOutcomeReason(source);
+        worker.runAll();
+        AutomationHistoryStore.Entry amended = history.read("reply").get(0);
+        assertEquals(AutomationHistoryStore.Reason.LEDGER_WRITE_FAILED, amended.reason);
+        assertEquals(AutomationHistoryStore.Stage.SEND, amended.stage);
+        assertEquals(123, amended.queueMillis); assertEquals(23, amended.mediaMillis);
+        assertEquals(34, amended.generationMillis); assertEquals(45, amended.sendMillis);
+        assertEquals("output", amended.output); assertEquals(2, amended.requestImageCount);
+        assertTrue(amended.modelRequestSent); assertEquals(AutomationHistoryStore.DELIVERY_VOICE, amended.deliveryMode);
+        dispatcher.recordOutcome(new AutomationHistoryStore.Entry("reason-patch", "reply", "u", "user",
+                "input", "output", "model", "sent", 1, 4).withDiagnostics(AutomationHistoryStore.Reason.NONE,
+                AutomationHistoryStore.Stage.COMPLETE, 123, 23, 34, 55));
+        dispatcher.recordOutcomeReason(source);
+        worker.runAll();
+        AutomationHistoryStore.Entry confirmed = history.read("reply").get(0);
+        assertEquals("sent", confirmed.status);
+        assertEquals(AutomationHistoryStore.Reason.NONE, confirmed.reason);
+        assertEquals(AutomationHistoryStore.Stage.COMPLETE, confirmed.stage);
+        assertEquals(55, confirmed.sendMillis);
+    }
+
     @Test public void noNoticeDispatchesImmediatelyAndRecordsOneConfirmedOutcome() {
         dispatcher.setOptions(options(false, true));
         dispatcher.prepare("reply", "one", "u1", "用户甲", "收到消息", "生成回复", "model",
@@ -86,6 +117,57 @@ public final class AutomationDispatcherTest {
         assertEquals(1, sends.get());
     }
 
+    @Test public void diagnosticsSurviveDispatcherTransitionsAndLateConfirmationDoesNotRetry() {
+        dispatcher.setOptions(options(false, true));
+        java.util.concurrent.atomic.AtomicReference<Consumer<String>> callback = new java.util.concurrent.atomic.AtomicReference<>();
+        dispatcher.prepare(new AutomationHistoryStore.Entry("diagnostic", "reply", "u", "用户", "消息", "回复",
+                "model", "pending", 1, 1).withDiagnostics(AutomationHistoryStore.Reason.NONE,
+                AutomationHistoryStore.Stage.GENERATION, 11, 22, 33, -1), () -> true, result -> {
+            sends.incrementAndGet();
+            callback.set(result);
+        }, ignored -> { });
+        worker.runAll();
+        AutomationHistoryStore.Entry sending = history.read("reply").get(0);
+        assertEquals("sending", sending.status);
+        assertEquals(AutomationHistoryStore.Stage.SEND, sending.stage);
+        assertEquals(22, sending.mediaMillis);
+        assertEquals(33, sending.generationMillis);
+        assertTrue(sending.queueMillis >= 11);
+        advance(30);
+        worker.runAll();
+        AutomationHistoryStore.Entry submitted = history.read("reply").get(0);
+        assertEquals("submitted", submitted.status);
+        assertEquals(AutomationHistoryStore.Reason.SUBMITTED_UNCONFIRMED, submitted.reason);
+        assertTrue(submitted.sendMillis >= 30000);
+        assertEquals(1, sends.get());
+        callback.get().accept("sent");
+        worker.runAll();
+        AutomationHistoryStore.Entry sent = history.read("reply").get(0);
+        assertEquals("sent", sent.status);
+        assertEquals(AutomationHistoryStore.Reason.NONE, sent.reason);
+        assertEquals(AutomationHistoryStore.Stage.COMPLETE, sent.stage);
+        assertEquals(22, sent.mediaMillis);
+        assertEquals(33, sent.generationMillis);
+        assertTrue(sent.sendMillis >= submitted.sendMillis);
+        assertEquals(1, sends.get());
+    }
+
+    @Test public void failedSendRecordsAControlledReasonWithoutCopyingExceptionText() {
+        dispatcher.setOptions(options(false, true));
+        dispatcher.prepare("reply", "diagnostic-failure", "u", "用户", "消息", "回复", "model",
+                () -> true, result -> { throw new IllegalStateException("Bearer private-token https://secret.example"); });
+        worker.runAll();
+        AutomationHistoryStore.Entry failed = history.read("reply").get(0);
+        assertEquals("failed", failed.status);
+        assertEquals(AutomationHistoryStore.Reason.SEND_FAILED, failed.reason);
+        assertEquals(AutomationHistoryStore.Stage.SEND, failed.stage);
+        assertTrue(failed.sendMillis >= 0);
+        String stored = activity.getSharedPreferences("douai_automation_history", Context.MODE_PRIVATE)
+                .getString("entries_v1", "");
+        assertFalse(stored.contains("private-token"));
+        assertFalse(stored.contains("secret.example"));
+    }
+
     @Test public void noticeTimesOutAndStillSubmitsWithoutAUserClick() {
         dispatcher.setOptions(options(true, true));
         prepare("comment", "comment1", () -> true);
@@ -93,7 +175,7 @@ public final class AutomationDispatcherTest {
         assertNotNull(notice("comment1"));
         assertEquals(0, sends.get());
         assertEquals("pending", history.read("comment").get(0).status);
-        advance(7);
+        advance(2);
         worker.runAll();
         assertEquals(0, sends.get());
         advance(1);
@@ -101,6 +183,42 @@ public final class AutomationDispatcherTest {
         assertEquals(1, sends.get());
         assertNull(notice("comment1"));
         assertEquals("submitted", history.read("comment").get(0).status);
+    }
+
+    @Test public void missingNoticeDurationDefaultsToThreeSecondsAndExplicitEightRemainsUnchanged() {
+        Map<String, Object> defaults = base(true, true);
+        defaults.remove("reply_notice_seconds");
+        defaults.remove("comment_notice_seconds");
+        dispatcher.setOptions(new LocalOptions(defaults));
+        prepare("reply", "default-cancel", () -> true);
+        prepare("comment", "default-send", () -> true);
+        worker.runAll();
+        assertEquals(3, replyRing().getRetriesLeft());
+        advance(2);
+        worker.runAll();
+        assertEquals(0, sends.get());
+        assertTrue(notice("default-cancel").performLongClick());
+        advance(1);
+        worker.runAll();
+        assertEquals(1, sends.get());
+        assertEquals("cancelled", history.read("reply").get(0).status);
+        assertEquals("submitted", history.read("comment").get(0).status);
+
+        Map<String, Object> saved = base(true, true);
+        saved.put("reply_notice_seconds", "8");
+        saved.put("comment_notice_seconds", "8");
+        dispatcher.setOptions(new LocalOptions(saved));
+        prepare("reply", "saved-eight", () -> true);
+        assertEquals(8, replyRing().getRetriesLeft());
+        advance(7);
+        worker.runAll();
+        assertEquals(1, sends.get());
+        advance(1);
+        worker.runAll();
+        assertEquals(2, sends.get());
+        assertEquals("sent", history.read("reply").get(0).status);
+        assertEquals("8", saved.get("reply_notice_seconds"));
+        assertEquals("8", saved.get("comment_notice_seconds"));
     }
 
     @Test public void longPressCancelsAndNeverSendsWhenTheOldTimeoutFires() {
@@ -173,7 +291,7 @@ public final class AutomationDispatcherTest {
         AtomicBoolean current = new AtomicBoolean(true);
         prepare("comment", "moved", current::get);
         current.set(false);
-        advance(8);
+        advance(3);
         worker.runAll();
         assertEquals(0, sends.get());
         assertEquals("cancelled", history.read("comment").get(0).status);
@@ -213,7 +331,7 @@ public final class AutomationDispatcherTest {
         prepare("reply", "reply", () -> true);
         prepare("comment", "comment", () -> true);
         dispatcher.cancelKind("reply");
-        advance(8);
+        advance(3);
         worker.runAll();
         assertEquals(1, sends.get());
         assertEquals("cancelled", history.read("reply").get(0).status);
@@ -225,10 +343,10 @@ public final class AutomationDispatcherTest {
         prepare("reply", "resume", () -> true);
         dispatcher.onActivityPaused(activity);
         assertNull(activity.getWindow().getDecorView().findViewWithTag("automation.notices"));
-        advance(3);
+        advance(1);
         dispatcher.onActivityResumed(activity);
         assertNotNull(notice("resume"));
-        advance(5);
+        advance(2);
         worker.runAll();
         assertEquals(1, sends.get());
     }
@@ -238,7 +356,7 @@ public final class AutomationDispatcherTest {
         dispatcher.reportFailure("reply", "generation", "u", "用户", "输入", "model");
         prepare("comment", "close", () -> true);
         dispatcher.close();
-        advance(8);
+        advance(3);
         worker.runAll();
         assertEquals(0, sends.get());
         assertEquals("failed", history.read("reply").get(0).status);
@@ -268,7 +386,7 @@ public final class AutomationDispatcherTest {
         assertEquals("failed", replyRing().getPhase());
         assertNull(activity.getWindow().getDecorView().findViewWithTag("automation.failure.failure"));
         assertEquals("failed", history.read("reply").get(0).status);
-        advance(8); worker.runAll();
+        advance(3); worker.runAll();
         assertNull(replyRing());
         assertEquals(0, sends.get());
     }
@@ -306,7 +424,7 @@ public final class AutomationDispatcherTest {
         assertNotNull(comment);
         assertEquals(3, reply.getQueueCount());
         assertEquals(1, comment.getQueueCount());
-        assertEquals(8, reply.getRetriesLeft()); // Reply variant displays countdown seconds in its small counter.
+        assertEquals(3, reply.getRetriesLeft()); // Reply variant displays countdown seconds in its small counter.
         assertEquals(android.graphics.Color.rgb(100, 178, 255), reply.getPrimaryColor());
         assertEquals(android.graphics.Color.rgb(112, 229, 211), comment.getPrimaryColor());
         assertFalse(overlap(reply, comment));
@@ -346,7 +464,7 @@ public final class AutomationDispatcherTest {
         dispatcher.setOptions(options(true, true));
         dispatcher.prepare("reply", "unknown-ring", "u", "用户", "消息", "回复", "model", () -> true,
                 callback -> sends.incrementAndGet());
-        advance(8);
+        advance(3);
         worker.runAll();
         assertEquals("publishing", replyRing().getPhase());
         replyRing().performClick();

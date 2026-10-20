@@ -13,6 +13,7 @@ import java.util.function.BooleanSupplier;
 
 /** Prepares owned audio files before automation's send acknowledgment timer starts. */
 final class SpeechPreparation {
+    // The host's native comment entry records 1-30 second clips. IM uses its own caller limit.
     interface Preparer {
         Audio prepare(Context context, String text, LocalOptions options, long maximumDuration,
                       BooleanSupplier valid) throws Exception;
@@ -40,7 +41,8 @@ final class SpeechPreparation {
     static Audio prepareComment(Context context, String text, LocalOptions options, long maximumDuration,
                                 BooleanSupplier valid, Synthesizer synthesizer) throws Exception {
         // Comment upload accepts the synthesis file; AAC encoding belongs to native IM.
-        return prepare(context, text, options, maximumDuration, valid, synthesizer, null);
+        return prepare(context, text, options, maximumDuration,
+                valid, synthesizer, null);
     }
 
     static Audio prepare(Context context, String text, LocalOptions options, long maximumDuration,
@@ -98,24 +100,46 @@ final class SpeechPreparation {
 
     static final class Failure extends Exception {
         private final String diagnostic;
+        private final String reason;
+        private final long sourceDurationMillis;
+        private final int providerCode;
+        private final int httpCode;
 
         Failure(String stage, long sourceDuration, long encodedDuration, Exception cause) {
             super("语音准备失败", cause);
-            diagnostic = "stage=" + stage + "; reason=" + reason(cause.getMessage())
+            sourceDurationMillis = Math.max(0, sourceDuration);
+            providerCode = code(cause.getMessage(), "^MiniMax 语音接口返回错误码 ([0-9]{1,9})(?:[^0-9].*)?$", 1);
+            httpCode = code(cause.getMessage(), "^(?:第三方语音 GET|MiniMax 语音(?: POST|音频下载)?) ?返回 HTTP ([1-5][0-9]{2})$", 1);
+            reason = httpCode < 0 ? reason(cause.getMessage()) : "http_" + httpCode;
+            diagnostic = "stage=" + stage + "; reason=" + reason
                     + "; sourceMillis=" + sourceDuration + "; encodedMillis=" + encodedDuration
-                    + "; error=" + cause.getClass().getSimpleName();
+                    + "; error=" + cause.getClass().getSimpleName()
+                    + (providerCode < 0 ? "" : "; providerCode=" + providerCode)
+                    + (httpCode < 0 ? "" : "; httpCode=" + httpCode);
         }
 
         String diagnostic() { return diagnostic; }
+        boolean durationLimited() { return "duration_limit".equals(reason); }
+        long sourceDurationMillis() { return sourceDurationMillis; }
+        int providerCode() { return providerCode; }
+        int httpCode() { return httpCode; }
+
+        private static int code(String message, String pattern, int group) {
+            if (message == null) return -1;
+            java.util.regex.Matcher found = java.util.regex.Pattern.compile(pattern).matcher(message);
+            return found.matches() ? Integer.parseInt(found.group(group)) : -1;
+        }
 
         private static String reason(String message) {
             if (message == null) return "unknown";
-            if (message.matches("第三方语音 GET 返回 HTTP [0-9]{3}")) {
+            if (message.matches("(?:第三方语音 GET|MiniMax 语音 POST) 返回 HTTP [0-9]{3}")) {
                 return "http_" + message.substring(message.length() - 3);
             }
+            if (message.startsWith("MiniMax 语音接口返回错误码 ")) return "provider_api";
             switch (message) {
                 case "语音生成超时": case "第三方语音生成超时":
-                case "第三方语音 GET 请求超时": case "本地语音生成超时": return "timeout";
+                case "第三方语音 GET 请求超时": case "本地语音生成超时":
+                case "MiniMax 语音生成超时": case "MiniMax 语音 POST 请求超时": return "timeout";
                 case "生成的语音文件无效": return "invalid_audio";
                 case "语音内容为空或过长": return "engine_text_limit";
                 case "语音超过当前发送入口的时长限制": return "duration_limit";

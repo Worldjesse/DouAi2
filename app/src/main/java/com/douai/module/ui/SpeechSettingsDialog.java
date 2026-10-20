@@ -21,10 +21,13 @@ import android.widget.Spinner;
 import android.widget.TextView;
 
 import com.douai.module.config.LocalOptions;
+import com.douai.module.config.MiniMaxSpeechOptions;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.config.SpeechSettings;
 import com.douai.module.config.ThirdPartyRequestTemplate;
 import com.douai.module.feature.LocalSpeechSynthesis;
+import com.douai.module.feature.MiniMaxSpeechClient;
+import com.douai.module.feature.MiniMaxSpeechModelCatalog;
 import com.douai.module.feature.SpeechHttpClient;
 import com.douai.module.feature.SpeechSynthesis;
 import com.douai.module.feature.ThirdPartyResponse;
@@ -63,6 +66,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
     private final LinearLayout content;
     private final AlertDialog dialog;
     private LinearLayout advancedContent;
+    private LinearLayout minimaxAdvancedContent;
     private SpeechHttpClient.Request fetch;
     private Future<?> future;
     private SpeechSynthesis preview;
@@ -86,16 +90,33 @@ final class SpeechSettingsDialog implements AutoCloseable {
 
     private void render() {
         content.removeAllViews();
-        boolean third = SpeechSettings.THIRD_PARTY.equals(store.getString(SpeechSettings.PROVIDER, SpeechSettings.LOCAL));
-        option("语音来源", third ? "第三方" : "系统引擎", () -> show(builder("语音来源")
-                .setSingleChoiceItems(new String[]{"系统引擎", "第三方"}, third ? 1 : 0, (choice, which) -> {
-                    store.putString(SpeechSettings.PROVIDER, which == 1 ? SpeechSettings.THIRD_PARTY : SpeechSettings.LOCAL);
+        SpeechSettings speech = settings();
+        boolean third = speech.thirdParty;
+        option("语音来源", speech.minimax ? "MiniMax" : third ? "第三方" : "系统引擎", () -> show(builder("语音来源")
+                .setSingleChoiceItems(new String[]{"系统引擎", "第三方", "MiniMax"}, speech.minimax ? 2 : third ? 1 : 0, (choice, which) -> {
+                    store.putString(SpeechSettings.PROVIDER, which == 2 ? SpeechSettings.MINIMAX
+                            : which == 1 ? SpeechSettings.THIRD_PARTY : SpeechSettings.LOCAL);
                     stopPreview();
                     cancelFetch();
                     choice.dismiss();
                     render();
                 }).setNegativeButton("取消", null).create(), null));
-        if (!third) {
+        if (speech.minimax) {
+            editable("API Key", SpeechSettings.MINIMAX_API_KEY, "", true);
+            editable("API 地址", SpeechSettings.MINIMAX_BASE_URL, SpeechSettings.DEFAULT_MINIMAX_BASE_URL, false);
+            option("模型", speech.minimaxModel, this::selectMiniMaxModel);
+            if (!MiniMaxSpeechModelCatalog.builtInModels().contains(speech.minimaxModel)) {
+                TextView capability = new TextView(context);
+                capability.setTag("speech.model.capability");
+                capability.setText("当前模型的高级参数能力未验证，请先试听。");
+                content.addView(capability, matchWrap());
+            }
+            option("音色", voiceLabel(), this::selectVoice);
+            editable("语速", SpeechSettings.MINIMAX_SPEED, "1", false);
+            editable("音量", SpeechSettings.MINIMAX_VOLUME, "1", false);
+            editable("音调", SpeechSettings.MINIMAX_PITCH, "0", false);
+            option("MiniMax 高级设置", null, this::miniMaxAdvanced);
+        } else if (!third) {
             editable("语音引擎", "tts_engine", "", false);
             editable("语音语言", "tts_language", "zh-CN", false);
             editable("语速", SpeechSettings.RATE, "", false);
@@ -113,6 +134,118 @@ final class SpeechSettingsDialog implements AutoCloseable {
         }
         option("试听", null, this::testSpeech);
         if (advancedContent != null) renderAdvanced(advancedContent);
+        if (minimaxAdvancedContent != null) renderMiniMaxAdvanced(minimaxAdvancedContent);
+    }
+
+    private void selectMiniMaxModel() {
+        List<String> models = new ArrayList<>();
+        String source = store.getString(SpeechSettings.MINIMAX_MODEL_SOURCE, "built_in");
+        try {
+            String sample = store.getString(SpeechSettings.MINIMAX_MODEL_SAMPLE, "[]");
+            if (sample.length() > 2 * 1024 * 1024) throw new IllegalArgumentException();
+            org.json.JSONArray cached = new org.json.JSONArray(sample);
+            if (cached.length() > 256) throw new IllegalArgumentException();
+            for (int index = 0; index < cached.length(); index++) {
+                String model = SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_MODEL, cached.getString(index));
+                if (!models.contains(model)) models.add(model);
+            }
+        } catch (Exception ignored) { models.clear(); }
+        if (models.isEmpty()) {
+            models.addAll(MiniMaxSpeechModelCatalog.builtInModels());
+            source = "built_in";
+        }
+        chooseMiniMaxModels(models, source);
+    }
+
+    private void chooseMiniMaxModels(List<String> catalog, String source) {
+        List<String> models = new ArrayList<>(catalog);
+        String current = settings().minimaxModel;
+        boolean manual = !current.isEmpty() && !models.contains(current);
+        if (manual) models.add(0, current);
+        String[] labels = models.toArray(new String[0]);
+        if (manual) labels[0] += "（当前模型，未在列表中）";
+        Map<String, Object> values = speechValues();
+        for (int index = 0; index < models.size(); index++) {
+            String issue = MiniMaxSpeechOptions.candidateIssue(values, SpeechSettings.MINIMAX_MODEL, models.get(index));
+            if (!issue.isEmpty()) labels[index] += "\n不适用：" + issue;
+        }
+        String sourceLabel = "api".equals(source) ? "接口列表" : "document".equals(source) ? "官方文档列表" : "内置官方列表";
+        show(builder("模型 · " + sourceLabel).setSingleChoiceItems(labels, models.indexOf(current), (choice, index) -> {
+            try { validateMiniMaxChange(SpeechSettings.MINIMAX_MODEL, models.get(index)); }
+            catch (IllegalArgumentException failure) { toast(error(failure)); return; }
+            store.putString(SpeechSettings.MINIMAX_MODEL, models.get(index));
+            settingChanged(SpeechSettings.MINIMAX_MODEL);
+            choice.dismiss();
+            render();
+        }).setPositiveButton("刷新", (choice, index) -> main.post(this::chooseMiniMaxRefreshSource))
+                .setNeutralButton("手动填写", (choice, index) -> main.post(this::manualMiniMaxModel))
+                .setNegativeButton("关闭", null).create(), null);
+    }
+
+    private void chooseMiniMaxRefreshSource() {
+        if (closed) return;
+        show(builder("刷新模型列表").setItems(new String[]{"当前接口模型（使用 API Key）", "MiniMax 官方目录（无需 Key）"},
+                (choice, index) -> refreshMiniMaxModels(index == 1)).setNegativeButton("取消", null).create(), null);
+    }
+
+    private void manualMiniMaxModel() {
+        if (closed) return;
+        LinearLayout form = form();
+        EditText value = input(form, "模型", settings().minimaxModel, false);
+        AlertDialog editor = builder("模型").setView(form).setNegativeButton("取消", null)
+                .setPositiveButton("保存", null).create();
+        show(editor, null);
+        editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
+            try {
+                String candidate = SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_MODEL, value.getText().toString());
+                validateMiniMaxChange(SpeechSettings.MINIMAX_MODEL, candidate);
+                store.putString(SpeechSettings.MINIMAX_MODEL, candidate);
+                settingChanged(SpeechSettings.MINIMAX_MODEL);
+                editor.dismiss();
+                render();
+            } catch (IllegalArgumentException failure) { value.setError(error(failure)); }
+        });
+    }
+
+    private void refreshMiniMaxModels(boolean document) {
+        if (fetch != null) { toast("列表正在获取"); return; }
+        SpeechSettings settings = settings();
+        SpeechHttpClient.Request request = new SpeechHttpClient.Request();
+        fetch = request;
+        toast(document ? "正在读取 MiniMax 官方文档中的语音模型列表" : "正在获取 MiniMax 接口的语音模型列表");
+        try {
+            future = WORKER.submit(() -> {
+                try {
+                    List<String> models = document ? MiniMaxSpeechClient.fetchDocumentModels(request)
+                            : MiniMaxSpeechClient.fetchModels(request, settings);
+                    if (models.isEmpty()) throw new IllegalArgumentException("模型列表为空");
+                    org.json.JSONArray catalog = new org.json.JSONArray();
+                    for (String model : models) catalog.put(SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_MODEL, model));
+                    String sample = catalog.toString();
+                    main.post(() -> {
+                        if (closed || fetch != request) return;
+                        fetch = null;
+                        future = null;
+                        store.putString(SpeechSettings.MINIMAX_MODEL_SAMPLE, sample);
+                        store.putString(SpeechSettings.MINIMAX_MODEL_SOURCE, document ? "document" : "api");
+                        render();
+                        chooseMiniMaxModels(models, document ? "document" : "api");
+                    });
+                } catch (Exception failure) {
+                    main.post(() -> {
+                        if (closed || fetch != request) return;
+                        fetch = null;
+                        future = null;
+                        toast(error(failure) + (document ? "\n原列表已保留，可手动填写"
+                                : "\n原列表已保留，可刷新官方列表或手动填写"));
+                    });
+                } finally { request.close(); }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException failure) {
+            fetch = null;
+            request.close();
+            toast("模型请求队列已满");
+        }
     }
 
     private void advanced() {
@@ -123,6 +256,82 @@ final class SpeechSettingsDialog implements AutoCloseable {
         show(advanced, () -> {
             if (advancedContent == form) advancedContent = null;
         });
+    }
+
+    private void miniMaxAdvanced() {
+        LinearLayout form = form();
+        minimaxAdvancedContent = form;
+        renderMiniMaxAdvanced(form);
+        AlertDialog advanced = builder("MiniMax 高级设置").setView(scroll(form)).setNegativeButton("返回", null).create();
+        show(advanced, () -> {
+            if (minimaxAdvancedContent == form) minimaxAdvancedContent = null;
+        });
+    }
+
+    private void renderMiniMaxAdvanced(LinearLayout form) {
+        form.removeAllViews();
+        TextView explanation = new TextView(context);
+        explanation.setText("文本归一化可改善数字等内容的朗读。下方音色调整独立于主页面音调：音高负值更低沉、正值更明亮；音强负值更刚劲、正值更柔和；音色负值更浑厚、正值更清脆。发音字典每行一条，例如 处理/(chu3)(li3)。");
+        form.addView(explanation, matchWrap());
+        miniMaxChoice(form, "情绪", MiniMaxSpeechOptions.EMOTION, MiniMaxSpeechOptions.EMOTIONS,
+                new String[]{"自动", "高兴", "悲伤", "愤怒", "恐惧", "厌恶", "惊讶", "平静", "流利（仅 2.6）", "低语（仅 2.6）"});
+        String[] languages = MiniMaxSpeechOptions.LANGUAGES.clone();
+        languages[0] = "不指定";
+        for (int index = 1; index < languages.length; index++) {
+            if ("Chinese".equals(languages[index])) languages[index] = "中文 · Chinese";
+            else if ("Chinese,Yue".equals(languages[index])) languages[index] = "粤语 · Chinese,Yue";
+            else if ("auto".equals(languages[index])) languages[index] = "自动识别 · auto";
+        }
+        miniMaxChoice(form, "语言增强", MiniMaxSpeechOptions.LANGUAGE_BOOST, MiniMaxSpeechOptions.LANGUAGES, languages);
+        miniMaxChoice(form, "文本归一化", MiniMaxSpeechOptions.TEXT_NORMALIZATION_MODE, MiniMaxSpeechOptions.NORMALIZATION_MODES,
+                new String[]{"不指定", "基础 · basic", "高质量 · quality（仅 2.8 / 2.6）"});
+        miniMaxChoice(form, "音频格式", MiniMaxSpeechOptions.AUDIO_FORMAT, MiniMaxSpeechOptions.FORMATS,
+                new String[]{"MP3", "WAV", "FLAC"});
+        miniMaxChoice(form, "采样率", MiniMaxSpeechOptions.SAMPLE_RATE, MiniMaxSpeechOptions.SAMPLE_RATES,
+                new String[]{"8000 Hz", "16000 Hz", "22050 Hz", "24000 Hz", "32000 Hz", "44100 Hz"});
+        if ("mp3".equals(settings().minimaxOptions.audioFormat)) {
+            miniMaxChoice(form, "MP3 码率", MiniMaxSpeechOptions.BITRATE, MiniMaxSpeechOptions.BITRATES,
+                    new String[]{"32 kbps", "64 kbps", "128 kbps", "256 kbps"});
+        }
+        miniMaxChoice(form, "声道", MiniMaxSpeechOptions.CHANNEL, MiniMaxSpeechOptions.CHANNELS,
+                new String[]{"单声道", "双声道"});
+        editable(form, "音高调整（-100 至 100）", MiniMaxSpeechOptions.MODIFY_PITCH, "0", false);
+        editable(form, "音强调整（-100 至 100）", MiniMaxSpeechOptions.MODIFY_INTENSITY, "0", false);
+        editable(form, "音色调整（-100 至 100）", MiniMaxSpeechOptions.MODIFY_TIMBRE, "0", false);
+        miniMaxChoice(form, "声音效果", MiniMaxSpeechOptions.SOUND_EFFECT, MiniMaxSpeechOptions.SOUND_EFFECTS,
+                new String[]{"不使用", "空旷回声", "礼堂回声", "电话音质", "机器人"});
+        editable(form, "发音字典（每行 原文/替换内容）", MiniMaxSpeechOptions.PRONUNCIATION_TONE, "", false);
+        miniMaxChoice(form, "LaTeX 朗读", MiniMaxSpeechOptions.LATEX_READ, MiniMaxSpeechOptions.OPTIONAL_BOOLEANS,
+                new String[]{"不指定", "开启（仅中文）", "关闭"});
+        miniMaxChoice(form, "AIGC 水印", MiniMaxSpeechOptions.AIGC_WATERMARK, MiniMaxSpeechOptions.OPTIONAL_BOOLEANS,
+                new String[]{"不指定", "开启", "关闭"});
+    }
+
+    private void miniMaxChoice(LinearLayout form, String title, String key, String[] choices, String[] labels) {
+        String value = store.getString(key, MiniMaxSpeechOptions.defaultValue(key));
+        int selected = java.util.Arrays.asList(choices).indexOf(value);
+        String[] candidates = labels.clone();
+        Map<String, Object> values = speechValues();
+        for (int index = 0; index < choices.length; index++) {
+            String issue = MiniMaxSpeechOptions.candidateIssue(values, key, choices[index]);
+            if (!issue.isEmpty()) candidates[index] += "\n不适用：" + issue;
+        }
+        option(form, title, selected < 0 ? "请重新选择" : labels[selected], () -> show(builder(title)
+                .setSingleChoiceItems(candidates, selected, (choice, index) -> {
+                    try {
+                        String candidate = MiniMaxSpeechOptions.validateValue(key, choices[index]);
+                        validateMiniMaxChange(key, candidate);
+                        store.putString(key, candidate);
+                        settingChanged(key);
+                        choice.dismiss();
+                        render();
+                    } catch (IllegalArgumentException failure) { toast(error(failure)); }
+                }).setNegativeButton("取消", null).create(), null));
+    }
+
+    private void validateMiniMaxChange(String key, String value) {
+        String issue = MiniMaxSpeechOptions.candidateIssue(speechValues(), key, value);
+        if (!issue.isEmpty()) throw new IllegalArgumentException(issue);
     }
 
     private void renderAdvanced(LinearLayout form) {
@@ -136,6 +345,8 @@ final class SpeechSettingsDialog implements AutoCloseable {
 
     private String voiceLabel() {
         SpeechSettings settings = settings();
+        if (settings.minimax) return settings.minimaxVoiceName.isEmpty() ? settings.minimaxVoiceId
+                : settings.minimaxVoiceName + " · " + settings.minimaxVoiceId;
         return settings.selectedVoiceName.isEmpty() ? settings.selectedVoice : settings.selectedVoiceName + " · " + settings.selectedVoice;
     }
 
@@ -251,6 +462,8 @@ final class SpeechSettingsDialog implements AutoCloseable {
                     if (SpeechSettings.RATE.equals(key) || SpeechSettings.PITCH.equals(key)) {
                         candidate = SpeechSettings.validateLocalRateOrPitch(candidate);
                     }
+                    if (key.startsWith("tts_minimax_")) candidate = SpeechSettings.validateMiniMaxValue(key, candidate);
+                    if (MiniMaxSpeechOptions.isKey(key)) validateMiniMaxChange(key, candidate);
                     if (SpeechSettings.GET_TEMPLATE.equals(key)) ThirdPartyRequestTemplate.parse(candidate, "{text}", "{voice}");
                     if (SpeechSettings.VOICE_GET_TEMPLATE.equals(key) && !candidate.isEmpty()) ThirdPartyRequestTemplate.parse(candidate, new String[0]);
                     if (SpeechSettings.HEADERS.equals(key) || SpeechSettings.VOICE_HEADERS.equals(key)) {
@@ -378,19 +591,36 @@ final class SpeechSettingsDialog implements AutoCloseable {
     private void refreshVoices() {
         if (fetch != null) { toast("音色列表正在获取"); return; }
         SpeechSettings settings = settings();
+        if (settings.minimax) {
+            try {
+                if (settings.minimaxApiKey.isEmpty()) throw new IllegalArgumentException("请先设置 MiniMax API Key");
+                SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_API_KEY, settings.minimaxApiKey);
+                SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_BASE_URL, settings.minimaxBaseUrl);
+            } catch (IllegalArgumentException invalid) { toast(error(invalid)); return; }
+        }
         SpeechHttpClient.Request request = new SpeechHttpClient.Request();
         fetch = request;
         toast("正在获取音色列表");
         try {
             future = WORKER.submit(() -> {
                 try {
-                    String body = request.fetchText(settings.voiceGetTemplate, settings.voiceHeaders);
-                    List<VoiceCatalog.Entry> entries = VoiceCatalog.parse(body, settings);
+                    String body;
+                    List<VoiceCatalog.Entry> entries;
+                    if (settings.minimax) {
+                        entries = MiniMaxSpeechClient.fetchVoices(request, settings);
+                        org.json.JSONArray catalog = new org.json.JSONArray();
+                        for (VoiceCatalog.Entry entry : entries) catalog.put(new org.json.JSONObject().put("id", entry.id).put("name", entry.name));
+                        body = catalog.toString();
+                    } else {
+                        body = request.fetchText(settings.voiceGetTemplate, settings.voiceHeaders);
+                        entries = VoiceCatalog.parse(body, settings);
+                    }
+                    String sample = body;
                     main.post(() -> {
                         if (closed || fetch != request) return;
                         fetch = null;
                         future = null;
-                        store.putString(VOICE_SAMPLE, body);
+                        store.putString(settings.minimax ? SpeechSettings.MINIMAX_VOICE_SAMPLE : VOICE_SAMPLE, sample);
                         render();
                         chooseVoices(entries);
                     });
@@ -399,7 +629,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
                         if (closed || fetch != request) return;
                         fetch = null;
                         future = null;
-                        toast(error(failure));
+                        toast(error(failure) + (settings.minimax ? "\n原音色列表已保留，可手动填写" : ""));
                     });
                 } finally { request.close(); }
             });
@@ -411,7 +641,15 @@ final class SpeechSettingsDialog implements AutoCloseable {
     }
 
     private void selectVoice() {
-        try { chooseVoices(VoiceCatalog.parse(store.getString(VOICE_SAMPLE, ""), settings())); }
+        SpeechSettings settings = settings();
+        if (settings.minimax) {
+            List<VoiceCatalog.Entry> entries = java.util.Collections.emptyList();
+            try { entries = VoiceCatalog.parse(store.getString(SpeechSettings.MINIMAX_VOICE_SAMPLE, ""), "", "", ""); }
+            catch (Exception ignored) { }
+            chooseVoices(entries);
+            return;
+        }
+        try { chooseVoices(VoiceCatalog.parse(store.getString(VOICE_SAMPLE, ""), settings)); }
         catch (Exception ignored) {
             show(builder("音色").setItems(new String[]{"获取音色列表", "手动填写音色编号"}, (choice, index) -> {
                 if (index == 0) refreshVoices(); else manualVoice();
@@ -422,35 +660,46 @@ final class SpeechSettingsDialog implements AutoCloseable {
     private void chooseVoices(List<VoiceCatalog.Entry> entries) {
         String[] labels = new String[entries.size()];
         int selected = -1;
-        String current = settings().selectedVoice;
+        boolean minimax = settings().minimax;
+        String current = minimax ? settings().minimaxVoiceId : settings().selectedVoice;
         for (int i = 0; i < entries.size(); i++) {
             VoiceCatalog.Entry entry = entries.get(i);
             labels[i] = entry.name + " · " + entry.id;
             if (entry.id.equals(current)) selected = i;
         }
-        show(builder("音色").setSingleChoiceItems(labels, selected, (choice, index) -> {
+        AlertDialog.Builder picker = builder("音色").setSingleChoiceItems(labels, selected, (choice, index) -> {
             VoiceCatalog.Entry entry = entries.get(index);
-            store.putString(SpeechSettings.SELECTED_VOICE, entry.id);
-            store.putString(SpeechSettings.SELECTED_VOICE_NAME, entry.name);
+            store.putString(minimax ? SpeechSettings.MINIMAX_VOICE_ID : SpeechSettings.SELECTED_VOICE, entry.id);
+            store.putString(minimax ? SpeechSettings.MINIMAX_VOICE_NAME : SpeechSettings.SELECTED_VOICE_NAME, entry.name);
             stopPreview();
             choice.dismiss();
             render();
         }).setNeutralButton("手动填写", (choice, index) -> main.post(this::manualVoice))
-                .setNegativeButton("取消", null).create(), null);
+                .setNegativeButton(minimax ? "关闭" : "取消", null);
+        if (minimax) {
+            picker.setPositiveButton("刷新", (choice, index) -> refreshVoices());
+            if (entries.isEmpty()) picker.setMessage("尚无缓存音色，点击刷新获取当前账户的音色，或手动填写音色 ID。");
+        }
+        show(picker.create(), null);
     }
 
     private void manualVoice() {
         if (closed) return;
         LinearLayout form = form();
-        EditText value = input(form, "音色编号", settings().selectedVoice, false);
+        boolean minimax = settings().minimax;
+        EditText value = input(form, "音色编号", minimax ? settings().minimaxVoiceId : settings().selectedVoice, false);
         AlertDialog editor = builder("音色编号").setView(form).setNegativeButton("取消", null)
                 .setPositiveButton("保存", null).create();
         show(editor, null);
         editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
             String candidate = value.getText().toString().trim();
             if (candidate.isEmpty()) { value.setError("请输入音色编号"); return; }
-            store.putString(SpeechSettings.SELECTED_VOICE, candidate);
-            store.putString(SpeechSettings.SELECTED_VOICE_NAME, "");
+            if (minimax) {
+                try { candidate = SpeechSettings.validateMiniMaxValue(SpeechSettings.MINIMAX_VOICE_ID, candidate); }
+                catch (IllegalArgumentException invalid) { value.setError(error(invalid)); return; }
+            }
+            store.putString(minimax ? SpeechSettings.MINIMAX_VOICE_ID : SpeechSettings.SELECTED_VOICE, candidate);
+            store.putString(minimax ? SpeechSettings.MINIMAX_VOICE_NAME : SpeechSettings.SELECTED_VOICE_NAME, "");
             stopPreview();
             editor.dismiss();
             render();
@@ -514,7 +763,14 @@ final class SpeechSettingsDialog implements AutoCloseable {
 
     private void settingChanged(String key) {
         stopPreview();
-        if (key.startsWith("tts_voice_")) cancelFetch();
+        if (key.startsWith("tts_voice_") || key.startsWith("tts_minimax_")) cancelFetch();
+        if (SpeechSettings.MINIMAX_API_KEY.equals(key) || SpeechSettings.MINIMAX_BASE_URL.equals(key)) {
+            store.putString(SpeechSettings.MINIMAX_VOICE_SAMPLE, "");
+            if ("api".equals(store.getString(SpeechSettings.MINIMAX_MODEL_SOURCE, ""))) {
+                store.putString(SpeechSettings.MINIMAX_MODEL_SAMPLE, "");
+                store.putString(SpeechSettings.MINIMAX_MODEL_SOURCE, "");
+            }
+        }
     }
 
     private void cancelFetch() {
@@ -526,15 +782,26 @@ final class SpeechSettingsDialog implements AutoCloseable {
     }
 
     private LocalOptions options() {
+        return new LocalOptions(speechValues());
+    }
+
+    private Map<String, Object> speechValues() {
         Map<String, Object> values = new LinkedHashMap<>();
         for (String key : new String[]{SpeechSettings.PROVIDER, SpeechSettings.GET_TEMPLATE, SpeechSettings.HEADERS,
                 SpeechSettings.AUDIO_FIELD, SpeechSettings.VOICE_GET_TEMPLATE, SpeechSettings.VOICE_HEADERS,
                 SpeechSettings.VOICE_LIST_PATH, SpeechSettings.VOICE_ID_PATH, SpeechSettings.VOICE_NAME_PATH,
-                SpeechSettings.SELECTED_VOICE, SpeechSettings.SELECTED_VOICE_NAME, "tts_engine", "tts_language", SpeechSettings.RATE, SpeechSettings.PITCH}) {
+                SpeechSettings.SELECTED_VOICE, SpeechSettings.SELECTED_VOICE_NAME, "tts_engine", "tts_language", SpeechSettings.RATE, SpeechSettings.PITCH,
+                SpeechSettings.MINIMAX_API_KEY, SpeechSettings.MINIMAX_BASE_URL, SpeechSettings.MINIMAX_MODEL,
+                SpeechSettings.MINIMAX_VOICE_ID, SpeechSettings.MINIMAX_VOICE_NAME, SpeechSettings.MINIMAX_SPEED,
+                SpeechSettings.MINIMAX_VOLUME, SpeechSettings.MINIMAX_PITCH}) {
             String value = store.getString(key, null);
             if (value != null) values.put(key, value);
         }
-        return new LocalOptions(values);
+        for (String key : MiniMaxSpeechOptions.KEYS) {
+            String value = store.getString(key, null);
+            if (value != null) values.put(key, value);
+        }
+        return values;
     }
 
     private SpeechSettings settings() { return new SpeechSettings(options()); }

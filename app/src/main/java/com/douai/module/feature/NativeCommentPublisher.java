@@ -17,9 +17,24 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
 /** Uses the host's permission-checked publisher with a captured work context. */
 final class NativeCommentPublisher implements AutoCloseable {
+    private static final String API_SERVER_EXCEPTION = "com.ss.android.ugc.aweme.base.api.exceptions.server.ApiServerException";
+    private static final int MAX_HINT_CHARACTERS = 2048;
+    private static final Pattern HINT_URL = Pattern.compile("https?://[^\\s]+", Pattern.CASE_INSENSITIVE);
+    private static final Pattern HINT_AUTHORIZATION = Pattern.compile("\\b(?:Bearer|Basic)\\s+\\S+", Pattern.CASE_INSENSITIVE);
+    private static final String[] HINT_CATEGORIES = {"duration", "size", "format", "permission", "frequency", "parameter", "content"};
+    private static final Pattern[] HINT_KEYWORDS = {
+            Pattern.compile("时长|\\bduration\\b", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("大小|体积|\\b(?:size|oversize)\\b", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("格式|编码|\\b(?:format|codec|encoding)\\b", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("权限|无权|\\b(?:permission|forbidden)\\b", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("频繁|频率|频次|\\brate[ _-]?limit(?:ed)?\\b|\\btoo many requests\\b|\\btoo frequent\\b", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("参数|\\b(?:parameter|parameters|param)\\b", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("内容|违规|审核|\\b(?:content|moderation)\\b", Pattern.CASE_INSENSITIVE)
+    };
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Constructor<?> requestConstructor;
     private final Constructor<?> modelConstructor;
@@ -105,7 +120,13 @@ final class NativeCommentPublisher implements AutoCloseable {
                                     Pending tracked = publisher.requests.get(owner);
                                     String status = !success ? "failed" : tracked == null ? "submitted"
                                             : responseStatus(response, tracked.aid, tracked.rootId, tracked.incomingId);
-                                    publisher.received(owner, status, callbackDiagnostic(response));
+                                    String detail = callbackDiagnostic(response);
+                                    if ("sent".equals(status) && tracked != null && tracked.audioPath != null) {
+                                        detail += audioReceiptDiagnostic(response);
+                                    } else if ("failed".equals(status) && tracked != null && tracked.audioPath != null) {
+                                        detail += audioFailureHintDiagnostic(response) + tracked.audioWorkDiagnostic;
+                                    }
+                                    publisher.received(owner, status, detail);
                                 });
                             }
                         });
@@ -187,7 +208,8 @@ final class NativeCommentPublisher implements AutoCloseable {
                 ownedModels.put(model, outputText);
                 request = requestConstructor.newInstance();
                 pending = new Pending(aid, request, model, audio == null ? null : audio.file.getAbsolutePath(),
-                        reply == null ? null : reply.rootId, reply == null ? null : reply.incomingId, result);
+                        reply == null ? null : reply.rootId, reply == null ? null : reply.incomingId,
+                        audio == null ? "" : audioWorkDiagnostic(origin), result);
                 requests.put(request, pending);
                 if (!valid.getAsBoolean() || !beforeNativeSend.getAsBoolean()) {
                     received(request, "cancelled");
@@ -283,16 +305,122 @@ final class NativeCommentPublisher implements AutoCloseable {
     private void received(Object request, String status, String detail) {
         Pending pending = requests.remove(request);
         if (pending == null || closed) return;
-        safeLog("Automatic comment native callback: " + status + detail);
+        safeLog("Automatic comment native callback: " + status + detail + audioPhase(pending));
         pending.result.accept(status);
+    }
+
+    private String audioPhase(Pending pending) {
+        if (pending.audioPath == null) return "";
+        String phase = "unknown";
+        try {
+            Object audio = HostTargets.read(attachment.get(pending.model), "audio");
+            if (audioConstructor != null && audioConstructor.getDeclaringClass().isInstance(audio)) {
+                // Direct DEX 40.6.0: X/0yHx.vid:String is set by the successful uploader
+                // callback immediately before the native publisher starts its network request.
+                Field vidField = HostTargets.field(audio.getClass(), "vid");
+                if (vidField.getType() == String.class) {
+                    String vid = (String) vidField.get(audio);
+                    phase = vid == null || vid.trim().isEmpty() ? "upload_or_auth" : "publish";
+                }
+            }
+        } catch (ReflectiveOperationException | RuntimeException unavailable) { }
+        return "; audio_phase=" + phase;
     }
 
     static String callbackDiagnostic(Object response) {
         if (response == null) return "; response=null";
         Object code = HostTargets.read(response, "status_code");
         if (!(code instanceof Number)) code = HostTargets.invoke(response, "getErrorCode");
+        if (!(code instanceof Number)) code = HostTargets.read(response, "errorCode");
         return "; response=" + response.getClass().getSimpleName()
                 + (code instanceof Number ? "; code=" + ((Number) code).longValue() : "");
+    }
+
+    private static String audioFailureHintDiagnostic(Object response) {
+        String hint = "unknown";
+        try {
+            Class<?> api = response == null ? null : response.getClass();
+            while (api != null && !API_SERVER_EXCEPTION.equals(api.getName())) api = api.getSuperclass();
+            if (api != null) {
+                // Direct DEX 40.6.0: final LIZLLL():String reads mPrompt; final LIZJ():String
+                // reads mErrorMsg. The native error UI prefers a nonempty prompt over mErrorMsg.
+                Method promptGetter = api.getDeclaredMethod("LIZLLL");
+                Method errorGetter = api.getDeclaredMethod("LIZJ");
+                if (verifiedHintGetter(promptGetter) && verifiedHintGetter(errorGetter)) {
+                    String prompt = boundedHint((String) promptGetter.invoke(response));
+                    String message = prompt.isEmpty() ? boundedHint((String) errorGetter.invoke(response)) : prompt;
+                    if (message.isEmpty()) hint = "empty";
+                    else {
+                        // URLs and authentication tokens must not supply misleading keyword matches.
+                        String inspected = HINT_AUTHORIZATION.matcher(HINT_URL.matcher(message).replaceAll(" ")).replaceAll(" ");
+                        StringBuilder categories = new StringBuilder();
+                        for (int index = 0; index < HINT_CATEGORIES.length; index++) {
+                            if (!HINT_KEYWORDS[index].matcher(inspected).find()) continue;
+                            if (categories.length() > 0) categories.append('+');
+                            categories.append(HINT_CATEGORIES[index]);
+                        }
+                        hint = categories.length() == 0 ? "other" : categories.toString();
+                    }
+                }
+            }
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError unavailable) { }
+        return "; audio_hint=" + hint;
+    }
+
+    private static boolean verifiedHintGetter(Method method) {
+        int modifiers = method.getModifiers();
+        return method.getReturnType() == String.class && method.getParameterCount() == 0
+                && Modifier.isPublic(modifiers) && Modifier.isFinal(modifiers) && !Modifier.isStatic(modifiers);
+    }
+
+    private static String boundedHint(String value) {
+        return value == null ? "" : value.substring(0, Math.min(value.length(), MAX_HINT_CHARACTERS)).trim();
+    }
+
+    private static String audioWorkDiagnostic(Object work) {
+        // Direct DEX 40.6.0 0yAP.LJI/LJIJI read these fields. They describe UI policy;
+        // this snapshot is diagnostic only and never decides whether a request may be sent.
+        Object config = diagnosticField(work, "feedCommentConfig", null);
+        Object permission = diagnosticField(config, "audioCommentPermission", int.class);
+        Object blockConfig = diagnosticField(config, "commentBlockConfig", null);
+        Object blocked = diagnosticField(blockConfig, "blockAudio", boolean.class);
+        return "; audio_permission=" + (permission instanceof Integer ? permission : "unknown")
+                + "; audio_block=" + (blocked instanceof Boolean ? blocked : "unknown");
+    }
+
+    private static Object diagnosticField(Object owner, String name, Class<?> expected) {
+        if (owner == null) return null;
+        try {
+            Field field = HostTargets.field(owner.getClass(), name);
+            if (Modifier.isStatic(field.getModifiers()) || expected != null && field.getType() != expected) return null;
+            return field.get(owner);
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError unavailable) { return null; }
+    }
+
+    static String audioReceiptDiagnostic(Object response) {
+        String receipt = "unknown";
+        try {
+            if (response != null) {
+                Field commentField = HostTargets.field(response.getClass(), "comment");
+                Field audioField = HostTargets.field(commentField.getType(), "commentAudio");
+                // Direct DEX 40.6.0 CommentAudioStruct: a:String is vid; e:Long is duration.
+                // A structurally different host response cannot establish this media contract.
+                Field vidField = HostTargets.field(audioField.getType(), "a");
+                Field durationField = HostTargets.field(audioField.getType(), "e");
+                if (vidField.getType() == String.class && durationField.getType() == Long.class) {
+                    Object comment = commentField.get(response);
+                    Object audio = comment == null ? null : audioField.get(comment);
+                    if (audio == null) receipt = "missing";
+                    else {
+                        String vid = (String) vidField.get(audio);
+                        Object duration = durationField.get(audio);
+                        receipt = vid != null && !vid.trim().isEmpty() && duration instanceof Number
+                                && ((Number) duration).longValue() > 0 ? "present" : "missing";
+                    }
+                }
+            }
+        } catch (ReflectiveOperationException | RuntimeException unavailable) { }
+        return "; audio_receipt=" + receipt;
     }
 
     static boolean validResponse(Object response, String aid) {
@@ -356,13 +484,16 @@ final class NativeCommentPublisher implements AutoCloseable {
         final String audioPath;
         final String rootId;
         final String incomingId;
+        final String audioWorkDiagnostic;
         final Consumer<String> result;
         final AtomicBoolean timedOut = new AtomicBoolean();
         boolean uploadStarted;
         boolean callbackSeen;
-        Pending(String aid, Object owner, Object model, String audioPath, String rootId, String incomingId, Consumer<String> result) {
+        Pending(String aid, Object owner, Object model, String audioPath, String rootId, String incomingId,
+                String audioWorkDiagnostic, Consumer<String> result) {
             this.aid = aid; this.owner = owner; this.model = model; this.audioPath = audioPath; this.result = result;
             this.rootId = rootId; this.incomingId = incomingId;
+            this.audioWorkDiagnostic = audioWorkDiagnostic;
         }
     }
 }
