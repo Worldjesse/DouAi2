@@ -48,17 +48,17 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     private static final String VIEW_FINDER_TAG = "douai.view_finder";
     private static final Map<Component, int[]> COMPONENT_IDS = componentIds();
     private static final int WIDGET_CONTAINER_ID = 2131362267;
-    private static final int RIGHT_MENU_ID = 2131402155;
+    private static final int RIGHT_MENU_ID = 2131402182;
     private static final String RIGHT_SCALE_CLASS = "com.ss.android.ugc.aweme.feed.ui.FeedRightScaleView";
     private static final String WIDGET_CLASS = "com.ss.android.ugc.aweme.feed.ui.PenetrateTouchRelativeLayout";
     private static final Set<Integer> HIDDEN_RESOURCE_IDS = Collections.unmodifiableSet(
             new HashSet<>(java.util.Arrays.asList(
-                    2131374336, 2131374348, 2131374349, 2131374369,
-                    2131371282, 2131371297, 2131371374, 2131371600,
-                    2131401927, 2131405160, 2131405374,
-                    2131415727, 2131415074, 2131415061, 2131379757, 2131379745,
-                    2131370690, 2131386250, 2131380047, 2131380048,
-                    2131398470, 2131401779, 2131410329)));
+                    2131374327, 2131374339, 2131374340, 2131374360,
+                    2131371285, 2131371299, 2131371376, 2131371605,
+                    2131401927, 2131405175, 2131405391,
+                    2131415727, 2131415055, 2131415033, 2131379772, 2131379761,
+                    2131370692, 2131386238, 2131380062, 2131380063,
+                    2131398470, 2131401805, 2131410333)));
     private static final String[] HIDDEN_ID_PARTS = {
             "digg", "like", "comment", "share", "avatar", "author_name", "favorite", "collect"
     };
@@ -288,11 +288,9 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
 
     @SuppressLint("ResourceType") // IDs belong to the verified host APK, not module resources.
     private void openComments(View root) {
-        View container = root.findViewById(2131371412);
-        if (container != null && !resourceMatches(container, 2131371412)) container = null;
+        View container = findComponentView(root, 2131371414);
         if (container == null) {
-            container = root.findViewById(2131371297);
-            if (container != null && !resourceMatches(container, 2131371297)) container = null;
+            container = findComponentView(root, 2131371299);
         }
         if (container == null || !container.isShown()) {
             safeLog("Component show: current comment control unavailable");
@@ -767,9 +765,10 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                                    int[] remaining, int depth) {
         if (view == null || remaining[0]-- <= 0 || depth > MAX_TREE_DEPTH || isFinderView(view)) return;
         Component component = null;
+        int canonicalId = canonicalViewId(view);
         for (Map.Entry<Component, int[]> entry : COMPONENT_IDS.entrySet()) {
             for (int id : entry.getValue()) {
-                if (view.getId() == id && resourceMatches(view, id)) {
+                if (canonicalId == id && resourceMatches(view, id)) {
                     component = entry.getKey();
                     break;
                 }
@@ -791,7 +790,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             component = Component.BOTTOM_TOOLS;
         }
         if (view != root && component != null) matches.put(view, component);
-        if (view.getId() == 2131378315 && component == Component.FEEDBACK
+        if (canonicalId == 2131378332 && component == Component.FEEDBACK
                 && view.getParent() instanceof android.widget.LinearLayout) {
             android.widget.LinearLayout wrapper = (android.widget.LinearLayout) view.getParent();
             if (wrapper != root && wrapper.getId() == View.NO_ID && wrapper.getChildCount() == 1
@@ -866,22 +865,22 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
 
     private static Map<Component, int[]> componentIds() {
         EnumMap<Component, int[]> ids = new EnumMap<>(Component.class);
-        ids.put(Component.AVATAR, new int[]{2131366221, 2131370690, 2131386250, 2131380047, 2131380048,
-                2131415727, 2131415074, 2131415061, 2131379757, 2131379745, 2131410329});
-        ids.put(Component.LIKE, new int[]{2131374356, 2131374336, 2131374348, 2131374349, 2131374369});
-        ids.put(Component.COMMENT, new int[]{2131371412, 2131371282, 2131371297, 2131371374, 2131371600});
-        ids.put(Component.COLLECT, new int[]{2131371071});
-        ids.put(Component.SHARE, new int[]{2131400515, 2131401927, 2131405160, 2131405374});
-        ids.put(Component.MUSIC_DISC, new int[]{2131416121, 2131394026, 2131394023, 2131394663});
-        ids.put(Component.CARD, new int[]{2131388599});
+        ids.put(Component.AVATAR, new int[]{2131366240, 2131370692, 2131386238, 2131380062, 2131380063,
+                2131415727, 2131415055, 2131415033, 2131379772, 2131379761, 2131410333});
+        ids.put(Component.LIKE, new int[]{2131374347, 2131374327, 2131374339, 2131374340, 2131374360});
+        ids.put(Component.COMMENT, new int[]{2131371414, 2131371285, 2131371299, 2131371376, 2131371605});
+        ids.put(Component.COLLECT, new int[]{2131371073});
+        ids.put(Component.SHARE, new int[]{2131400515, 2131401927, 2131405175, 2131405391});
+        ids.put(Component.MUSIC_DISC, new int[]{2131416104, 2131394015, 2131394011, 2131394653});
+        ids.put(Component.CARD, new int[]{2131388590});
         ids.put(Component.AUTHOR, new int[]{2131398470});
-        ids.put(Component.CO_CREATION, new int[]{2131370900, 2131370902});
-        ids.put(Component.MUSIC_INFO, new int[]{2131416122, 2131394225, 2131394230});
-        ids.put(Component.FULLSCREEN, new int[]{2131393288, 2131393289});
-        ids.put(Component.FEEDBACK, new int[]{2131371905, 2131378315});
-        ids.put(Component.PROGRESS, new int[]{2131378120, 2131369826});
-        ids.put(Component.BOTTOM_TOOLS, new int[]{2131367345, 2131378359, 2131378361});
-        ids.put(Component.TIME_LOCATION, new int[]{2131415983, 2131378145});
+        ids.put(Component.CO_CREATION, new int[]{2131370902, 2131370904});
+        ids.put(Component.MUSIC_INFO, new int[]{2131416105, 2131394215, 2131394220});
+        ids.put(Component.FULLSCREEN, new int[]{2131393278, 2131393279});
+        ids.put(Component.FEEDBACK, new int[]{2131371909, 2131378332});
+        ids.put(Component.PROGRESS, new int[]{2131378139, 2131369833});
+        ids.put(Component.BOTTOM_TOOLS, new int[]{2131367357, 2131378377, 2131378379});
+        ids.put(Component.TIME_LOCATION, new int[]{2131415966, 2131378163});
         return Collections.unmodifiableMap(ids);
     }
 
@@ -949,8 +948,9 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         if (view == null || remaining[0]-- <= 0 || depth > MAX_TREE_DEPTH || isFinderView(view)) return;
         boolean match = false;
         if (view.getId() != View.NO_ID) {
-            match = isHiddenResourceId(view.getId())
-                    && resourceMatches(view, view.getId());
+            int canonicalId = canonicalViewId(view);
+            match = isHiddenResourceId(canonicalId)
+                    && resourceMatches(view, canonicalId);
             try {
                 if (!match) {
                     String name = view.getResources().getResourceEntryName(view.getId())
@@ -977,8 +977,8 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     }
 
     private boolean isAuthor(View view) {
-        int id = view.getId();
-        if ((id == 2131398470 || id == 2131401779 || id == 2131410329)
+        int id = canonicalViewId(view);
+        if ((id == 2131398470 || id == 2131401805 || id == 2131410333)
                 && resourceMatches(view, id)) return true;
         CharSequence description = view.getContentDescription();
         if (description != null) {
@@ -986,7 +986,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
             if (text.contains("avatar") || text.contains("作者") || text.contains("用户头像")) return true;
         }
         try {
-            String name = view.getResources().getResourceEntryName(id).toLowerCase(java.util.Locale.ROOT);
+            String name = view.getResources().getResourceEntryName(view.getId()).toLowerCase(java.util.Locale.ROOT);
             return name.contains("author") || name.contains("avatar");
         } catch (RuntimeException ignored) {
             return false;
@@ -1026,10 +1026,20 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         return HIDDEN_RESOURCE_IDS.contains(resourceId);
     }
 
-    private boolean resourceMatches(View view, int resourceId) {
-        if (view.getId() != resourceId) return false;
-        if (!validateResourceNames || HostResourceCatalog.matches(resourceId, view.getResources())) return true;
-        resourceMismatches.add(resourceId);
+    private int canonicalViewId(View view) {
+        return validateResourceNames ? HostResourceCatalog.canonicalId(view.getId(), view.getResources()) : view.getId();
+    }
+
+    @SuppressLint("ResourceType")
+    private View findComponentView(View root, int canonicalId) {
+        return validateResourceNames ? HostResourceCatalog.findVerifiedView(root, canonicalId)
+                : root.findViewById(canonicalId);
+    }
+
+    private boolean resourceMatches(View view, int canonicalId) {
+        if (canonicalId == View.NO_ID) return false;
+        if (canonicalViewId(view) == canonicalId) return true;
+        if (validateResourceNames) resourceMismatches.add(canonicalId);
         return false;
     }
 

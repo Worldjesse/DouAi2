@@ -99,7 +99,7 @@ public final class FeedProgressDiagnosticsTest {
         progress.setTag("private progress tag");
         page.addView(progress);
         ResourceView foreignMount = new ResourceView(context, "private.package", "private_name");
-        foreignMount.setId(2131378120);
+        foreignMount.setId(2131378139);
         page.addView(foreignMount);
 
         String snapshot = join(FeedProgressDiagnostics.capture(page, page, view -> null));
@@ -112,23 +112,23 @@ public final class FeedProgressDiagnosticsTest {
     @Test public void recognizesMountsOnlyWhenBothPackageAndExactResourceNameMatch() {
         Context context = RuntimeEnvironment.getApplication();
         FrameLayout page = new FrameLayout(context);
-        ResourceView progressMount = new ResourceView(context, HostResourceCatalog.VERIFIED_PACKAGE, "i=8");
-        progressMount.setId(2131378120);
+        ResourceView progressMount = new ResourceView(context, HostResourceCatalog.VERIFIED_PACKAGE, "i_k");
+        progressMount.setId(2131378139);
         page.addView(progressMount);
-        ResourceView chapterMount = new ResourceView(context, HostResourceCatalog.VERIFIED_PACKAGE, "i=5");
-        chapterMount.setId(2131378117);
+        ResourceView chapterMount = new ResourceView(context, HostResourceCatalog.VERIFIED_PACKAGE, "i_f");
+        chapterMount.setId(2131378134);
         page.addView(chapterMount);
         ResourceView changedName = new ResourceView(context, HostResourceCatalog.VERIFIED_PACKAGE, "changed");
-        changedName.setId(2131378120);
+        changedName.setId(2131378139);
         page.addView(changedName);
-        ResourceView foreignPackage = new ResourceView(context, "com.example", "i=5");
-        foreignPackage.setId(2131378117);
+        ResourceView foreignPackage = new ResourceView(context, "com.example", "i_f");
+        foreignPackage.setId(2131378134);
         page.addView(foreignPackage);
 
         List<String> snapshot = FeedProgressDiagnostics.capture(page, page, view -> null);
         assertEquals(2, snapshot.stream().filter(line -> line.contains(" class=" + ResourceView.class.getName())).count());
-        assertTrue(join(snapshot).contains("res=i=8"));
-        assertTrue(join(snapshot).contains("res=i=5"));
+        assertTrue(join(snapshot).contains("res=i_k"));
+        assertTrue(join(snapshot).contains("res=i_f"));
         assertFalse(join(snapshot).contains("res=changed"));
     }
 
@@ -186,7 +186,12 @@ public final class FeedProgressDiagnosticsTest {
             Resources original = context.getResources();
             testResources = new Resources(original.getAssets(), original.getDisplayMetrics(), original.getConfiguration()) {
                 @Override public String getResourcePackageName(int id) { return packageName; }
-                @Override public String getResourceEntryName(int id) { return resourceName; }
+                @Override public String getResourceEntryName(int id) {
+                    if (id == ResourceView.this.getId()) return resourceName;
+                    String known = com.douai.module.scan.HostAdaptation.PROFILE_408.getFeedResources().get(id);
+                    if (known == null) throw new Resources.NotFoundException();
+                    return known;
+                }
             };
         }
         @Override public Resources getResources() {

@@ -147,6 +147,27 @@ class ReleaseGateTest(unittest.TestCase):
         with self.assertRaisesRegex(gate.VerificationError, "Host APK"):
             self.seal()
 
+    def test_explicit_legacy_and_latest_profiles_are_both_valid_host_identities(self):
+        source = ('TARGET_PACKAGE = "com.ss.android.ugc.aweme"; '
+                  'VERIFIED_VERSION_NAME = "40.8.0"; VERIFIED_VERSION_CODE = 400801L; '
+                  'public static final Profile PROFILE_406 = new Profile("40.6.0", 400601L, "old", "hash", null); '
+                  'public static final Profile PROFILE_408 = new Profile("40.8.0", 400801L, "new", "hash", null);')
+        identities = gate.verified_host_identities(source)
+        self.assertEqual({("40.6.0", 400601), ("40.8.0", 400801)},
+                         {(item["versionName"], item["versionCode"]) for item in identities})
+        self.assertTrue(all(item["packageName"] == "com.ss.android.ugc.aweme" for item in identities))
+
+    def test_legacy_host_can_seal_only_when_its_exact_profile_is_declared(self):
+        source = self.root / "app/src/main/java/com/douai/module/scan/HostAdaptation.java"
+        self.write(source, 'TARGET_PACKAGE = "com.ss.android.ugc.aweme"; '
+                   'VERIFIED_VERSION_NAME = "40.8.0"; VERIFIED_VERSION_CODE = 400801L; '
+                   'public static final Profile PROFILE_406 = new Profile("40.6.0", 400601L, "old", "hash", null);')
+        self.seal()
+        self.write(self.run / "host-badging.txt",
+                   "package: name='com.ss.android.ugc.aweme' versionCode='400801' versionName='40.6.0'")
+        with self.assertRaisesRegex(gate.VerificationError, "Host APK"):
+            self.seal()
+
     def test_wrong_certificate_or_missing_v3_is_rejected(self):
         valid = (self.run / "apk-signature.txt").read_text()
         for text in (valid.replace(gate.CERTIFICATE_SHA256, "A" * 64), valid.replace(": true", ": false")):

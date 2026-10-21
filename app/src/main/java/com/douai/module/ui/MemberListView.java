@@ -2,7 +2,6 @@ package com.douai.module.ui;
 
 import android.content.Context;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.text.Editable;
@@ -19,35 +18,41 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
-import com.douai.module.feature.AutomationImages;
-import com.douai.module.feature.ChatImage;
+import com.douai.module.feature.AvatarImageLoader;
 import com.douai.module.feature.ProfileListEntry;
 import com.douai.module.ui.miuix.MiuixFormControls;
 import com.douai.module.BuildConfig;
 import com.douai.module.R;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 
 /** Searchable, recycled identity rows shared by every member and conversation picker. */
 public final class MemberListView extends LinearLayout implements AutoCloseable {
+    interface AvatarLoader { Bitmap load(String url, AvatarImageLoader.Request request) throws Exception; }
     private final List<ProfileListEntry> all;
     private final List<ProfileListEntry> visible = new ArrayList<>();
     private final Set<String> selected;
     private final boolean selectable;
-    private final ExecutorService images = Executors.newFixedThreadPool(2);
+    private final ExecutorService images;
+    private final AvatarLoader avatarLoader;
+    private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
     private final LruCache<String, Bitmap> cache = new LruCache<String, Bitmap>(4 * 1024 * 1024) {
         @Override protected int sizeOf(String key, Bitmap value) { return value.getByteCount(); }
     };
-    private final Set<String> pending = Collections.synchronizedSet(new java.util.HashSet<>());
-    private final Set<String> failed = Collections.synchronizedSet(new java.util.HashSet<>());
+    private final Map<String, AvatarTask> pending = new HashMap<>();
+    private final Set<String> failed = new HashSet<>();
     private final Rows rows = new Rows();
     private final TextView count;
     private final android.graphics.drawable.Drawable.ConstantState placeholder;
@@ -55,7 +60,15 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
 
     public MemberListView(Context baseContext, boolean miuix, List<ProfileListEntry> entries, Set<String> selected,
                           boolean selectable) {
+        this(baseContext, miuix, entries, selected, selectable, Executors.newFixedThreadPool(2),
+                (url, request) -> request.load(url));
+    }
+
+    MemberListView(Context baseContext, boolean miuix, List<ProfileListEntry> entries, Set<String> selected,
+                   boolean selectable, ExecutorService images, AvatarLoader avatarLoader) {
         super(ModuleTheme.themedContext(baseContext));
+        this.images = images;
+        this.avatarLoader = avatarLoader;
         Context context = getContext();
         android.graphics.drawable.Drawable icon;
         try {
@@ -178,41 +191,86 @@ public final class MemberListView extends LinearLayout implements AutoCloseable 
     }
 
     private void bindAvatar(ImageView view, String url) {
+        Object previous = view.getTag();
         view.setTag(url);
+        if (previous instanceof String && !url.equals(previous)) {
+            AvatarTask old = pending.get(previous);
+            if (old != null) {
+                old.targets.removeIf(target -> target.get() == null || target.get() == view);
+                if (old.targets.isEmpty()) { pending.remove(previous); old.cancel(); }
+            }
+        }
         Bitmap cached = cache.get(url);
         if (cached != null) { view.setImageBitmap(cached); return; }
         view.setImageDrawable(placeholder.newDrawable());
-        if (url.isEmpty() || closed || failed.contains(url) || !pending.add(url)) return;
-        WeakReference<ImageView> target = new WeakReference<>(view);
-        images.execute(() -> {
-            ImageView currentTarget = target.get();
-            if (closed || currentTarget == null || !url.equals(currentTarget.getTag())) { pending.remove(url); return; }
+        if (url.isEmpty() || closed || failed.contains(url)) return;
+        AvatarTask waiting = pending.get(url);
+        if (waiting != null) { waiting.add(view); return; }
+        AvatarTask task = new AvatarTask(url);
+        task.add(view);
+        pending.put(url, task);
+        WeakReference<MemberListView> owner = new WeakReference<>(this);
+        AvatarLoader loader = avatarLoader;
+        android.os.Handler dispatcher = main;
+        try { task.future = images.submit(() -> {
             Bitmap bitmap = null;
-            try {
-                List<ChatImage> loaded = AutomationImages.load(Collections.singletonList(url));
-                if (!loaded.isEmpty()) {
-                    byte[] bytes = Base64.getDecoder().decode(loaded.get(0).base64Data);
-                    BitmapFactory.Options bounds = new BitmapFactory.Options();
-                    bounds.inJustDecodeBounds = true;
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
-                    BitmapFactory.Options size = new BitmapFactory.Options();
-                    size.inSampleSize = 1;
-                    while (Math.max(bounds.outWidth, bounds.outHeight) / size.inSampleSize > 128) size.inSampleSize *= 2;
-                    bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, size);
-                    if (bitmap != null && !closed) cache.put(url, bitmap);
-                }
-            } catch (Exception ignored) { }
-            finally { pending.remove(url); if (bitmap == null) failed.add(url); }
+            try { bitmap = loader.load(url, task.request); }
+            catch (Exception ignored) { }
             Bitmap result = bitmap;
-            android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
-            main.post(() -> {
-                ImageView current = target.get();
-                if (!closed && current != null && url.equals(current.getTag()) && result != null) current.setImageBitmap(result);
-                if (!closed && result != null) rows.notifyDataSetChanged();
-            });
-        });
+            if (!dispatcher.post(() -> {
+                MemberListView members = owner.get();
+                if (members != null) members.avatarLoaded(task, result);
+                else if (result != null) result.recycle();
+            }) && result != null) result.recycle();
+        }); } catch (RejectedExecutionException unavailable) {
+            pending.remove(url);
+            task.cancel();
+        }
+    }
+
+    private void avatarLoaded(AvatarTask task, Bitmap bitmap) {
+        if (closed || pending.get(task.url) != task) {
+            if (bitmap != null) bitmap.recycle();
+            return;
+        }
+        pending.remove(task.url);
+        if (bitmap == null) { failed.add(task.url); return; }
+        cache.put(task.url, bitmap);
+        for (WeakReference<ImageView> target : task.targets) {
+            ImageView current = target.get();
+            if (current != null && task.url.equals(current.getTag())) current.setImageBitmap(bitmap);
+        }
+    }
+
+    private static final class AvatarTask {
+        final String url;
+        final AvatarImageLoader.Request request = new AvatarImageLoader.Request();
+        final List<WeakReference<ImageView>> targets = new ArrayList<>();
+        Future<?> future;
+
+        AvatarTask(String url) { this.url = url; }
+
+        void add(ImageView view) {
+            targets.removeIf(target -> target.get() == null);
+            for (WeakReference<ImageView> target : targets) if (target.get() == view) return;
+            targets.add(new WeakReference<>(view));
+        }
+
+        void cancel() {
+            request.cancel();
+            if (future != null) future.cancel(true);
+            targets.clear();
+        }
     }
 
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
-    @Override public void close() { closed = true; images.shutdownNow(); cache.evictAll(); }
+
+    @Override public void close() {
+        closed = true;
+        for (AvatarTask task : pending.values()) task.cancel();
+        pending.clear();
+        images.shutdownNow();
+        cache.evictAll();
+        failed.clear();
+    }
 }

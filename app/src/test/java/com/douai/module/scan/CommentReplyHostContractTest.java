@@ -50,32 +50,34 @@ public final class CommentReplyHostContractTest {
     private static final String FUTURE = "Lcom/google/common/util/concurrent/ListenableFuture;";
     private static final String INTEGER = "Ljava/lang/Integer;";
     private static final String STRING = "Ljava/lang/String;";
-    private static final String FACTORY = "LY/AObjectS331S0000000_23;";
+    private static final String FACTORY = "LY/AObjectS353S0000000_36;";
     private static final String NOTICE = "Lcom/ss/android/ugc/aweme/socialnotice/bean/BaseNotice;";
     private static final String PAYLOAD = "Lcom/ss/android/ugc/aweme/socialnotice/bean/CommentNotice;";
     private static final String COMMENT = "Lcom/ss/android/ugc/aweme/comment/model/Comment;";
     private static final String USER = "Lcom/ss/android/ugc/aweme/profile/model/User;";
     private static final String WORK = "Lcom/ss/android/ugc/aweme/feed/model/Aweme;";
-    private static final String GENERAL = "LX/0dLF;";
-    private static final String ADDITIONAL = "LX/0dI8;";
-    private static final String DETAIL = "LX/0dKN;";
-    private static final String ACCESSORS = "LX/0dKM;";
+    private static final String GENERAL = "LX/14Es;";
+    private static final String ADDITIONAL = "LX/14Ep;";
+    private static final String DETAIL = "LX/14Ea;";
+    private static final String ACCESSORS = "LX/14Ec;";
     private static final String MINE = "Lcom/ss/android/ugc/aweme/socialnotice/bean/MineCommentResponse;";
     private static final String REPLY_LIST = "Lcom/ss/android/ugc/aweme/comment/model/CommentItemList;";
     private static final String REPLY_API = "Lcom/ss/android/ugc/aweme/comment/api/CommentRealApi;";
-    private static final String REPLY_BUILDER = "LX/0y6o;";
-    private static final String REPLY_ARGS = "LX/0y6l;";
-    private static final String WORK_CONTEXT = "LX/0yAS;";
+    private static final String REPLY_BUILDER = "LX/13ar;";
+    private static final String REPLY_ARGS = "LX/13ao;";
+    private static final String WORK_CONTEXT = "LX/13ea;";
     private static final String TASK = "Lbolts/Task;";
-    private static final String PUBLISH_MODEL = "LX/0yFs;";
-    private static final String PUBLISH_BASE = "LX/0yH0;";
-    private static final String PUBLISH_BUILDER = "LX/0yFq;";
-    private static final String PUBLISH_BUILDER_BASE = "LX/0yH8;";
+    private static final String PUBLISH_MODEL = "LX/13hi;";
+    private static final String PUBLISH_BASE = "LX/13iG;";
+    private static final String PUBLISH_BUILDER = "LX/13hg;";
+    private static final String PUBLISH_BUILDER_BASE = "LX/13hD;";
     private static final String PUBLISH_PRESENTER =
             "Lcom/ss/android/ugc/aweme/comment/commentinputmanager/presenter/PublishPresenter;";
     private static final String PUBLISH_REQUEST =
             "Lcom/ss/android/ugc/aweme/comment/data/publish/CommentPublishRequest;";
     private static final Map<String, ClassDef> classes = new HashMap<>();
+    private static boolean legacy;
+    private static HostContractNameFacts names;
 
     @BeforeClass public static void readOnlyTheRequiredOriginalDexClasses() throws Exception {
         classes.clear();
@@ -83,19 +85,22 @@ public final class CommentReplyHostContractTest {
         Assume.assumeTrue("DOUAI_TEST_APK is not configured", configured != null);
         File apk = new File(configured);
         assertTrue("DOUAI_TEST_APK must point to the original host APK", apk.isFile());
-        Set<String> required = new HashSet<>(Arrays.asList("LX/0dFd;", "LX/0dED;", FACTORY,
-                "LX/0d9z;", "LX/0dHB;", "LX/0dH3;", "LX/0dHH;", "LX/0dHa;", "LX/0dPQ;", "LX/0dU1;",
-                NOTICE, PAYLOAD, GENERAL, ADDITIONAL, DETAIL, ACCESSORS, "LX/0dN2;", "LX/0dN5;",
-                "LX/0dPP;", "LX/0dH8;", "LX/0dHN;", MINE));
-        Set<String> commentClasses = new HashSet<>(Arrays.asList(COMMENT, "LX/0yXF;", "LX/0y6L;",
-                REPLY_BUILDER, REPLY_ARGS, "LX/0yTH;", "LX/0yAP;", REPLY_API, REPLY_LIST, "LX/0y6z;",
+        legacy = HostApkTestProfile.is406(apk);
+        names = new HostContractNameFacts(legacy);
+        Set<String> required = new HashSet<>(Arrays.asList("LX/14LK;", "LX/14Mk;", FACTORY,
+                "LX/14Gs;", "LX/14MH;", "LX/14MA;", "LX/14MD;", "LX/14Jz;", "LX/14PE;", "LX/14jX;",
+                NOTICE, PAYLOAD, GENERAL, ADDITIONAL, DETAIL, ACCESSORS, "LX/14F9;", "LX/14FE;",
+                "LX/14PD;", "LX/14Kj;", "LX/14HZ;", MINE));
+        Set<String> commentClasses = new HashSet<>(Arrays.asList(COMMENT, "LX/12j8;", "LX/13a7;",
+                REPLY_BUILDER, REPLY_ARGS, "LX/13wP;", "LX/13eY;", REPLY_API, REPLY_LIST, "LX/156M;",
                 PUBLISH_MODEL, PUBLISH_BASE, PUBLISH_BUILDER, PUBLISH_BUILDER_BASE,
                 PUBLISH_PRESENTER, PUBLISH_REQUEST));
         Set<String> taskClasses = new HashSet<>(Arrays.asList(TASK));
         try (ZipFile archive = new ZipFile(apk)) {
-            readSelectedClasses(archive, "classes17.dex", required);
-            readSelectedClasses(archive, "classes30.dex", commentClasses);
-            readSelectedClasses(archive, "classes33.dex", taskClasses);
+            readSelectedClasses(archive, legacy ? "classes17.dex" : "classes31.dex", required);
+            readSelectedClasses(archive, legacy ? "classes30.dex" : "classes31.dex", commentClasses);
+            if (!legacy) readSelectedClasses(archive, "classes30.dex", commentClasses);
+            readSelectedClasses(archive, legacy ? "classes33.dex" : "classes43.dex", taskClasses);
         }
         assertTrue("Missing original comment inbox classes: " + required, required.isEmpty());
         assertTrue("Missing original comment recipient/publish classes: " + commentClasses, commentClasses.isEmpty());
@@ -105,25 +110,33 @@ public final class CommentReplyHostContractTest {
     @AfterClass public static void releaseOriginalDexFacts() { classes.clear(); }
 
     @Test public void receivedCommentGroupIsResolvedFromTheNativeStringKeyAndReturnedAsAnInt() {
-        Method resolver = method("LX/0dFd;", "LJIIIIZZ", "I");
+        Method resolver = method("LX/14LK;", "LJIIIIZZ", "I");
         assertTrue(AccessFlags.PUBLIC.isSet(resolver.getAccessFlags()));
         assertTrue(AccessFlags.STATIC.isSet(resolver.getAccessFlags()));
         Code code = new Code(resolver);
         int key = stringIndex(code, "2");
         int keyRegister = ((OneRegisterInstruction) code.at(key)).getRegisterA();
-        assertCall(code.at(key + 1), "LX/0dED;", "LIZ", "I", STRING);
+        assertCall(code.at(key + 1), "LX/14Mk;", "LIZ", "I", STRING);
         assertEquals(keyRegister, ((FiveRegisterInstruction) code.at(key + 1)).getRegisterC());
         assertEquals(Opcode.MOVE_RESULT, code.at(key + 2).getOpcode());
         assertEquals(Opcode.RETURN, code.at(key + 3).getOpcode());
         assertEquals(((OneRegisterInstruction) code.at(key + 2)).getRegisterA(),
                 ((OneRegisterInstruction) code.at(key + 3)).getRegisterA());
         assertTrue("The resolver must consult the host's current mapping",
-                referencesField(method("LX/0dED;", "LIZ", "I", STRING), "LX/0dED;", "LIZLLL"));
+                referencesField(method("LX/14Mk;", "LIZ", "I", STRING), "LX/14Mk;", "LIZLLL"));
     }
 
     @Test public void theNativeDefaultMapStoresFortyFourForReceivedCommentsRatherThanUiCategoryThree() {
-        Code code = new Code(method(FACTORY, "invoke", "Ljava/lang/Object;"));
-        int key = stringIndexFollowedByCall(code, "2", "LX/0dEE;", "LIZJ");
+        Method initializer;
+        if (legacy) initializer = method(FACTORY, "invoke", "Ljava/lang/Object;");
+        else {
+            assertTrue("The lambda bridge must reach the default-map implementation",
+                    calls(method(FACTORY, "invoke", "Ljava/lang/Object;"), FACTORY, "invoke$0"));
+            initializer = method(FACTORY, "invoke$0", "Ljava/lang/Object;", FACTORY);
+            assertTrue(AccessFlags.STATIC.isSet(initializer.getAccessFlags()));
+        }
+        Code code = new Code(initializer);
+        int key = stringIndexFollowedByCall(code, "2", "LX/14Ml;", "LIZJ");
         int keyRegister = ((OneRegisterInstruction) code.at(key)).getRegisterA();
         assertEquals(Opcode.IF_EQ, code.at(key + 4).getOpcode());
         int fallback = code.target(key + 4);
@@ -135,42 +148,42 @@ public final class CommentReplyHostContractTest {
         assertEquals(valueRegister, ((FiveRegisterInstruction) code.at(box)).getRegisterC());
         assertEquals(Opcode.MOVE_RESULT_OBJECT, code.at(box + 1).getOpcode());
         int boxedRegister = ((OneRegisterInstruction) code.at(box + 1)).getRegisterA();
-        assertCall(code.at(box + 2), "LX/0RS2;", "LLLLJ", "Ljava/lang/Object;",
+        assertCall(code.at(box + 2), "LX/0V8X;", "LLLLJI", "Ljava/lang/Object;",
                 "Ljava/util/HashMap;", "Ljava/lang/Object;", "Ljava/lang/Object;");
         FiveRegisterInstruction put = (FiveRegisterInstruction) code.at(box + 2);
         assertEquals("The default map must retain key 2", keyRegister, put.getRegisterD());
         assertEquals("The stored value must be the boxed fallback 44", boxedRegister, put.getRegisterE());
         assertTrue("This factory is the default-map initializer used by the resolver",
-                calls(method("LX/0dED;", "<clinit>", "V"), FACTORY, "<init>"));
+                calls(method("LX/14Mk;", "<clinit>", "V"), FACTORY, "<init>"));
     }
 
     @Test public void theInteractivePagePassesItsResolvedSubtypeToFetchNoticeInsteadOfItsPrimaryUiCategory() {
-        assertTrue(referencesField(method("LX/0d9z;", "LIZ", "I", CONTEXT), "LX/0dCx;", "LIZ"));
-        assertTrue(referencesField(method("LX/0d9z;", "LJ", "I", CONTEXT), "LX/0dCx;", "LIZJ"));
-        Method model = method("LX/0dH3;", "LJII", "V", "LX/0eOw;");
-        assertTrue(referencesField(model, "LX/0dHB;", "LIZIZ"));
-        assertFalse("The network path must not read the primary UI category", referencesField(model, "LX/0dHB;", "LIZ"));
+        assertTrue(referencesField(method("LX/14Gs;", "LIZ", "I", CONTEXT), "LX/14J4;", "LIZ"));
+        assertTrue(referencesField(method("LX/14Gs;", "LJ", "I", CONTEXT), "LX/14J4;", "LIZJ"));
+        Method model = method("LX/14MA;", "LJII", "V", "LX/14u0;");
+        assertTrue(referencesField(model, "LX/14MH;", "LIZIZ"));
+        assertFalse("The network path must not read the primary UI category", referencesField(model, "LX/14MH;", "LIZ"));
         Code modelCode = new Code(model);
-        int readSubtype = fieldIndex(modelCode, "LX/0dHB;", "LIZIZ");
+        int readSubtype = fieldIndex(modelCode, "LX/14MH;", "LIZIZ");
         int subtypeRegister = ((OneRegisterInstruction) modelCode.at(readSubtype)).getRegisterA();
-        int construct = callIndex(modelCode, "LX/0dHH;", "<init>");
+        int construct = callIndex(modelCode, "LX/14MD;", "<init>");
         int constructorStart = ((RegisterRangeInstruction) modelCode.at(construct)).getStartRegister();
         assertEquals("After receiver and model, the request constructor receives the subtype register",
                 constructorStart + 2, subtypeRegister);
 
-        Method request = method("LX/0dHH;", "subscribe", "V", "Lio/reactivex/SingleEmitter;");
+        Method request = method("LX/14MD;", "subscribe", "V", "Lio/reactivex/SingleEmitter;");
         Code requestCode = new Code(request);
-        int captured = fieldIndex(requestCode, "LX/0dHH;", "LIZIZ");
+        int captured = fieldIndex(requestCode, "LX/14MD;", "LIZIZ");
         int capturedRegister = ((OneRegisterInstruction) requestCode.at(captured)).getRegisterA();
-        int wrapper = callIndex(requestCode, "LX/0dHa;", "LIZ");
+        int wrapper = callIndex(requestCode, "LX/14Jz;", "LIZ");
         int wrapperStart = ((RegisterRangeInstruction) requestCode.at(wrapper)).getStartRegister();
         assertTrue("The wrapper's group argument must be copied from the captured subtype",
                 movesRegisterBefore(requestCode, wrapper, capturedRegister, wrapperStart + 5));
 
-        Method bridge = method("LX/0dHa;", "LIZ", RESPONSE,
+        Method bridge = method("LX/14Jz;", "LIZ", RESPONSE,
                 "J", "J", "I", "I", INTEGER, "I", "I", "Z", "I", STRING, "I", "I", STRING, "I", STRING, "I", "I", "I");
         Code bridgeCode = new Code(bridge);
-        int fetch = callIndex(bridgeCode, "LX/0dPP;", "fetchNotice");
+        int fetch = callIndex(bridgeCode, "LX/14PD;", "fetchNotice");
         int fetchStart = ((RegisterRangeInstruction) bridgeCode.at(fetch)).getStartRegister();
         int originalGroup = bridge.getImplementation().getRegisterCount() - 20 + 5;
         assertTrue("The native API group slot must preserve the wrapper's group argument",
@@ -178,7 +191,7 @@ public final class CommentReplyHostContractTest {
     }
 
     @Test public void theReadOnlyApiHasTheExpectedTwentyThreeQuerySlotsAndNativeProvider() {
-        Method fetch = method("LX/0dPQ;", "fetchNotice", FUTURE,
+        Method fetch = method("LX/14PE;", "fetchNotice", FUTURE,
                 "J", "J", "I", "I", INTEGER, "I", INTEGER, INTEGER, "I", STRING, STRING, STRING,
                 "I", STRING, "I", STRING, "I", "I", STRING, "I", "I", INTEGER, "I");
         List<String> queries = new ArrayList<>();
@@ -189,7 +202,7 @@ public final class CommentReplyHostContractTest {
                 "top_notice_ids", "notice_unread_count", "current_unread_count", "del_notice_id", "preload",
                 "enable_official_disable", "notice_type", "enable_type_filter"), queries);
         assertTrue(AccessFlags.ABSTRACT.isSet(fetch.getAccessFlags()));
-        Field provider = field("LX/0dU1;", "b", "LX/0dPQ;");
+        Field provider = field("LX/14jX;", "b", "LX/14PE;");
         assertTrue(AccessFlags.STATIC.isSet(provider.getAccessFlags()));
         assertTrue(AccessFlags.FINAL.isSet(provider.getAccessFlags()));
     }
@@ -268,21 +281,21 @@ public final class CommentReplyHostContractTest {
     }
 
     @Test public void nativeReplyUsesTheUnifiedTargetAndGeneralWorkEvenWhenThePayloadWorkHelperReturnsNull() {
-        Method reply = method("LX/0dN5;", "LIZLLL", "Z", NOTICE, "LX/0dMx;");
-        assertEquals("LX/0dN2;", classes.get("LX/0dN5;").getSuperclass());
-        assertTrue(calls(reply, "LX/0dN2;", "LIZLLL"));
+        Method reply = method("LX/14FE;", "LIZLLL", "Z", NOTICE, "LX/159L;");
+        assertEquals("LX/14F9;", classes.get("LX/14FE;").getSuperclass());
+        assertTrue(calls(reply, "LX/14F9;", "LIZLLL"));
         Code replyCode = new Code(reply);
         int target = callIndex(replyCode, ACCESSORS, "LIZJ");
         assertEquals(Opcode.MOVE_RESULT_OBJECT, replyCode.at(target + 1).getOpcode());
         assertEquals(Opcode.IPUT_OBJECT, replyCode.at(target + 2).getOpcode());
-        assertFieldReference(replyCode.at(target + 2), "LX/0dMx;", "a", COMMENT);
+        assertFieldReference(replyCode.at(target + 2), "LX/159L;", "a", COMMENT);
         assertEquals(((OneRegisterInstruction) replyCode.at(target + 1)).getRegisterA(),
                 ((OneRegisterInstruction) replyCode.at(target + 2)).getRegisterA());
 
-        Code replyBase = new Code(method("LX/0dN2;", "LIZLLL", "Z", NOTICE, "LX/0dMx;"));
+        Code replyBase = new Code(method("LX/14F9;", "LIZLLL", "Z", NOTICE, "LX/159L;"));
         int work = callIndex(replyBase, GENERAL, "getAweme");
         assertEquals(Opcode.IPUT_OBJECT, replyBase.at(work + 2).getOpcode());
-        assertFieldReference(replyBase.at(work + 2), "LX/0dMx;", "f", WORK);
+        assertFieldReference(replyBase.at(work + 2), "LX/159L;", "f", WORK);
         assertSerializedField(GENERAL, "p", WORK, "aweme");
         assertDirectGetter(GENERAL, "getAweme", WORK, "p", Opcode.IGET_OBJECT);
 
@@ -296,13 +309,13 @@ public final class CommentReplyHostContractTest {
 
     @Test public void nativeReplyRecipientUsesTheSerializedUidAndComparesItWithTheCurrentAccount() {
         assertSerializedField(COMMENT, "replyToUserId", STRING, "reply_to_userid");
-        assertDirectGetter(COMMENT, "LLLLL", STRING, "replyToUserId", Opcode.IGET_OBJECT);
-        Code recipient = new Code(method("LX/0yXF;", "LIZ", STRING, COMMENT));
+        assertDirectGetter(COMMENT, "LLLLJI", STRING, "replyToUserId", Opcode.IGET_OBJECT);
+        Code recipient = new Code(method("LX/12j8;", "LIZ", STRING, COMMENT));
         int account = callIndex(recipient,
                 "Lcom/ss/android/ugc/aweme/account/service/IAccountUserService;", "getCurUserId");
         assertEquals(Opcode.MOVE_RESULT_OBJECT, recipient.at(account + 1).getOpcode());
         int ownUid = ((OneRegisterInstruction) recipient.at(account + 1)).getRegisterA();
-        int repliedUser = callIndex(recipient, COMMENT, "LLLLL");
+        int repliedUser = callIndex(recipient, COMMENT, "LLLLJI");
         int recipientUid = ((OneRegisterInstruction) recipient.at(repliedUser + 1)).getRegisterA();
         int compare = callIndex(recipient, "Lkotlin/jvm/internal/Intrinsics;", "areEqual");
         assertTrue(account < repliedUser && repliedUser < compare);
@@ -321,11 +334,11 @@ public final class CommentReplyHostContractTest {
         assertFalse(AccessFlags.STATIC.isSet(bridge.getAccessFlags()));
         assertTrue(bridge.getParameterTypes().isEmpty());
         Code bridgeCode = new Code(bridge);
-        int copyCall = callIndex(bridgeCode, COMMENT, "LJLLLLLL");
-        assertCall(bridgeCode.at(copyCall), COMMENT, "LJLLLLLL", COMMENT);
+        int copyCall = callIndex(bridgeCode, COMMENT, "LJZ");
+        assertCall(bridgeCode.at(copyCall), COMMENT, "LJZ", COMMENT);
         assertEquals(Opcode.RETURN_OBJECT, bridgeCode.at(copyCall + 2).getOpcode());
 
-        Method copier = method(COMMENT, "LJLLLLLL", COMMENT);
+        Method copier = method(COMMENT, "LJZ", COMMENT);
         Code copy = new Code(copier);
         assertEquals(Opcode.NEW_INSTANCE, copy.at(0).getOpcode());
         int cloneRegister = ((OneRegisterInstruction) copy.at(0)).getRegisterA();
@@ -379,16 +392,16 @@ public final class CommentReplyHostContractTest {
     }
 
     @Test public void nativePublishHelpersHaveProvidedRootAndIncomingCidTargetBranches() {
-        Method root = method("LX/0y6L;", "LJ", STRING, COMMENT, "LX/0yFs;");
-        Method directTarget = method("LX/0y6L;", "LJFF", STRING, COMMENT, "LX/0yFs;");
-        assertDirectGetter(COMMENT, "LLLLIILLL", STRING, "replyId", Opcode.IGET_OBJECT);
-        assertDirectGetter(COMMENT, "LLIIIILZ", STRING, "cid", Opcode.IGET_OBJECT);
+        Method root = method("LX/13a7;", "LJ", STRING, COMMENT, "LX/13hi;");
+        Method directTarget = method("LX/13a7;", "LJFF", STRING, COMMENT, "LX/13hi;");
+        assertDirectGetter(COMMENT, "LLLLIILL", STRING, "replyId", Opcode.IGET_OBJECT);
+        assertDirectGetter(COMMENT, "LLIIIJ", STRING, "cid", Opcode.IGET_OBJECT);
         assertTrue("The native root branch can return the target's explicit replyId",
-                returnsFirstArgumentGetter(root, "LLLLIILLL"));
+                returnsFirstArgumentGetter(root, "LLLLIILL"));
         assertTrue("The direct reply branch returns the incoming target's own CID",
-                returnsFirstArgumentGetter(directTarget, "LLIIIILZ"));
+                returnsFirstArgumentGetter(directTarget, "LLIIIJ"));
         assertTrue("The direct reply helper also consults the target's root relationship",
-                calls(directTarget, COMMENT, "LLLLIILLL"));
+                calls(directTarget, COMMENT, "LLLLIILL"));
         // Assigning a verified level1_comment CID to a missing root is module
         // compatibility logic, not an operation performed by these native helpers.
     }
@@ -419,24 +432,24 @@ public final class CommentReplyHostContractTest {
     }
 
     @Test public void nativeUiBuildsNestedRepliesWithTheTargetsRootAndItsOwnCid() {
-        assertDirectGetter(COMMENT, "LLLLIILLL", STRING, "replyId", Opcode.IGET_OBJECT);
-        assertDirectGetter(COMMENT, "LLIIIILZ", STRING, "cid", Opcode.IGET_OBJECT);
-        Code ui = new Code(method(PUBLISH_PRESENTER, "LJIIZILJ", PUBLISH_BUILDER, "LX/0yGX;"));
+        assertDirectGetter(COMMENT, "LLLLIILL", STRING, "replyId", Opcode.IGET_OBJECT);
+        assertDirectGetter(COMMENT, "LLIIIJ", STRING, "cid", Opcode.IGET_OBJECT);
+        Code ui = new Code(method(PUBLISH_PRESENTER, "LJIIZILJ", PUBLISH_BUILDER, "LX/13gy;"));
         int pairedNestedBranches = 0;
         for (int index = 0; index + 5 < ui.instructions.size(); index++) {
             Object candidate = reference(ui.at(index));
             if (!(candidate instanceof MethodReference)) continue;
             MethodReference getter = (MethodReference) candidate;
-            if (!COMMENT.equals(getter.getDefiningClass()) || !"LLLLIILLL".equals(getter.getName())
+            if (!COMMENT.equals(getter.getDefiningClass()) || !"LLLLIILL".equals(getter.getName())
                     || ui.at(index + 2).getOpcode() != Opcode.IPUT_OBJECT
                     || !(reference(ui.at(index + 2)) instanceof FieldReference)
                     || !"LIZJ".equals(((FieldReference) reference(ui.at(index + 2))).getName())) continue;
             // Only the adjacent root/cid pair is evidence of nested reply targeting.
             Object directCandidate = reference(ui.at(index + 3));
             if (!(directCandidate instanceof MethodReference)
-                    || !"LLIIIILZ".equals(((MethodReference) directCandidate).getName())) continue;
-            assertCall(ui.at(index), COMMENT, "LLLLIILLL", STRING);
-            assertCall(ui.at(index + 3), COMMENT, "LLIIIILZ", STRING);
+                    || !"LLIIIJ".equals(((MethodReference) directCandidate).getName())) continue;
+            assertCall(ui.at(index), COMMENT, "LLLLIILL", STRING);
+            assertCall(ui.at(index + 3), COMMENT, "LLIIIJ", STRING);
             assertEquals(Opcode.MOVE_RESULT_OBJECT, ui.at(index + 1).getOpcode());
             assertEquals(Opcode.MOVE_RESULT_OBJECT, ui.at(index + 4).getOpcode());
             assertEquals(Opcode.IPUT_OBJECT, ui.at(index + 5).getOpcode());
@@ -459,17 +472,17 @@ public final class CommentReplyHostContractTest {
 
     @Test public void ordinaryNativePublishHelpersReturnLegacyModelIdsWhenReplyTreeRoutingIsDisabled() {
         for (String[] helper : new String[][]{{"LJ", "b"}, {"LJFF", "e"}}) {
-            Method target = method("LX/0y6L;", helper[0], STRING, COMMENT, PUBLISH_MODEL);
+            Method target = method("LX/13a7;", helper[0], STRING, COMMENT, PUBLISH_MODEL);
             assertTrue(AccessFlags.PUBLIC.isSet(target.getAccessFlags()));
             assertTrue(AccessFlags.STATIC.isSet(target.getAccessFlags()));
             Code code = new Code(target);
-            int flag = callIndex(code, "LX/00Wd;", "LIZ");
-            assertCall(code.at(flag), "LX/00Wd;", "LIZ", "Z");
+            int flag = callIndex(code, "LX/00s8;", "LIZ");
+            assertCall(code.at(flag), "LX/00s8;", "LIZ", "Z");
             assertEquals(Opcode.MOVE_RESULT, code.at(flag + 1).getOpcode());
             assertEquals(Opcode.IF_NEZ, code.at(flag + 2).getOpcode());
             assertEquals(((OneRegisterInstruction) code.at(flag + 1)).getRegisterA(),
                     ((OneRegisterInstruction) code.at(flag + 2)).getRegisterA());
-            assertCall(code.at(flag + 3), "LX/0xyq;", "LIZIZ", "Z", COMMENT);
+            assertCall(code.at(flag + 3), "LX/155h;", "LIZIZ", "Z", COMMENT);
             assertEquals("Target routing must consult the actual first Comment argument",
                     target.getImplementation().getRegisterCount() - 2,
                     ((FiveRegisterInstruction) code.at(flag + 3)).getRegisterC());
@@ -506,8 +519,8 @@ public final class CommentReplyHostContractTest {
                 assertEquals(STRING, endpoint.getParameters().get(parameter).getType());
                 assertEquals(helper[2], annotationValue(endpoint.getParameters().get(parameter).getAnnotations(),
                         "Lretrofit2/http/Field;"));
-                int invoke = callIndex(code, "LX/0y6L;", helper[0]);
-                assertCall(code.at(invoke), "LX/0y6L;", helper[0], STRING, COMMENT, PUBLISH_MODEL);
+                int invoke = callIndex(code, "LX/13a7;", helper[0]);
+                assertCall(code.at(invoke), "LX/13a7;", helper[0], STRING, COMMENT, PUBLISH_MODEL);
                 assertEquals(Opcode.IGET_OBJECT, code.at(invoke - 1).getOpcode());
                 assertFieldReference(code.at(invoke - 1), PUBLISH_MODEL, "p", COMMENT);
                 TwoRegisterInstruction targetRead = (TwoRegisterInstruction) code.at(invoke - 1);
@@ -532,14 +545,14 @@ public final class CommentReplyHostContractTest {
     }
 
     @Test public void ownCommentsUseTheNativeSelfListEndpointAndRawCommentNoticeItems() {
-        Method selfList = method("LX/0dPP;", "getMineComment", "Lio/reactivex/Observable;", "J", "I");
+        Method selfList = method("LX/14PD;", "getMineComment", "Lio/reactivex/Observable;", "J", "I");
         assertEquals("/aweme/v1/comment/self/list/",
                 annotationValue(selfList.getAnnotations(), "Lretrofit2/http/GET;"));
         assertEquals("start_time", query(selfList.getParameters().get(0).getAnnotations()));
         assertEquals("count", query(selfList.getParameters().get(1).getAnnotations()));
         assertTrue(annotationValue(selfList.getAnnotations(), "Ldalvik/annotation/Signature;")
                 .contains("Lio/reactivex/Observable<" + MINE + ">;"));
-        Field provider = field("LX/0dHa;", "b", "LX/0dPP;");
+        Field provider = field("LX/14Jz;", "b", "LX/14PD;");
         assertTrue(AccessFlags.STATIC.isSet(provider.getAccessFlags()));
         assertTrue(AccessFlags.FINAL.isSet(provider.getAccessFlags()));
 
@@ -555,10 +568,10 @@ public final class CommentReplyHostContractTest {
         assertTrue("The UI conversion marks entries mine locally; that flag alone cannot prove authorship",
                 calls(method(MINE, "getItems", "Ljava/util/List;"), PAYLOAD, "LJJIFFI"));
 
-        Code nativeRequest = new Code(method("LX/0dH8;", "LJI", "V"));
-        int invoke = callIndex(nativeRequest, "LX/0dPP;", "getMineComment");
+        Code nativeRequest = new Code(method("LX/14Kj;", "LJI", "V"));
+        int invoke = callIndex(nativeRequest, "LX/14PD;", "getMineComment");
         FiveRegisterInstruction request = (FiveRegisterInstruction) nativeRequest.at(invoke);
-        int timeRead = fieldIndex(nativeRequest, "LX/0dH8;", "LJIIIZ");
+        int timeRead = fieldIndex(nativeRequest, "LX/14Kj;", "LJIIIZ");
         assertEquals(Opcode.IGET_WIDE, nativeRequest.at(timeRead).getOpcode());
         assertEquals(((OneRegisterInstruction) nativeRequest.at(timeRead)).getRegisterA(), request.getRegisterD());
         assertEquals(20, ((NarrowLiteralInstruction) nativeRequest.at(invoke - 1)).getNarrowLiteral());
@@ -583,20 +596,20 @@ public final class CommentReplyHostContractTest {
         }
         Code item = new Code(method(REPLY_ARGS, "LIZ", STRING));
         int context = fieldIndex(item, REPLY_ARGS, "LIZ");
-        int resolve = callIndex(item, "LX/0yAP;", "LJFF");
-        assertCall(item.at(resolve), "LX/0yAP;", "LJFF", STRING, WORK_CONTEXT, STRING);
+        int resolve = callIndex(item, "LX/13eY;", "LJFF");
+        assertCall(item.at(resolve), "LX/13eY;", "LJFF", STRING, WORK_CONTEXT, STRING);
         FiveRegisterInstruction resolveCall = (FiveRegisterInstruction) item.at(resolve);
         assertEquals(((OneRegisterInstruction) item.at(context)).getRegisterA(), resolveCall.getRegisterC());
         assertEquals(0, ((NarrowLiteralInstruction) item.at(resolve - 1)).getNarrowLiteral());
         assertEquals(((OneRegisterInstruction) item.at(resolve - 1)).getRegisterA(), resolveCall.getRegisterD());
-        Method nativeItem = method("LX/0yAP;", "LJFF", STRING, WORK_CONTEXT, STRING);
-        assertTrue(calls(nativeItem, "LX/0yAP;", "LIZJ"));
+        Method nativeItem = method("LX/13eY;", "LJFF", STRING, WORK_CONTEXT, STRING);
+        assertTrue(calls(nativeItem, "LX/13eY;", "LIZJ"));
         assertTrue("The native resolver includes the captured Aweme aid, not a copied web signature",
                 referencesField(nativeItem, WORK, "aid"));
     }
 
     @Test public void ownCommentRefreshAndLoadMoreAdvanceUsingTheReturnedMinTime() {
-        Method callback = method("LX/0dHN;", "LIZ", "Ljava/lang/Object;", "I", STRING, "Ljava/lang/Object;");
+        Method callback = method("LX/14HZ;", "LIZ", "Ljava/lang/Object;", "I", STRING, "Ljava/lang/Object;");
         Code code = new Code(callback);
         int copies = 0;
         for (int index = 0; index + 1 < code.instructions.size(); index++) {
@@ -606,7 +619,7 @@ public final class CommentReplyHostContractTest {
             if (!MINE.equals(read.getDefiningClass()) || !"minTime".equals(read.getName())) continue;
             assertEquals(Opcode.IGET_WIDE, code.at(index).getOpcode());
             assertEquals(Opcode.IPUT_WIDE, code.at(index + 1).getOpcode());
-            assertFieldReference(code.at(index + 1), "LX/0dH8;", "LJIIIZ", "J");
+            assertFieldReference(code.at(index + 1), "LX/14Kj;", "LJIIIZ", "J");
             assertEquals(((OneRegisterInstruction) code.at(index)).getRegisterA(),
                     ((OneRegisterInstruction) code.at(index + 1)).getRegisterA());
             copies++;
@@ -631,7 +644,7 @@ public final class CommentReplyHostContractTest {
         assertTrue(annotationValue(endpoint.getAnnotations(), "Ldalvik/annotation/Signature;")
                 .contains("Lbolts/Task<" + REPLY_LIST + ">;"));
 
-        Method wrapper = method("LX/0yTH;", "LJIJJ", "Lbolts/Task;", REPLY_ARGS);
+        Method wrapper = method("LX/13wP;", "LJIJJ", "Lbolts/Task;", REPLY_ARGS);
         assertTrue(AccessFlags.PUBLIC.isSet(wrapper.getAccessFlags()));
         assertTrue(AccessFlags.STATIC.isSet(wrapper.getAccessFlags()));
         Code code = new Code(wrapper);
@@ -668,8 +681,8 @@ public final class CommentReplyHostContractTest {
     }
 
     @Test public void nativeReplyListResponsePreservesCommentsAndBothPaginationCursors() {
-        assertEquals("LX/0y6z;", classes.get(REPLY_LIST).getSuperclass());
-        assertEquals("Lcom/ss/android/ugc/aweme/base/api/BaseResponse;", classes.get("LX/0y6z;").getSuperclass());
+        assertEquals("LX/156M;", classes.get(REPLY_LIST).getSuperclass());
+        assertEquals("Lcom/ss/android/ugc/aweme/base/api/BaseResponse;", classes.get("LX/156M;").getSuperclass());
         assertSerializedField(REPLY_LIST, "items", "Ljava/util/List;", "comments");
         assertEquals("Ljava/util/List<+" + COMMENT + ">;",
                 annotationValue(field(REPLY_LIST, "items", "Ljava/util/List;").getAnnotations(),
@@ -749,7 +762,7 @@ public final class CommentReplyHostContractTest {
         assertTrue(readError < observed);
         assertEquals(Opcode.IPUT_BOOLEAN, errorCode.at(observed).getOpcode());
         assertEquals(1, ((NarrowLiteralInstruction) errorCode.at(observed - 1)).getNarrowLiteral());
-        assertTrue(calls(error, "LX/15MJ;", "LIZ"));
+        assertTrue(calls(error, "LX/1SVO;", "LIZ"));
         int finalRead = errorCode.target(readError + 1);
         assertFieldReference(errorCode.at(finalRead), TASK, "error", "Ljava/lang/Exception;");
         assertEquals(Opcode.MONITOR_EXIT, errorCode.at(finalRead + 1).getOpcode());
@@ -787,7 +800,7 @@ public final class CommentReplyHostContractTest {
         try (BufferedInputStream input = new BufferedInputStream(archive.getInputStream(entry))) {
             DexBackedDexFile dex = DexBackedDexFile.fromInputStream(Opcodes.getDefault(), input);
             for (ClassDef type : dex.getClasses()) {
-                if (required.remove(type.getType())) classes.put(type.getType(), ImmutableClassDef.of(type));
+                if (required.remove(names.type(type.getType()))) classes.put(names.type(type.getType()), names.originalFacts(type));
             }
         }
     }

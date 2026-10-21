@@ -8,6 +8,7 @@ import android.content.pm.PackageInfo;
 import android.net.Uri;
 
 import com.douai.module.config.AiModelConfig;
+import com.douai.module.scan.HostAdaptation;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.HostSettingsStore;
 import com.douai.module.config.SettingsStore;
@@ -57,14 +58,23 @@ public final class HostMediaPickerTest {
     private final AtomicReference<List<HostMediaPicker.Selection>> selected = new AtomicReference<>();
 
     @Before public void prepare() {
+        HostAdaptation.setCurrentProfile(null);
         activityController = Robolectric.buildActivity(PickerActivity.class).setup();
         activity = activityController.get();
-        version("40.6.0", 400601);
+        version("40.8.0", 400801);
     }
 
     @After public void close() {
         if (picker != null) picker.close();
         if (activity != null) activity.finish();
+        HostAdaptation.setCurrentProfile(null);
+    }
+
+    @Test public void legacyProfileSelectsItsOwnAlbumContractAndIgnoresSpoofedProcessVersion() {
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_406);
+        version("99.0.0", 990001);
+        launch(false);
+        assertEquals("X.131D", activity.registry.intent.getSerializableExtra("extra_choose_parameters").getClass().getName());
     }
 
     @Test public void launchesTheOfficialImageAlbumWithFreshLocalReturnParameters() throws Exception {
@@ -74,7 +84,7 @@ public final class HostMediaPickerTest {
         assertEquals("com.ss.android.ugc.aweme.im.business.mediaselectpage.choose.MediaChooseActivity",
                 intent.getComponent().getClassName());
         Object config = intent.getSerializableExtra("extra_choose_parameters");
-        assertEquals("X.131D", config.getClass().getName());
+        assertEquals("X.1UOy", config.getClass().getName());
         assertEquals(0x1, config.getClass().getField("a").getInt(config));
         assertEquals(3, config.getClass().getField("e").getInt(config));
         assertEquals(4, config.getClass().getField("f").getInt(config));
@@ -187,7 +197,7 @@ public final class HostMediaPickerTest {
         assertNull(HostMediaPicker.launch(activity, false, selected::set));
         assertNull(activity.registry.intent);
         assertFalse(HostMediaPicker.isPending(activity));
-        version("40.6.0", 400601);
+        version("40.8.0", 400801);
         activity.registry.unavailable = true;
         assertNull(HostMediaPicker.launch(activity, true, selected::set));
         assertEquals(1, activity.registry.launches);

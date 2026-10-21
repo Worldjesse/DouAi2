@@ -209,34 +209,40 @@ public final class OfficialLivePhotoDownloadTest {
         Assume.assumeTrue("DOUAI_TEST_APK is not configured", path != null);
         File apk = new File(path);
         assertTrue("DOUAI_TEST_APK must point to the original host APK", apk.isFile());
+        boolean legacy = com.douai.module.scan.HostApkTestProfile.is406(apk);
+        String albumType = legacy ? "LX/0PoP;" : "LX/0TcK;";
+        String resultType = legacy ? "LX/15De;" : "LX/18Zk;";
+        String romType = legacy ? "LX/0BDp;" : "LX/0DeI;";
         Map<String, ClassDef> types = new HashMap<>();
         try (ZipFile archive = new ZipFile(apk)) {
-            for (String dexName : new String[]{"classes9.dex", "classes33.dex", "classes43.dex", "classes53.dex"}) {
-                assertNotNull("missing host " + dexName, archive.getEntry(dexName));
+            java.util.Enumeration<? extends java.util.zip.ZipEntry> entries = archive.entries();
+            while (entries.hasMoreElements() && types.size() < 5) {
+                String dexName = entries.nextElement().getName();
+                if (!dexName.matches("classes[0-9]*\\.dex")) continue;
                 try (BufferedInputStream input = new BufferedInputStream(archive.getInputStream(archive.getEntry(dexName)))) {
                     DexBackedDexFile dex = DexBackedDexFile.fromInputStream(Opcodes.getDefault(), input);
                     for (ClassDef type : dex.getClasses()) {
                         if (Arrays.asList("Lcom/ss/android/ugc/aweme/services/IExternalService;",
                                 "Lcom/ss/android/ugc/aweme/services/IExternalService$Companion;",
-                                "LX/0PoP;", "LX/15De;", "LX/0BDp;").contains(type.getType())) {
-                            types.put(type.getType(), type);
+                                albumType, resultType, romType).contains(type.getType())) {
+                            types.put(type.getType(), com.android.tools.smali.dexlib2.immutable.ImmutableClassDef.of(type));
                         }
                     }
                 }
             }
         }
         assertEquals(5, types.size());
-        assertMethod(types.get("Lcom/ss/android/ugc/aweme/services/IExternalService;"), "albumService()LX/0PoP;", false);
+        assertMethod(types.get("Lcom/ss/android/ugc/aweme/services/IExternalService;"), "albumService()" + albumType, false);
         assertField(types.get("Lcom/ss/android/ugc/aweme/services/IExternalService;"),
                 "Companion", "Lcom/ss/android/ugc/aweme/services/IExternalService$Companion;", true);
         assertMethod(types.get("Lcom/ss/android/ugc/aweme/services/IExternalService$Companion;"),
                 "getOrDefault()Lcom/ss/android/ugc/aweme/services/IExternalService;", false);
-        assertMethod(types.get("LX/0PoP;"), "Xi(Ljava/lang/String;Ljava/lang/String;J)LX/15De;", false);
-        assertMethod(types.get("LX/0PoP;"), "isLivePhoto(Ljava/lang/String;)Z", false);
-        assertMethod(types.get("LX/0BDp;"), "LIZLLL()Z", true);
-        assertField(types.get("LX/15De;"), "LIZ", "Ljava/util/List;", false);
-        assertField(types.get("LX/15De;"), "LIZIZ", "Z", false);
-        assertField(types.get("LX/15De;"), "LIZJ", "I", false);
+        assertMethod(types.get(albumType), (legacy ? "Xi" : "gj") + "(Ljava/lang/String;Ljava/lang/String;J)" + resultType, false);
+        assertMethod(types.get(albumType), "isLivePhoto(Ljava/lang/String;)Z", false);
+        assertMethod(types.get(romType), "LIZLLL()Z", true);
+        assertField(types.get(resultType), "LIZ", "Ljava/util/List;", false);
+        assertField(types.get(resultType), "LIZIZ", "Z", false);
+        assertField(types.get(resultType), "LIZJ", "I", false);
     }
 
     private static void assertMethod(ClassDef type, String signature, boolean isStatic) {

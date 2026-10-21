@@ -2,4 +2,5 @@
     <item name="module_theme_binding" type="id" />
     <item name="module_theme_colors" type="id" />
     <item name="module_theme_preserve" type="id" />
+    <item name="settings_search_target" type="id" />
 </resources>

@@ -22,7 +22,7 @@ import java.util.function.Consumer;
 
 /** Uses Douyin's native, permission-aware avatar follow click for the currently selected card. */
 public final class AutoFollowHook implements AutoCloseable {
-    private static final int FOLLOW_BUTTON_ID = 2131379757;
+    private static final int FOLLOW_BUTTON_ID = 2131379772;
 
     private final Field quickRootField;
     private final Method awemeGetter;

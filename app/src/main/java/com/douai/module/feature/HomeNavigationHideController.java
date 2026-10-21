@@ -24,7 +24,7 @@ import java.util.function.Consumer;
 public final class HomeNavigationHideController implements Application.ActivityLifecycleCallbacks, AutoCloseable {
     private static final String HOME_ACTIVITY = "com.ss.android.ugc.aweme.main.MainActivity";
     private static final String TOP_CLASS = "com.ss.android.ugc.aweme.homepage.tab.top.ui.titlebar.MainTitleBar";
-    private static final String BOTTOM_CLASS = "X.1Br3";
+    private final String bottomClassName;
     private final Application application;
     private final Consumer<String> log;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -33,8 +33,10 @@ public final class HomeNavigationHideController implements Application.ActivityL
     private volatile boolean temporarilyShown;
     private volatile boolean closed;
 
-    private HomeNavigationHideController(Application application, ExtendedSettings settings, Consumer<String> log) {
+    private HomeNavigationHideController(Application application, ExtendedSettings settings,
+                                         Class<?> bottomClass, Consumer<String> log) {
         this.application = application;
+        this.bottomClassName = bottomClass.getName();
         this.settings = settings == null ? null : settings.components;
         this.log = log == null ? ignored -> { } : log;
         application.registerActivityLifecycleCallbacks(this);
@@ -47,11 +49,12 @@ public final class HomeNavigationHideController implements Application.ActivityL
             throw new IllegalStateException("Host Application unavailable");
         }
         if (topClass == null || bottomClass == null || !TOP_CLASS.equals(topClass.getName())
-                || !BOTTOM_CLASS.equals(bottomClass.getName()) || !View.class.isAssignableFrom(topClass)
+                || topClass == bottomClass || !View.class.isAssignableFrom(topClass)
                 || !View.class.isAssignableFrom(bottomClass)) {
             throw new IllegalStateException("Scanned home navigation classes changed");
         }
-        return new HomeNavigationHideController((Application) context.getApplicationContext(), settings, log);
+        return new HomeNavigationHideController((Application) context.getApplicationContext(), settings,
+                bottomClass, log);
     }
 
     public void setSettings(ExtendedSettings settings) {
@@ -166,7 +169,7 @@ public final class HomeNavigationHideController implements Application.ActivityL
                     return;
                 }
                 View top = uniqueTarget(view, TOP_CLASS);
-                View bottom = uniqueTarget(view, BOTTOM_CLASS);
+                View bottom = uniqueTarget(view, bottomClassName);
                 for (View old : new ArrayList<>(originals.keySet())) {
                     if (old != top && old != bottom) {
                         Original original = originals.remove(old);

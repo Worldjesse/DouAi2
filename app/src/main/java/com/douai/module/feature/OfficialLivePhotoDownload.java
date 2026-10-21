@@ -6,6 +6,7 @@ import android.os.Looper;
 import android.widget.Toast;
 
 import com.douai.module.config.LocalOptions;
+import com.douai.module.scan.HostAdaptation;
 
 import java.io.File;
 import java.io.IOException;
@@ -168,15 +169,22 @@ final class OfficialLivePhotoDownload {
     }
 
     private static final class HostEncoder implements Encoder {
+        private static boolean legacyHost() throws ReflectiveOperationException {
+            HostAdaptation.Profile profile = HostAdaptation.currentProfile();
+            if (profile == null) throw new ReflectiveOperationException("宿主实况编码适配版本未确认");
+            return profile == HostAdaptation.PROFILE_406;
+        }
+
         @Override public Encoded encode(ClassLoader loader, File image, File video) throws Exception {
-            // Douyin 40.6.0: this ROM branch encodes directly into its system album, not a portable file.
-            Class<?> rom = Class.forName("X.0BDp", true, loader);
+            boolean legacy = legacyHost();
+            // This ROM branch encodes directly into its system album, not a portable file.
+            Class<?> rom = Class.forName(legacy ? "X.0BDp" : "X.0DeI", true, loader);
             if (Boolean.TRUE.equals(invoke(rom.getMethod("LIZLLL"), null))) {
                 throw new UnsupportedOperationException("当前设备的实况编码不支持独立文件保存");
             }
             Object album = album(loader);
-            Class<?> contract = Class.forName("X.0PoP", false, loader);
-            Object result = invoke(contract.getMethod("Xi", String.class, String.class, long.class),
+            Class<?> contract = Class.forName(legacy ? "X.0PoP" : "X.0TcK", false, loader);
+            Object result = invoke(contract.getMethod(legacy ? "Xi" : "gj", String.class, String.class, long.class),
                     album, image.getAbsolutePath(), video.getAbsolutePath(), 0L);
             if (result == null) throw new IOException("宿主实况编码器没有返回结果");
             Object paths = field(result, "LIZ");
@@ -192,7 +200,7 @@ final class OfficialLivePhotoDownload {
         }
 
         @Override public boolean isLivePhoto(ClassLoader loader, File file) throws Exception {
-            Class<?> contract = Class.forName("X.0PoP", false, loader);
+            Class<?> contract = Class.forName(legacyHost() ? "X.0PoP" : "X.0TcK", false, loader);
             return Boolean.TRUE.equals(invoke(contract.getMethod("isLivePhoto", String.class),
                     album(loader), file.getAbsolutePath()));
         }

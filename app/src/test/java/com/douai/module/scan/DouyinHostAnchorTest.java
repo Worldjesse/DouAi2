@@ -33,11 +33,14 @@ import com.android.tools.smali.dexlib2.iface.reference.FieldReference;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
-public final class Douyin406AnchorTest {
+public final class DouyinHostAnchorTest {
     @Test public void checkedVoiceSubmitStartsHostUploadBeforeReturningFalse() throws Exception {
         String apkPath = System.getenv("DOUAI_TEST_APK");
         File apk = apkPath == null ? null : new File(apkPath);
         Assume.assumeTrue(apk != null && apk.isFile());
+        boolean legacy = HostApkTestProfile.is406(apk);
+        String callbackType = legacy ? "LY/AObjectS313S0200000_35;" : "LY/AObjectS314S0200000_36;";
+        String modelType = legacy ? "LX/0yFs;" : "LX/13hi;";
         Method checked = null;
         Method callbackConstructor = null;
         try (ZipFile archive = new ZipFile(apk)) {
@@ -48,7 +51,7 @@ public final class Douyin406AnchorTest {
                 try (BufferedInputStream input = new BufferedInputStream(archive.getInputStream(entry))) {
                     DexBackedDexFile dex = DexBackedDexFile.fromInputStream(Opcodes.getDefault(), input);
                     for (ClassDef type : dex.getClasses()) {
-                        if ("LY/AObjectS313S0200000_35;".equals(type.getType())) {
+                        if (callbackType.equals(type.getType())) {
                             for (Method method : type.getMethods()) {
                                 if ("<init>".equals(method.getName()) && method.getParameterTypes().equals(
                                         Arrays.asList("Ljava/lang/Object;", "Ljava/lang/Object;", "I"))) {
@@ -60,7 +63,7 @@ public final class Douyin406AnchorTest {
                                 .equals(type.getType())) continue;
                         for (Method method : type.getMethods()) {
                             if ("LJIILLIIL".equals(method.getName()) && "Z".equals(method.getReturnType())
-                                    && method.getParameterTypes().equals(Collections.singletonList("LX/0yFs;"))) {
+                                    && method.getParameterTypes().equals(Collections.singletonList(modelType))) {
                                 checked = method;
                             }
                         }
@@ -79,10 +82,10 @@ public final class Douyin406AnchorTest {
             FieldReference field = (FieldReference) ((ReferenceInstruction) instruction).getReference();
             callbackFields.put(field.getName(), ((TwoRegisterInstruction) instruction).getRegisterA());
         }
-        assertEquals("Host callback l0 stores the second object argument",
-                Integer.valueOf(secondCallbackArgument), callbackFields.get("l0"));
-        assertEquals("Host callback l1 stores the first object argument",
-                Integer.valueOf(firstCallbackArgument), callbackFields.get("l1"));
+        assertEquals("Host callback l0 stores the model argument",
+                Integer.valueOf(legacy ? secondCallbackArgument : firstCallbackArgument), callbackFields.get("l0"));
+        assertEquals("Host callback l1 stores the request argument",
+                Integer.valueOf(legacy ? firstCallbackArgument : secondCallbackArgument), callbackFields.get("l1"));
         List<Instruction> instructions = new ArrayList<>();
         for (Instruction instruction : checked.getImplementation().getInstructions()) instructions.add(instruction);
         Map<Integer, String> objectRegisters = new HashMap<>();
@@ -105,20 +108,20 @@ public final class Douyin406AnchorTest {
             Object reference = ((ReferenceInstruction) instruction).getReference();
             if (!(reference instanceof MethodReference)) continue;
             MethodReference call = (MethodReference) reference;
-            if ("LY/AObjectS313S0200000_35;".equals(call.getDefiningClass())
+            if (callbackType.equals(call.getDefiningClass())
                     && "<init>".equals(call.getName()) && call.getParameterTypes().equals(
                     Arrays.asList("Ljava/lang/Object;", "Ljava/lang/Object;", "I"))) {
                 assertTrue("Host audio callback constructor uses explicit argument registers",
                         instruction instanceof FiveRegisterInstruction);
                 FiveRegisterInstruction construct = (FiveRegisterInstruction) instruction;
-                assertEquals("First callback argument is the request",
-                        "request", objectRegisters.get(construct.getRegisterD()));
-                assertEquals("Second callback argument is the model",
-                        "model", objectRegisters.get(construct.getRegisterE()));
+                assertEquals("First callback argument retains the profiled role",
+                        legacy ? "request" : "model", objectRegisters.get(construct.getRegisterD()));
+                assertEquals("Second callback argument retains the profiled role",
+                        legacy ? "model" : "request", objectRegisters.get(construct.getRegisterE()));
                 callbackRegister = construct.getRegisterC();
             }
             if (!"Lcom/ss/android/ugc/aweme/comment/helper/AudioUploader;".equals(call.getDefiningClass())
-                    || !"LJFF".equals(call.getName())) continue;
+                    || !(legacy ? "LJFF" : "LJI").equals(call.getName())) continue;
             assertTrue("Host constructs the owned callback before starting its audio upload", callbackRegister >= 0);
             assertEquals("The upload receives the callback whose l0 is model and l1 is request",
                     callbackRegister, ((FiveRegisterInstruction) instruction).getRegisterF());
@@ -181,15 +184,12 @@ public final class Douyin406AnchorTest {
         File apk = apkPath == null ? null : new File(apkPath);
         Assume.assumeTrue(apk != null && apk.isFile());
 
-        File rulesFile = new File("src/main/assets/douyin-host-rules.tsv");
-        if (!rulesFile.isFile()) {
-            rulesFile = new File("app/src/main/assets/douyin-host-rules.tsv");
-        }
-        Assume.assumeTrue(rulesFile.isFile());
+        File rulesFile = HostApkTestProfile.rulesFile(apk);
         HostRuleSet rules;
         try (FileInputStream input = new FileInputStream(rulesFile)) {
             rules = HostRuleSet.parse(input);
         }
+        assertEquals(HostApkTestProfile.profile(apk).fingerprint, rules.getFingerprint());
         HostScanReport report = new HostScanner().scan(Collections.singletonList(apk), rules);
 
         assertEquals(rules.getRules().size(), report.getRuleResults().size());

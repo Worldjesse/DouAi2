@@ -28,6 +28,8 @@ import android.widget.ListView;
 import android.widget.ImageView;
 
 import com.douai.module.config.AiModelConfig;
+import com.douai.module.scan.HostAdaptation;
+import com.douai.module.scan.HostResourceProfile;
 import com.douai.module.feature.ChatImage;
 import com.douai.module.feature.TestChatMemory;
 import com.ss.android.ugc.aweme.im.business.chat.feature.title.component.ChatTitleUI;
@@ -80,11 +82,15 @@ public final class NativeAiConversationTest {
     private ListView messages;
 
     @Before public void prepareHost() throws Exception {
+        HostAdaptation.setCurrentProfile(null);
         NativeInputFixture.reset();
         ChatTitleUI.createCalls = 0;
         TextOnlyCellUI.createCalls = 0;
-        activity = Robolectric.buildActivity(HostActivity.class).setup().get();
-        installHostVersion("40.6.0", 400601);
+        org.robolectric.android.controller.ActivityController<HostActivity> controller =
+                Robolectric.buildActivity(HostActivity.class);
+        activity = controller.get();
+        installHostVersion("40.8.0", 400801);
+        controller.setup();
         open(new FakeSession());
         historyWorker.runAllOnThread();
         ShadowLooper.idleMainLooper();
@@ -96,7 +102,25 @@ public final class NativeAiConversationTest {
         if (historyWorker != null) historyWorker.shutdownNow();
         NativeInputFixture.setOmitInput(false);
         if (activity != null) activity.finish();
+        HostAdaptation.setCurrentProfile(null);
         ShadowLooper.idleMainLooper();
+    }
+
+    @Test public void legacyOriginalProfileKeepsNativeChatAndAlbumUsableAfterVersionSpoofing() throws Exception {
+        dialog.dismiss();
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_406);
+        installHostVersion("99.0.0", 990001);
+        open(new FakeSession());
+        historyWorker.runAllOnThread();
+        ShadowLooper.idleMainLooper();
+        assertEquals(0x7f0a203b, nativeViews.root.getId());
+        assertEquals(0x7f0a7d32, nativeViews.input.getId());
+        assertNotNull(nativeViews.createProfileHeader(nativeViews.messageContainer).avatar);
+        assertNotNull(nativeViews.createQuickAction(nativeViews.messageContainer, "legacy action"));
+        HostMediaPicker legacy = HostMediaPicker.launch(activity, false, ignored -> { });
+        assertNotNull(legacy);
+        assertEquals("X.131D", activity.registry.intent.getSerializableExtra("extra_choose_parameters").getClass().getName());
+        legacy.close();
     }
 
     @Test public void hostFactoriesSupplyTheVisibleInputAndBothMessageDirections() {
@@ -222,7 +246,7 @@ public final class NativeAiConversationTest {
     @Test public void incompatibleVersionsAndMissingRequiredInputRejectTheNativeContract() throws Exception {
         installHostVersion("40.7.0", 400701);
         assertRejected();
-        installHostVersion("40.6.0", 400601);
+        installHostVersion("40.8.0", 400801);
         NativeInputFixture.setOmitInput(true);
         assertRejected();
     }
@@ -278,7 +302,7 @@ public final class NativeAiConversationTest {
             assertEquals("Native composer entrances remain visible while idle", View.VISIBLE, entrance.getVisibility());
             assertNotNull(entrance.getDrawable());
         }
-        assertEquals(0x7f08444d, ((HostIconDrawable) nativeViews.plus.getDrawable()).resource);
+        assertEquals(0x7f0844b1, ((HostIconDrawable) nativeViews.plus.getDrawable()).resource);
         assertTrue(nativeViews.plus.performClick());
         android.app.Dialog menu = ShadowDialog.getLatestDialog();
         assertNotSame(dialog, menu);
@@ -584,7 +608,7 @@ public final class NativeAiConversationTest {
         public ActivityResultRegistry getActivityResultRegistry() { return registry; }
 
         @Override public Resources getResources() {
-            if (hostResources == null) hostResources = new HostResources(super.getResources());
+            if (hostResources == null) hostResources = new HostResources(this, super.getResources());
             return hostResources;
         }
 
@@ -608,22 +632,28 @@ public final class NativeAiConversationTest {
 
     /** Keep the strict recovered drawable IDs while supplying test-owned pixels. */
     private static final class HostResources extends Resources {
-        HostResources(Resources base) { super(base.getAssets(), base.getDisplayMetrics(), base.getConfiguration()); }
+        private final Context context;
+        HostResources(Context context, Resources base) {
+            super(base.getAssets(), base.getDisplayMetrics(), base.getConfiguration());
+            this.context = context;
+        }
         @Override public int getColor(int id, Theme theme) {
             if (id == 0x7f060094) return Color.WHITE;
             if (id == 0x7f060182) return 0xff161823;
             return super.getColor(id, theme);
         }
         @Override public Drawable getDrawable(int id, Theme theme) {
-            if (id == 0x7f083ab1 || id == 0x7f083ab4) {
+            if ((id >>> 24) != 0x7f) return super.getDrawable(id, theme);
+            id = HostResourceProfile.canonicalId(HostProfileFixture.profile(context), id);
+            if (id == 0x7f083b0a || id == 0x7f083b0d) {
                 GradientDrawable shape = new GradientDrawable();
-                shape.setColor(id == 0x7f083ab4 ? 0xff6b90f5 : 0xffdddddd);
+                shape.setColor(id == 0x7f083b0d ? 0xff6b90f5 : 0xffdddddd);
                 shape.setCornerRadius(12f * getDisplayMetrics().density);
                 return shape;
             }
             switch (id) {
-                case 0x7f0842a7: case 0x7f084422: case 0x7f084445: case 0x7f08444d:
-                case 0x7f08456a: case 0x7f08456f: case 0x7f084338: case 0x7f084101:
+                case 0x7f08430a: case 0x7f084486: case 0x7f0844a9: case 0x7f0844b1:
+                case 0x7f0845cd: case 0x7f0845d2: case 0x7f08439b: case 0x7f08415e:
                     return new HostIconDrawable(id);
             }
             return super.getDrawable(id, theme);
@@ -643,10 +673,10 @@ public final class NativeAiConversationTest {
             canvas.scale(getBounds().width() / 32f, getBounds().height() / 32f);
             paint.setColor(0xff161823); paint.setStrokeWidth(2f); paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeCap(Paint.Cap.ROUND); paint.setStrokeJoin(Paint.Join.ROUND);
-            if (resource == 0x7f08444d || resource == 0x7f084445 || resource == 0x7f084422) {
+            if (resource == 0x7f0844b1 || resource == 0x7f0844a9 || resource == 0x7f084486) {
                 canvas.drawCircle(16, 16, 13, paint);
-                if (resource == 0x7f08444d) { canvas.drawLine(9, 16, 23, 16, paint); canvas.drawLine(16, 9, 16, 23, paint); }
-                else if (resource == 0x7f084445) {
+                if (resource == 0x7f0844b1) { canvas.drawLine(9, 16, 23, 16, paint); canvas.drawLine(16, 9, 16, 23, paint); }
+                else if (resource == 0x7f0844a9) {
                     paint.setStyle(Paint.Style.FILL); canvas.drawCircle(11, 12, 1.8f, paint); canvas.drawCircle(21, 12, 1.8f, paint);
                     paint.setStyle(Paint.Style.STROKE); canvas.drawArc(new RectF(9, 12, 23, 24), 15, 150, false, paint);
                 } else {
@@ -654,14 +684,14 @@ public final class NativeAiConversationTest {
                     canvas.drawArc(new RectF(9, 10, 20, 22), -65, 130, false, paint);
                     canvas.drawArc(new RectF(8, 6, 26, 26), -65, 130, false, paint);
                 }
-            } else if (resource == 0x7f0842a7) {
+            } else if (resource == 0x7f08430a) {
                 canvas.drawRoundRect(3, 3, 12, 12, 2, 2, paint); canvas.drawRoundRect(3, 19, 12, 28, 2, 2, paint);
                 canvas.drawRoundRect(19, 19, 28, 28, 2, 2, paint); canvas.drawRoundRect(19, 3, 28, 12, 2, 2, paint);
-            } else if (resource == 0x7f08456f) {
+            } else if (resource == 0x7f0845d2) {
                 paint.setStyle(Paint.Style.FILL); for (int x : new int[]{6, 16, 26}) canvas.drawCircle(x, 16, 2.2f, paint);
-            } else if (resource == 0x7f08456a) {
+            } else if (resource == 0x7f0845cd) {
                 canvas.drawLine(21, 5, 10, 16, paint); canvas.drawLine(10, 16, 21, 27, paint);
-            } else if (resource == 0x7f084338) {
+            } else if (resource == 0x7f08439b) {
                 canvas.drawLine(9, 9, 23, 23, paint); canvas.drawLine(23, 9, 9, 23, paint);
             } else {
                 paint.setColor(0xff547cff); Path path = new Path(); path.moveTo(4, 4); path.lineTo(29, 16);
@@ -684,22 +714,27 @@ public final class NativeAiConversationTest {
         }
 
         @Override public View inflate(int resource, ViewGroup parent, boolean attach) {
-            if (resource != 0x7f0d1954 && resource != 0x7f0d1955 && resource != 0x7f0d1956)
+            if (resource != 0x7f0d194a && resource != 0x7f0d194b && resource != 0x7f0d194c
+                    && resource != 0x7f0d1954 && resource != 0x7f0d1955 && resource != 0x7f0d1956) {
+                return platform.inflate(resource, parent, attach);
+            }
+            resource = HostResourceProfile.canonicalId(HostProfileFixture.profile(getContext()), resource);
+            if (resource != 0x7f0d194a && resource != 0x7f0d194b && resource != 0x7f0d194c)
                 return platform.inflate(resource, parent, attach);
             ((HostActivity) getContext()).hostInflations++;
             FrameLayout root = new FrameLayout(getContext());
-            root.setId(0x7f0a203b);
+            root.setId(HostProfileFixture.id(getContext(), 0x7f0a2042));
             LinearLayout column = new LinearLayout(getContext());
-            column.setId(0x7f0a205c);
+            column.setId(HostProfileFixture.id(getContext(), 0x7f0a2063));
             column.setOrientation(LinearLayout.VERTICAL);
             root.addView(column, new FrameLayout.LayoutParams(-1, -1));
-            for (int id : new int[]{0x7f0a4246, 0x7f0a2026, 0x7f0a6444}) {
+            for (int id : new int[]{0x7f0a4258, 0x7f0a202d, 0x7f0a6444}) {
                 FrameLayout slot = new FrameLayout(getContext());
-                slot.setId(id);
+                slot.setId(HostProfileFixture.id(getContext(), id));
                 column.addView(slot, new LinearLayout.LayoutParams(-1, -2));
             }
             View divider = new View(getContext());
-            divider.setId(0x7f0a2054);
+            divider.setId(HostProfileFixture.id(getContext(), 0x7f0a205b));
             divider.setBackgroundColor(0x0d161823);
             root.addView(divider, new FrameLayout.LayoutParams(-1, 1));
             if (attach && parent != null) parent.addView(root);

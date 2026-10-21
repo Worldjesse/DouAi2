@@ -50,6 +50,7 @@ final class AutomationHistoryDialog {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService worker;
     private AlertDialog detail;
+    private SubmissionRecoveryDialog recovery;
     private Future<?> work;
     private int generation;
 
@@ -95,13 +96,23 @@ final class AutomationHistoryDialog {
             rows.setAdapter(adapter);
             history = rows;
         }
-        dialog = new MiuixDialogBuilder(context, this.miuix)
+        MiuixDialogBuilder builder = new MiuixDialogBuilder(context, this.miuix);
+        builder
                 .setTitle(AutomationHistoryStore.COMMENT_REPLY.equals(kind) ? "评论回复历史记录"
                         : AutomationHistoryStore.REPLY.equals(kind) ? "回复历史记录" : "评论历史记录")
-                .setView(history).setNegativeButton("关闭", null).setNeutralButton("清空记录", null).create();
+                .setView(history).setNegativeButton("关闭", null).setNeutralButton("清空记录", null);
+        if (!AutomationHistoryStore.COMMENT_REPLY.equals(kind)) builder.setPositiveButton("发送状态", null);
+        dialog = builder.create();
         if (owner != null) dialog.setOwnerActivity(owner);
         dialog.setOnShowListener(ignored -> {
             dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(view -> clear());
+            if (!AutomationHistoryStore.COMMENT_REPLY.equals(kind)) {
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+                    if (recovery != null) { recovery.close(); recovery.dialog().dismiss(); }
+                    recovery = new SubmissionRecoveryDialog(context, kind, this.miuix, worker);
+                    recovery.dialog().show();
+                });
+            }
             refresh();
         });
         dialog.setOnDismissListener(ignored -> {
@@ -196,6 +207,7 @@ final class AutomationHistoryDialog {
     /** Also use as the parent's dismiss callback when its owner replaces the listener. */
     void closeDetails() {
         invalidateWork();
+        if (recovery != null) { recovery.close(); recovery.dialog().dismiss(); recovery = null; }
         AlertDialog child = detail;
         detail = null;
         if (child != null) child.dismiss();

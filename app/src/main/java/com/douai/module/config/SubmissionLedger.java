@@ -9,17 +9,32 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Map;
 import java.util.WeakHashMap;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Set;
 
 /** Durable send reservations. Reserve on a worker before calling the host; uncertain sends stay claimed. */
 public final class SubmissionLedger {
     private static final Object LOCK = new Object();
     private static final Map<SharedPreferences, Boolean> FAILED = new WeakHashMap<>();
     private static final String PREFIX = "send.";
+    private static final String SESSION = java.util.UUID.randomUUID().toString();
+    private static final long RECOVERY_DELAY_MILLIS = 120_000;
+    public static final String COMMENT_FILE = "douai_comment_submissions";
+    public static final String REPLY_FILE = "douai_reply_submissions";
+    public static final int DEFAULT_CAPACITY = 1000;
     private final SharedPreferences preferences;
     private final int capacity;
     private final Committer committer;
 
     interface Committer { boolean commit(SharedPreferences.Editor editor); }
+    public enum ReserveResult { RESERVED, DUPLICATE, FULL, STORAGE_FAILED, INVALID }
+
+    public static String accountScope(String uid) {
+        if (uid == null || !uid.matches("[1-9][0-9]{0,19}")) throw new IllegalArgumentException("Missing account");
+        return identity("account:" + uid);
+    }
 
     public SubmissionLedger(SharedPreferences preferences, int capacity) {
         this(preferences, capacity, SharedPreferences.Editor::commit);
@@ -48,12 +63,17 @@ public final class SubmissionLedger {
 
     /** A false result forbids invoking the host, including when storage is unavailable or full. */
     public boolean reserve(String identity, String attempt, long now) {
-        if (!validIdentity(identity) || !validAttempt(attempt) || now < 0) return false;
+        return reserve(identity, attempt, now, "") == ReserveResult.RESERVED;
+    }
+
+    public ReserveResult reserve(String identity, String attempt, long now, String scope) {
+        if (!validIdentity(identity) || !validAttempt(attempt) || now < 0
+                || scope == null || !scope.isEmpty() && !validIdentity(scope)) return ReserveResult.INVALID;
         synchronized (LOCK) {
-            if (failed()) return false;
+            if (failed()) return ReserveResult.STORAGE_FAILED;
             try {
                 Map<String, ?> all = preferences.getAll();
-                if (all.containsKey(PREFIX + identity)) return false;
+                if (all.containsKey(PREFIX + identity)) return ReserveResult.DUPLICATE;
                 int count = 0;
                 String oldest = null;
                 long oldestTime = Long.MAX_VALUE;
@@ -67,11 +87,12 @@ public final class SubmissionLedger {
                         oldestTime = record.timestamp;
                     }
                 }
-                if (count >= capacity && (oldest == null || count > capacity)) return false;
+                if (count >= capacity && (oldest == null || count > capacity)) return ReserveResult.FULL;
                 SharedPreferences.Editor editor = preferences.edit();
                 if (count >= capacity) editor.remove(oldest);
-                return commit(editor.putString(PREFIX + identity, encode(attempt, "submitted", now)));
-            } catch (RuntimeException failure) { fail(); return false; }
+                return commit(editor.putString(PREFIX + identity, encode(attempt, "submitted", now, scope, SESSION)))
+                        ? ReserveResult.RESERVED : ReserveResult.STORAGE_FAILED;
+            } catch (RuntimeException failure) { fail(); return ReserveResult.STORAGE_FAILED; }
         }
     }
 
@@ -104,7 +125,7 @@ public final class SubmissionLedger {
             try {
                 SharedPreferences.Editor editor = preferences.edit();
                 return commit("failed".equals(outcome) ? editor.remove(PREFIX + identity)
-                        : editor.putString(PREFIX + identity, encode(attempt, outcome, now)));
+                        : editor.putString(PREFIX + identity, encode(attempt, outcome, now, previous.scope, previous.session)));
             } catch (RuntimeException failure) { fail(); return false; }
         }
     }
@@ -116,6 +137,87 @@ public final class SubmissionLedger {
             if (previous == null || !"submitted".equals(previous.status)) return false;
             try { return commit(preferences.edit().remove(PREFIX + identity)); }
             catch (RuntimeException failure) { fail(); return false; }
+        }
+    }
+
+    /** Legacy records may be attributed only through account-checked local history identities. */
+    public Snapshot inspect(String scope, Set<String> legacyIdentities, long now) {
+        if (!validIdentity(scope) || legacyIdentities == null) throw new IllegalArgumentException("Missing scope");
+        synchronized (LOCK) {
+            List<Entry> entries = new ArrayList<>();
+            int total = 0, uncertain = 0, corrupt = 0, unassigned = 0;
+            try {
+                for (Map.Entry<String, ?> stored : preferences.getAll().entrySet()) {
+                    if (!stored.getKey().startsWith(PREFIX)) continue;
+                    total++;
+                    String id = stored.getKey().substring(PREFIX.length());
+                    if (!validIdentity(id)) { corrupt++; continue; }
+                    Record record = decode(stored.getValue());
+                    if (record == null) { corrupt++; continue; }
+                    if (!"sent".equals(record.status)) uncertain++;
+                    if (record.scope.isEmpty() && !legacyIdentities.contains(id)) { unassigned++; continue; }
+                    if (!scope.equals(record.scope) && !(record.scope.isEmpty() && legacyIdentities.contains(id))) continue;
+                    entries.add(new Entry(preferences, id, record, (String) stored.getValue(), scope,
+                            recoverable(record, now)));
+                }
+                entries.sort((a, b) -> Long.compare(b.timestamp, a.timestamp));
+                return new Snapshot(entries, total, capacity, uncertain, corrupt, unassigned, failed());
+            } catch (RuntimeException failure) {
+                fail();
+                return new Snapshot(Collections.emptyList(), total, capacity, uncertain, corrupt, unassigned, true);
+            }
+        }
+    }
+
+    /** Explicit human reconciliation only; never invokes the host or retries a send. */
+    public boolean reconcile(Entry expected, String scope, boolean confirmedSent, long now) {
+        return reconcile(expected, scope, confirmedSent, now, () -> true);
+    }
+
+    public boolean reconcile(Entry expected, String scope, boolean confirmedSent, long now,
+                             java.util.function.BooleanSupplier beforeChange) {
+        if (expected == null || expected.owner != preferences || !validIdentity(scope) || !scope.equals(expected.scope)) return false;
+        synchronized (LOCK) {
+            if (failed()) return false;
+            try {
+                Object raw = preferences.getAll().get(PREFIX + expected.identity);
+                if (!expected.encoded.equals(raw)) return false;
+                Record record = decode(raw);
+                if (record == null || !recoverable(record, now)) return false;
+                if (beforeChange == null || !beforeChange.getAsBoolean()) return false;
+                return commit(confirmedSent
+                        ? preferences.edit().putString(PREFIX + expected.identity,
+                        encode(record.attempt, "sent", now, scope, record.session))
+                        : preferences.edit().remove(PREFIX + expected.identity));
+            } catch (RuntimeException failure) { fail(); return false; }
+        }
+    }
+
+    private static boolean recoverable(Record record, long now) {
+        return !"sent".equals(record.status) && !SESSION.equals(record.session)
+                && now >= record.timestamp && now - record.timestamp >= RECOVERY_DELAY_MILLIS;
+    }
+
+    public static final class Entry {
+        public final String identity, status;
+        public final long timestamp;
+        public final boolean recoverable;
+        private final String encoded, scope;
+        private final SharedPreferences owner;
+        private Entry(SharedPreferences owner, String identity, Record record, String encoded, String scope, boolean recoverable) {
+            this.owner = owner;
+            this.identity = identity; this.status = record.status; this.timestamp = record.timestamp;
+            this.encoded = encoded; this.scope = scope; this.recoverable = recoverable;
+        }
+    }
+
+    public static final class Snapshot {
+        public final List<Entry> entries;
+        public final int total, capacity, uncertain, corrupt, unassigned;
+        public final boolean storageFailed;
+        private Snapshot(List<Entry> entries, int total, int capacity, int uncertain, int corrupt, int unassigned, boolean failed) {
+            this.entries = Collections.unmodifiableList(entries); this.total = total; this.capacity = capacity;
+            this.uncertain = uncertain; this.corrupt = corrupt; this.unassigned = unassigned; storageFailed = failed;
         }
     }
 
@@ -143,9 +245,10 @@ public final class SubmissionLedger {
         return value != null && value.matches("[A-Za-z0-9_-]{1,100}");
     }
 
-    private static String encode(String attempt, String status, long timestamp) {
-        try { return new JSONObject().put("version", 1).put("attempt", attempt)
-                .put("status", status).put("timestamp", timestamp).toString(); }
+    private static String encode(String attempt, String status, long timestamp, String scope, String session) {
+        try { return new JSONObject().put("version", 2).put("attempt", attempt)
+                .put("status", status).put("timestamp", timestamp).put("scope", scope)
+                .put("session", session.isEmpty() ? SESSION : session).toString(); }
         catch (org.json.JSONException impossible) { throw new IllegalStateException(impossible); }
     }
 
@@ -155,17 +258,22 @@ public final class SubmissionLedger {
             JSONObject json = new JSONObject((String) value);
             String attempt = json.getString("attempt"), status = json.getString("status");
             long timestamp = json.getLong("timestamp");
-            if (json.getInt("version") != 1 || !validAttempt(attempt) || timestamp < 0
+            int version = json.getInt("version");
+            String scope = version == 1 ? "" : json.getString("scope");
+            String session = version == 1 ? "" : json.getString("session");
+            if ((version != 1 && version != 2) || !validAttempt(attempt) || timestamp < 0
+                    || !scope.isEmpty() && !validIdentity(scope) || version == 2 && !validAttempt(session)
                     || !("sent".equals(status) || "submitted".equals(status) || "unknown".equals(status))) return null;
-            return new Record(attempt, status, timestamp);
+            return new Record(attempt, status, timestamp, scope, session);
         } catch (org.json.JSONException | RuntimeException ignored) { return null; }
     }
 
     private static final class Record {
-        final String attempt, status;
+        final String attempt, status, scope, session;
         final long timestamp;
-        Record(String attempt, String status, long timestamp) {
+        Record(String attempt, String status, long timestamp, String scope, String session) {
             this.attempt = attempt; this.status = status; this.timestamp = timestamp;
+            this.scope = scope; this.session = session;
         }
     }
 }

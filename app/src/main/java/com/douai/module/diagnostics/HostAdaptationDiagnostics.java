@@ -39,12 +39,14 @@ public final class HostAdaptationDiagnostics {
     public static void append(Bundle snapshot, Bundle version, String rulesFingerprint, HostScanReport report) {
         snapshot.putAll(version);
         boolean versionMatched = version.getBoolean("host_version_profile_matched");
-        boolean rulesMatched = HostAdaptation.matchesRules(rulesFingerprint);
+        HostAdaptation.Profile profile = HostAdaptation.forVersion(version.getString("host_package"),
+                version.getString("host_version_name"), version.getLong("host_version_code"));
+        boolean rulesMatched = profile != null && profile.matchesRules(rulesFingerprint);
         snapshot.putBoolean("host_adaptation_static_verified", versionMatched && rulesMatched);
         snapshot.putBoolean("host_adaptation_rules_verified", rulesMatched);
-        snapshot.putString("host_adaptation_rules_asset", HostAdaptation.RULES_ASSET);
+        snapshot.putString("host_adaptation_rules_asset", profile == null ? "" : profile.rulesAsset);
         snapshot.putString("host_adaptation_rules_fingerprint", rulesFingerprint);
-        snapshot.putInt("host_adaptation_resource_count", HostAdaptation.getFeedResources().size());
+        snapshot.putInt("host_adaptation_resource_count", profile == null ? 0 : profile.getFeedResources().size());
         int gaps = 0;
         int uninstalled = 0;
         for (HostFeatureCatalog.Feature feature : HostFeatureCatalog.getFeatures()) {
@@ -188,11 +190,13 @@ public final class HostAdaptationDiagnostics {
                     .append(" / ").append(snapshot.getLong("host_version_code"));
         } else detail.append("读取失败，未验证");
         if (snapshot.getBoolean("host_adaptation_static_verified")) {
-            detail.append("\n版本和规则配置匹配 40.6.0 静态验证记录；DEX 规则仍以本次扫描为准。");
+            detail.append("\n版本和规则配置匹配 ").append(snapshot.getString("host_version_name", "未知"))
+                    .append(" 静态验证记录；DEX 规则仍以本次扫描为准。");
         } else if (!snapshot.getBoolean("host_version_profile_matched")) {
             detail.append("\n该宿主版本未验证；唯一规则命中和 Hook 安装不构成版本适配证明。");
         } else {
-            detail.append("\n版本与 40.6.0 一致，当前规则配置未绑定已验证证据。");
+            detail.append("\n版本与 ").append(snapshot.getString("host_version_name", "未知"))
+                    .append(" 一致，当前规则配置未绑定已验证证据。");
         }
         if (scanMillis >= 0) {
             detail.append("\n本次").append(snapshot.getBoolean("cache_hit") ? "缓存读取" : "规则扫描")
@@ -219,6 +223,21 @@ public final class HostAdaptationDiagnostics {
                 detail.append('\n').append(feature.label).append("：规则唯一命中，Hook 未安装。");
             }
         }
+        if (snapshot.containsKey("hidden_skip_enabled")) {
+            detail.append("\n视频跳过保护：开关")
+                    .append(snapshot.getBoolean("hidden_skip_enabled") ? "开启" : "关闭")
+                    .append(snapshot.getBoolean("hidden_skip_installed") ? "，四处 Hook 完整安装。" : "，Hook 未完整安装。")
+                    .append("\n当前安全召回：命中 ").append(hiddenCount(snapshot, "hidden_skip_current_hits"))
+                    .append("，拦截 ").append(hiddenCount(snapshot, "hidden_skip_current_blocked"))
+                    .append("；后台自动移除：命中 ").append(hiddenCount(snapshot, "hidden_skip_background_hits"))
+                    .append("，拦截 ").append(hiddenCount(snapshot, "hidden_skip_background_blocked"))
+                    .append("。计数随宿主进程重启清零。");
+        }
         return detail.append("\n功能开关与触发计数单独报告；点击、发送及其他实际行为仍需真机确认。").toString();
+    }
+
+    private static long hiddenCount(Bundle snapshot, String key) {
+        try { return Math.max(0, Math.min(1_000_000_000L, snapshot.getLong(key))); }
+        catch (RuntimeException unavailable) { return 0; }
     }
 }

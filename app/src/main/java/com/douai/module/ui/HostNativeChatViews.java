@@ -19,11 +19,14 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import com.douai.module.scan.HostAdaptation;
+import com.douai.module.scan.HostResourceProfile;
+
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 /**
- * View-only bridge to the Douyin 40.6.0 IM widgets verified in the workspace APK.
+ * View-only bridge to the Douyin 40.8.0 IM widgets verified in the workspace APK.
  * No SessionInfo, IM conversation, Rips logic, message binding or SDK send API is created.
  */
 final class HostNativeChatViews {
@@ -55,6 +58,7 @@ final class HostNativeChatViews {
     final ImageView send;
 
     private final Activity activity;
+    private final HostAdaptation.Profile profile;
     private final Class<?> textFactory;
     private final Class<?> textWidget;
     private final int receivedBackground;
@@ -66,8 +70,8 @@ final class HostNativeChatViews {
 
     static HostNativeChatViews create(Activity activity) throws ReflectiveOperationException {
         try {
-            verifyHost(activity);
-            return new HostNativeChatViews(activity);
+            HostAdaptation.Profile profile = profileFor(activity);
+            return new HostNativeChatViews(activity, profile);
         } catch (ReflectiveOperationException failure) {
             throw failure;
         } catch (RuntimeException | LinkageError failure) {
@@ -75,26 +79,27 @@ final class HostNativeChatViews {
         }
     }
 
-    private HostNativeChatViews(Activity activity) throws ReflectiveOperationException {
+    private HostNativeChatViews(Activity activity, HostAdaptation.Profile profile) throws ReflectiveOperationException {
         this.activity = activity;
+        this.profile = profile;
         ClassLoader loader = activity.getClass().getClassLoader();
-        Object chosenLayout = hostClass("X.0s7o", loader).getMethod("LIZ").invoke(null);
+        Object chosenLayout = hostClass("X.0YVw", loader).getMethod("LIZ").invoke(null);
         if (!(chosenLayout instanceof Integer)) throw incompatible("聊天布局返回类型");
         int layout = (Integer) chosenLayout;
-        if (layout != 0x7f0d1954 && layout != 0x7f0d1955 && layout != 0x7f0d1956) {
+        if (layout != resourceId(0x7f0d194a) && layout != resourceId(0x7f0d194b) && layout != resourceId(0x7f0d194c)) {
             throw incompatible("未知聊天布局 " + Integer.toHexString(layout));
         }
         View inflated = LayoutInflater.from(activity).inflate(layout, null, false);
-        root = require(inflated, 0x7f0a203b, FrameLayout.class);
-        Object rootColor = hostClass("X.0sBR", loader).getMethod("LIZIZ").invoke(null);
+        root = require(inflated, 0x7f0a2042, FrameLayout.class);
+        Object rootColor = hostClass("X.0vJL", loader).getMethod("LIZIZ").invoke(null);
         if (!(rootColor instanceof Integer) || Color.alpha((Integer) rootColor) != 255) {
             throw incompatible("官方页面背景颜色");
         }
         root.setBackgroundColor((Integer) rootColor);
-        LinearLayout column = require(root, 0x7f0a205c, LinearLayout.class);
-        FrameLayout headerSlot = require(root, 0x7f0a4246, FrameLayout.class);
-        View headerDivider = require(root, 0x7f0a2054, View.class);
-        messageContainer = require(root, 0x7f0a2026, FrameLayout.class);
+        LinearLayout column = require(root, 0x7f0a2063, LinearLayout.class);
+        FrameLayout headerSlot = require(root, 0x7f0a4258, FrameLayout.class);
+        View headerDivider = require(root, 0x7f0a205b, View.class);
+        messageContainer = require(root, 0x7f0a202d, FrameLayout.class);
         FrameLayout composerSlot = require(root, 0x7f0a6444, FrameLayout.class);
 
         Object composer = hostClass(INPUT_FACTORY, loader).getMethod("LJLJJLL", Context.class)
@@ -103,26 +108,26 @@ final class HostNativeChatViews {
         inputContainer = (ViewGroup) composer;
         if (!hostClass("androidx.constraintlayout.widget.ConstraintLayout", loader)
                 .isInstance(inputContainer)) throw incompatible("输入栏根类型");
-        input = require(inputContainer, 0x7f0a7d32, EditText.class);
+        input = require(inputContainer, 0x7f0a7d27, EditText.class);
         if (!hostClass(HOST_PACKAGE + ".im.widget.SearchableEditText", loader).isInstance(input)) {
             throw incompatible("官方输入框类型");
         }
         // The outer entrance slots flank the rounded input body. The official layout in
         // the reference uses the inner slots, so all four controls share one white pill.
-        leftActions = require(inputContainer, 0x7f0a6a1c, LinearLayout.class);
-        rightActions = require(inputContainer, 0x7f0a9da1, LinearLayout.class);
+        leftActions = require(inputContainer, 0x7f0a6a13, LinearLayout.class);
+        rightActions = require(inputContainer, 0x7f0a9dbe, LinearLayout.class);
 
         // The native builder deliberately leaves decoration to its Rips UI. Use the same
         // independent host drawable factory, without constructing the Rips instance.
-        View inputBody = require(inputContainer, 0x7f0a0ef3, View.class);
-        Object inputBackground = hostClass("X.0ryb", loader).getMethod("LIZ", Context.class)
+        View inputBody = require(inputContainer, 0x7f0a0f00, View.class);
+        Object inputBackground = hostClass("X.0YVa", loader).getMethod("LIZ", Context.class)
                 .invoke(null, activity);
         if (!(inputBackground instanceof Drawable)) throw incompatible("官方输入背景类型");
         inputBody.setBackground(((Drawable) inputBackground).mutate());
-        tools = hostIcon(0x7f0842a7, "工具");
-        voice = hostIcon(0x7f084422, "语音输入");
-        emoji = hostIcon(0x7f084445, "表情");
-        plus = hostIcon(0x7f08444d, "添加附件");
+        tools = hostIcon(0x7f08430a, "工具");
+        voice = hostIcon(0x7f084486, "语音输入");
+        emoji = hostIcon(0x7f0844a9, "表情");
+        plus = hostIcon(0x7f0844b1, "添加附件");
         leftActions.addView(tools, new LinearLayout.LayoutParams(dp(44), dp(44)));
         rightActions.addView(voice, new LinearLayout.LayoutParams(dp(44), dp(44)));
         rightActions.addView(emoji, new LinearLayout.LayoutParams(dp(44), dp(44)));
@@ -135,7 +140,7 @@ final class HostNativeChatViews {
         updateComposer(false, false);
 
         Object nativeTitle = hostClass(TITLE_FACTORY, loader)
-                .getMethod("LJLIIL", int.class, Context.class).invoke(null, 0x7f0a900f, activity);
+                .getMethod("LJLIIL", int.class, Context.class).invoke(null, resourceId(0x7f0a900f), activity);
         if (!(nativeTitle instanceof TextView)) throw incompatible("官方标题返回类型");
         title = (TextView) nativeTitle;
         if (!hostClass("com.bytedance.ies.dmt.ui.widget.DmtTextView", loader).isInstance(title)) {
@@ -145,7 +150,7 @@ final class HostNativeChatViews {
         LinearLayout header = new LinearLayout(activity);
         header.setGravity(Gravity.CENTER_VERTICAL);
         header.setMinimumHeight(dp(56));
-        ImageView returnButton = hostIcon(0x7f08456a, "返回");
+        ImageView returnButton = hostIcon(0x7f0845cd, "返回");
         hostClass(HOST_PACKAGE + ".im.business.chat.feature.title.component.LeaveChatUI", loader)
                 .getMethod("LJLIIL", Context.class, ImageView.class).invoke(null, activity, returnButton);
         back = returnButton;
@@ -158,7 +163,7 @@ final class HostNativeChatViews {
         LinearLayout headerActions = new LinearLayout(activity);
         headerActions.setGravity(Gravity.CENTER_VERTICAL);
         actions = headerActions;
-        more = hostIcon(0x7f08456f, "更多");
+        more = hostIcon(0x7f0845d2, "更多");
         more.setPadding(dp(10), dp(10), dp(10), dp(10));
         actions.addView(more, new LinearLayout.LayoutParams(dp(44), dp(44)));
         header.addView(actions, new LinearLayout.LayoutParams(
@@ -195,18 +200,18 @@ final class HostNativeChatViews {
 
         textFactory = hostClass(TEXT_FACTORY, loader);
         textWidget = hostClass(TEXT_WIDGET, loader);
-        Method backgroundFactory = hostClass("X.1bWb", loader).getMethod("LIZ", boolean.class);
-        receivedBackground = backgroundResource(backgroundFactory.invoke(null, false), 0x7f083ab1);
-        sentBackground = backgroundResource(backgroundFactory.invoke(null, true), 0x7f083ab4);
-        tintReceivedBackground = hostClass("X.0qn3", loader).getMethod("LJII", GradientDrawable.class);
+        Method backgroundFactory = hostClass("X.0vMA", loader).getMethod("LIZ", boolean.class);
+        receivedBackground = backgroundResource(backgroundFactory.invoke(null, false), resourceId(0x7f083b0a));
+        sentBackground = backgroundResource(backgroundFactory.invoke(null, true), resourceId(0x7f083b0d));
+        tintReceivedBackground = hostClass("X.0uuG", loader).getMethod("LJII", GradientDrawable.class);
         Class<?> backgroundUi = hostClass(HOST_PACKAGE
                 + ".im.business.chat.msgcell.common.bg.NewBgContentCellUI", loader);
         Object insets = backgroundUi.getMethod("LJJJIL").invoke(backgroundUi.getConstructor().newInstance());
         if (!(insets instanceof Rect)) throw incompatible("官方气泡内容间距");
         bubbleInsets = new Rect((Rect) insets);
-        nativeBubbleWidth = hostClass("X.0sNm", loader)
+        nativeBubbleWidth = hostClass("X.0vK4", loader)
                 .getMethod("LIZ", Context.class, int.class, boolean.class);
-        nativeReverseColors = hostClass("X.0sMT", loader).getMethod("LJIIJ");
+        nativeReverseColors = hostClass("X.0Yjd", loader).getMethod("LJIIJ");
         messageTextMaxWidth(Math.max(1, activity.getResources().getDisplayMetrics().widthPixels));
         // Validate both roles before the dialog is shown, so compatibility failures are
         // reported by the caller instead of appearing on the first ListView render.
@@ -217,7 +222,7 @@ final class HostNativeChatViews {
     /** Local AI state only; no native channel state, recording or IM send logic is bound. */
     void updateComposer(boolean busy, boolean hasContent) {
         boolean showSend = busy || hasContent;
-        send.setImageResource(busy ? 0x7f084338 : 0x7f084101);
+        send.setImageResource(resourceId(busy ? 0x7f08439b : 0x7f08415e));
         send.setContentDescription(busy ? "停止" : "发送");
         send.setVisibility(showSend ? View.VISIBLE : View.GONE);
         voice.setVisibility(showSend ? View.GONE : View.VISIBLE);
@@ -227,7 +232,7 @@ final class HostNativeChatViews {
 
     int messageTextColor(boolean user) {
         // AbsTextCellLogic resolves these from the native bubble configuration's LIZLLL.
-        return activity.getColor(user ? 0x7f060094 : 0x7f060182);
+        return activity.getColor(resourceId(user ? 0x7f060094 : 0x7f060182));
     }
 
     int messageTextMaxWidth(int availableBubbleWidth) {
@@ -262,7 +267,7 @@ final class HostNativeChatViews {
         Class<?> factoryClass = hostClass(HOST_PACKAGE
                 + ".im.business.chat.msgcell.common.basic.AvatarCellUI", loader);
         Object factory = factoryClass.getConstructor().newInstance();
-        Object created = factoryClass.getMethod("LJJIIJ", Context.class, ViewGroup.class)
+        Object created = factoryClass.getMethod(HostResourceProfile.viewFactory(profile), Context.class, ViewGroup.class)
                 .invoke(factory, activity, parent);
         if (!(created instanceof ImageView)
                 || !hostClass("com.ss.android.ugc.exview.ImAvatarImageView", loader).isInstance(created)) {
@@ -305,12 +310,12 @@ final class HostNativeChatViews {
                 + ".im.business.chat.msgcell.vh.strangerbigcard.StrangerTopAvatarCellUI",
                 activity.getClass().getClassLoader());
         Object factory = factoryClass.getConstructor().newInstance();
-        Object created = factoryClass.getMethod("LJJIIJ", Context.class, ViewGroup.class)
+        Object created = factoryClass.getMethod(HostResourceProfile.viewFactory(profile), Context.class, ViewGroup.class)
                 .invoke(factory, activity, parent);
         if (!(created instanceof View)) throw incompatible("官方资料区类型");
         View view = (View) created;
-        ImageView image = require(view, 0x7f0a10d9, ImageView.class);
-        TextView name = require(view, 0x7f0a8192, TextView.class);
+        ImageView image = require(view, 0x7f0a10e6, ImageView.class);
+        TextView name = require(view, 0x7f0a8189, TextView.class);
         image.setScaleType(ImageView.ScaleType.CENTER_CROP);
         clipAvatar(image);
         // Only this pure layout factory is used: no stranger identity, follow status,
@@ -319,7 +324,7 @@ final class HostNativeChatViews {
     }
 
     View createQuickAction(ViewGroup parent, String label) throws ReflectiveOperationException {
-        Object created = hostClass("X.0sWV", activity.getClass().getClassLoader())
+        Object created = hostClass("X.0XZk", activity.getClass().getClassLoader())
                 .getMethod("LIZIZ", ViewGroup.class).invoke(null, parent);
         if (!(created instanceof ViewGroup)) throw incompatible("官方快捷卡片类型");
         ViewGroup view = (ViewGroup) created;
@@ -328,8 +333,8 @@ final class HostNativeChatViews {
         // Native action-bar artwork is supplied by the real IM data/server. Local AI
         // shortcuts use their explicit text/Unicode label without requesting that data.
         require(view, 0x7f0a464c, View.class).setVisibility(View.GONE);
-        require(view, 0x7f0a5158, View.class).setVisibility(View.GONE);
-        require(view, 0x7f0ab99c, View.class).setVisibility(View.GONE);
+        require(view, 0x7f0a5146, View.class).setVisibility(View.GONE);
+        require(view, 0x7f0ab9a8, View.class).setVisibility(View.GONE);
         view.setContentDescription(label);
         view.setClickable(true);
         view.setFocusable(true);
@@ -337,7 +342,7 @@ final class HostNativeChatViews {
     }
 
     ViewGroup createMessageShell(ViewGroup parent) throws ReflectiveOperationException {
-        Object created = hostClass("X.0sSQ", activity.getClass().getClassLoader())
+        Object created = hostClass("X.0uok", activity.getClass().getClassLoader())
                 .getMethod("LIZJ", Context.class).invoke(null, activity);
         if (!(created instanceof FrameLayout)) throw incompatible("官方消息行类型");
         FrameLayout view = (FrameLayout) created;
@@ -353,7 +358,7 @@ final class HostNativeChatViews {
                 .getConstructor(Context.class, android.util.AttributeSet.class).newInstance(activity, null);
         if (!(created instanceof ImageView)) throw incompatible("官方图标类型");
         ImageView image = (ImageView) created;
-        Drawable asset = activity.getDrawable(drawable);
+        Drawable asset = activity.getDrawable(resourceId(drawable));
         if (asset == null) throw incompatible("官方图标资源 " + Integer.toHexString(drawable));
         image.setImageDrawable(asset.mutate());
         image.setScaleType(ImageView.ScaleType.FIT_CENTER);
@@ -424,22 +429,27 @@ final class HostNativeChatViews {
         }
     }
 
-    private static void verifyHost(Activity activity) throws ReflectiveOperationException {
-        if (activity == null || !HOST_PACKAGE.equals(activity.getPackageName())) {
+    static HostAdaptation.Profile profileFor(Context context) throws ReflectiveOperationException {
+        if (context == null || !HOST_PACKAGE.equals(context.getPackageName())) {
             throw incompatible("需要在抖音中打开");
         }
+        HostAdaptation.Profile installed = HostAdaptation.currentProfile();
+        if (installed != null) return installed;
         try {
-            PackageInfo info = activity.getPackageManager().getPackageInfo(HOST_PACKAGE, 0);
-            if (!"40.6.0".equals(info.versionName) || info.getLongVersionCode() != 400601L) {
-                throw incompatible("当前官方聊天适配支持抖音 40.6.0 (400601)");
-            }
+            PackageInfo info = context.getPackageManager().getPackageInfo(HOST_PACKAGE, 0);
+            HostAdaptation.Profile profile = HostAdaptation.forVersion(context.getPackageName(),
+                    info.versionName, info.getLongVersionCode());
+            if (profile == null) throw incompatible("当前官方聊天适配支持抖音 40.6.0 / 40.8.0");
+            return profile;
         } catch (android.content.pm.PackageManager.NameNotFoundException failure) {
             throw new ReflectiveOperationException("无法读取抖音版本", failure);
         }
     }
 
-    private static int backgroundResource(Object config, int expected) throws ReflectiveOperationException {
-        if (config == null || !"X.1aLM".equals(config.getClass().getName())) {
+    private int resourceId(int canonicalId) { return HostResourceProfile.id(profile, canonicalId); }
+
+    private int backgroundResource(Object config, int expected) throws ReflectiveOperationException {
+        if (config == null || !HostResourceProfile.className(profile, "X.0vM9").equals(config.getClass().getName())) {
             throw incompatible("官方消息背景配置类型");
         }
         Field resource = config.getClass().getField("LIZ");
@@ -449,13 +459,13 @@ final class HostNativeChatViews {
         return expected;
     }
 
-    private static Class<?> hostClass(String name, ClassLoader loader) throws ClassNotFoundException {
-        return Class.forName(name, false, loader);
+    private Class<?> hostClass(String name, ClassLoader loader) throws ClassNotFoundException {
+        return Class.forName(HostResourceProfile.className(profile, name), false, loader);
     }
 
-    private static <T extends View> T require(View parent, int id, Class<T> type)
+    private <T extends View> T require(View parent, int id, Class<T> type)
             throws ReflectiveOperationException {
-        View found = parent.findViewById(id);
+        View found = parent.findViewById(resourceId(id));
         if (!type.isInstance(found)) throw incompatible("缺少官方控件 " + Integer.toHexString(id));
         return type.cast(found);
     }

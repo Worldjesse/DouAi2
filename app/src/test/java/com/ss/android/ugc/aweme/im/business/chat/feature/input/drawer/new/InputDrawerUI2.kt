@@ -15,22 +15,22 @@ class InputDrawerUI2 {
         @JvmStatic fun LJLJJLL(context: Context): ConstraintLayout {
             createCalls++
             val root = ConstraintLayout(context)
-            root.id = 0x7f0a5774
+            root.id = com.douai.module.ui.HostProfileFixture.id(context, 0x7f0a577c)
             val density = context.resources.displayMetrics.density
             fun dp(value: Int) = (value * density).toInt()
             root.layoutParams = android.view.ViewGroup.MarginLayoutParams(-1, -2).apply {
                 setMargins(dp(8), dp(10), dp(8), dp(10))
             }
-            val left = LinearLayout(context).apply { id = 0x7f0a6a1c }
-            val right = LinearLayout(context).apply { id = 0x7f0a9da1 }
+            val left = LinearLayout(context).apply { id = com.douai.module.ui.HostProfileFixture.id(context, 0x7f0a6a13) }
+            val right = LinearLayout(context).apply { id = com.douai.module.ui.HostProfileFixture.id(context, 0x7f0a9dbe) }
             val body = LinearLayout(context).apply {
-                id = 0x7f0a0ef3
+                id = com.douai.module.ui.HostProfileFixture.id(context, 0x7f0a0f00)
                 gravity = android.view.Gravity.BOTTOM
             }
             body.addView(left, LinearLayout.LayoutParams(-2, -2))
             if (!omitInput) {
                 val input = SearchableEditText(context).apply {
-                    id = 0x7f0a7d32
+                    id = com.douai.module.ui.HostProfileFixture.id(context, 0x7f0a7d27)
                     setBackgroundColor(android.graphics.Color.TRANSPARENT)
                     setTextSize(16f)
                     setPadding(dp(6), dp(10), dp(2), dp(10))
@@ -40,7 +40,7 @@ class InputDrawerUI2 {
             }
             body.addView(right, LinearLayout.LayoutParams(-2, -2))
             val send = AutoRTLImageView(context, null).apply {
-                id = 0x7f0a4058
+                id = com.douai.module.ui.HostProfileFixture.id(context, 0x7f0a4058)
                 setPadding(dp(6), 0, dp(6), 0)
             }
             body.addView(send, LinearLayout.LayoutParams(dp(44), dp(44)))

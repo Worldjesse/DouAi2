@@ -105,7 +105,10 @@ public final class LivePhotoRecognitionRegressionTest {
         assertTrue(new File(path).isFile());
         Set<String> videoKeys = new HashSet<>(), bitrateKeys = new HashSet<>(), workKeys = new HashSet<>();
         try (ZipFile archive = new ZipFile(path)) {
-            for (String dexName : List.of("classes16.dex", "classes55.dex")) {
+            java.util.Enumeration<? extends java.util.zip.ZipEntry> entries = archive.entries();
+            while (entries.hasMoreElements()) {
+                String dexName = entries.nextElement().getName();
+                if (!dexName.matches("classes[0-9]*\\.dex")) continue;
                 try (BufferedInputStream input = new BufferedInputStream(archive.getInputStream(archive.getEntry(dexName)))) {
                     DexBackedDexFile dex = DexBackedDexFile.fromInputStream(Opcodes.getDefault(), input);
                     for (ClassDef type : dex.getClasses()) {

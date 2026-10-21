@@ -498,6 +498,67 @@ public final class CommentReplyLedgerTest {
         assertEquals(CommentReplyLedger.MAX_ENTRIES, preferences.getAll().size());
         assertTrue(recreate().contains(100, "old-0"));
         assertFalse(recreate().claim(100, "old-0", "root", 0));
+        CommentReplyLedger.Health health = ledger.health();
+        assertEquals(CommentReplyLedger.MAX_ENTRIES, health.total);
+        assertEquals(CommentReplyLedger.MAX_ENTRIES, health.unknown);
+        assertTrue(health.blocked());
+        assertTrue(health.diagnostic().contains("容量已满"));
+    }
+
+    @Test public void onlyTheCurrentAttemptCanReturnANeverInvokedSubmissionOrChangeItsOutcome() {
+        assertTrue(ledger.claim(100, "incoming", "root", 1, "first"));
+        assertFalse(ledger.submitted(100, "incoming", "other"));
+        assertTrue(ledger.submitted(100, "incoming", "first"));
+        assertTrue(ledger.deferBeforeInvocation(100, "incoming", "first"));
+        assertTrue(ledger.retryable(100, "incoming"));
+
+        assertTrue(ledger.claim(100, "incoming", "root", 1, "second"));
+        assertFalse(ledger.deferBeforeInvocation(100, "incoming", "first"));
+        ledger.finish(100, "incoming", "sent", "first");
+        ledger.defer(100, "incoming", "first");
+        assertTrue(ledger.submitted(100, "incoming", "second"));
+        ledger.finish(100, "incoming", "unknown", "second");
+        assertFalse(ledger.deferBeforeInvocation(100, "incoming", "second"));
+        assertFalse(recreate().claim(100, "incoming", "root", 1, "third"));
+    }
+
+    @Test public void healthSeparatesKnownUnknownCorruptAndRetryableRecordsWithoutChangingThem() {
+        assertTrue(ledger.initialize(100, 1000, List.of("ignored")));
+        for (String status : List.of("sent", "submitted", "unknown", "cancelled", "failed", "deferred", "pending")) {
+            assertTrue(ledger.claim(100, status, "root-" + status, 0));
+            if (List.of("sent", "submitted", "unknown").contains(status)) assertTrue(ledger.submitted(100, status));
+            if ("deferred".equals(status)) ledger.defer(100, status);
+            else if (!"submitted".equals(status) && !"pending".equals(status)) ledger.finish(100, status, status);
+        }
+        assertTrue(preferences.edit().putString("incoming.101.corrupt", "broken").commit());
+        Map<String, ?> before = preferences.getAll();
+        CommentReplyLedger.Health health = ledger.health();
+        assertEquals(9, health.total);
+        assertEquals(1, health.submitted);
+        assertEquals(1, health.unknown);
+        assertEquals(1, health.corrupt);
+        assertEquals(1, health.pending);
+        assertEquals(2, health.retryable);
+        assertEquals(3, health.confirmed);
+        assertTrue(health.blocked());
+        assertFalse(health.persistenceFailed);
+        assertTrue(health.diagnostic().contains("记录损坏"));
+        assertEquals(before, preferences.getAll());
+    }
+
+    @Test public void fullConfirmedLedgerReportsCapacityWithoutDroppingReplayOrThreadHistory() {
+        SharedPreferences.Editor editor = preferences.edit();
+        String sent = "{\"root\":\"root\",\"status\":\"sent\",\"attempts\":1,\"at\":1000}";
+        for (int index = 0; index < CommentReplyLedger.MAX_ENTRIES; index++) editor.putString("incoming.100.sent-" + index, sent);
+        assertTrue(editor.commit());
+        assertFalse(ledger.claim(100, "new", "new-root", 0));
+        CommentReplyLedger.Health health = ledger.health();
+        assertEquals(CommentReplyLedger.MAX_ENTRIES, health.confirmed);
+        assertEquals(0, health.unknown);
+        assertTrue(health.blocked());
+        assertTrue(health.diagnostic().contains("清空发送历史不会释放账本"));
+        assertTrue(ledger.threadExhausted(100, "root", 3));
+        assertTrue(ledger.contains(100, "sent-0"));
     }
 
     @Test public void invalidIdentifiersAndUnclaimedSubmissionAreRejected() {

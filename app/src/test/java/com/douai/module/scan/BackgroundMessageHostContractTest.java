@@ -33,8 +33,8 @@ import static org.junit.Assert.*;
 
 /** Original APK evidence for SDK-wide receive notifications and cold conversation lookup. */
 public final class BackgroundMessageHostContractTest {
-    private static final String OBSERVER = "LX/1Qjr;";
-    private static final String SDK_BASE = "LX/1QkP;";
+    private static final String OBSERVER = "LX/1Z8C;";
+    private static final String SDK_BASE = "LX/1Z99;";
     private static final String SDK = "Lcom/bytedance/im/core/mi/IMSdkContext;";
     private static final String MESSAGE = "Lcom/bytedance/im/core/model/Message;";
     private static final String EXTRA = "Lcom/bytedance/im/core/model/ReceiveMsgExtra;";
@@ -46,6 +46,8 @@ public final class BackgroundMessageHostContractTest {
     private static final String CLIENT_OBSERVER = "Lcom/bytedance/ies/im/core/api/client/calback/IMessageObserver;";
     private static final String OBSERVER_API = "Lcom/bytedance/im/core/internal/utils/IObserverUtils;";
     private static final Map<String, ClassDef> classes = new HashMap<>();
+    private static boolean legacy;
+    private static HostContractNameFacts names;
 
     @BeforeClass public static void readActualHostContracts() throws Exception {
         classes.clear();
@@ -53,10 +55,12 @@ public final class BackgroundMessageHostContractTest {
         Assume.assumeTrue("DOUAI_TEST_APK is not configured", configured != null);
         File apk = new File(configured);
         assertTrue(apk.isFile());
+        legacy = HostApkTestProfile.is406(apk);
+        names = new HostContractNameFacts(legacy);
         Set<String> wanted = new HashSet<>(Arrays.asList(OBSERVER, SDK_BASE, SDK, MESSAGE, EXTRA,
-                CONVERSATIONS, BIZ_OBSERVER, CORE_OBSERVER, "LX/1QjB;", "LX/0rwU;", "LX/1QuJ;",
-                "LX/1QdT;", "LX/1Qh6;", "LX/1QW8;", "LY/ATRunnableS33S1110000_49;",
-                "LY/ATCallbackS222S1200000_49;"));
+                CONVERSATIONS, BIZ_OBSERVER, CORE_OBSERVER, "LX/1Z9A;", "LX/0vbu;", "LX/16Tc;",
+                "LX/1Z5A;", "LX/1Z6p;", "LX/16Pt;", "LY/ATRunnableS26S1110000_37;",
+                "LY/ATCallbackS220S1200000_37;"));
         try (ZipFile archive = new ZipFile(apk)) {
             Enumeration<? extends ZipEntry> entries = archive.entries();
             while (entries.hasMoreElements() && !wanted.isEmpty()) {
@@ -65,7 +69,7 @@ public final class BackgroundMessageHostContractTest {
                 try (BufferedInputStream input = new BufferedInputStream(archive.getInputStream(entry))) {
                     DexBackedDexFile dex = DexBackedDexFile.fromInputStream(Opcodes.getDefault(), input);
                     for (ClassDef type : dex.getClasses()) {
-                        if (wanted.remove(type.getType())) classes.put(type.getType(), ImmutableClassDef.of(type));
+                        if (wanted.remove(names.type(type.getType()))) classes.put(names.type(type.getType()), names.originalFacts(type));
                     }
                 }
             }
@@ -78,8 +82,8 @@ public final class BackgroundMessageHostContractTest {
     @Test public void globalReceiveEntryCarriesItsSdkWithoutAChatPage() {
         Method receive = callable(OBSERVER, "onGetMessage", "V", false, "Ljava/util/List;", "I", EXTRA);
         assertTrue(AccessFlags.FINAL.isSet(receive.getAccessFlags()));
-        assertEquals("LX/1QjB;", classes.get(OBSERVER).getSuperclass());
-        assertEquals(SDK_BASE, classes.get("LX/1QjB;").getSuperclass());
+        assertEquals("LX/1Z9A;", classes.get(OBSERVER).getSuperclass());
+        assertEquals(SDK_BASE, classes.get("LX/1Z9A;").getSuperclass());
         Field context = field(SDK_BASE, "imSdkContext", SDK);
         assertTrue(AccessFlags.PUBLIC.isSet(context.getAccessFlags()));
         assertTrue(AccessFlags.FINAL.isSet(context.getAccessFlags()));
@@ -91,22 +95,22 @@ public final class BackgroundMessageHostContractTest {
     }
 
     @Test public void bothOnlineNotificationsAndPulledMessagesReachTheSameGlobalEntry() {
-        Method online = callable("LX/1QdT;", "L2", "V", false, "LX/1Qd0;");
-        Method pulled = callable("LX/1Qh6;", "N3", "V", false,
+        Method online = callable("LX/1Z5A;", "M2", "V", false, "LX/1Z5F;");
+        Method pulled = callable("LX/1Z6p;", "R3", "V", false,
                 "Ljava/lang/String;", CONVERSATION, "Ljava/util/List;", "Ljava/lang/Integer;",
-                "LX/1Qd1;", "Ljava/util/ArrayList;", "Z");
+                "LX/1Z6z;", "Ljava/util/ArrayList;", "Z");
         assertTrue(calls(online, OBSERVER, "onGetMessage"));
         assertTrue(calls(pulled, OBSERVER, "onGetMessage"));
         assertTrue(calls(online, SDK_BASE, "getConversationListModel"));
-        assertTrue(calls(pulled, "LX/1QjB;", "getMessageGetHookObserver"));
+        assertTrue(calls(pulled, "LX/1Z9A;", "getMessageGetHookObserver"));
         assertTrue(calls(pulled, "Lcom/bytedance/im/core/dependency/IIMGetMessageHookObserver;", "onNotifyUpdateStart"));
     }
 
     @Test public void applicationInitializationRegistersTheBusinessObserverGlobally() {
-        Method initialize = callable("LX/0rwU;", "LJJII", "V", true);
+        Method initialize = callable("LX/0vbu;", "LJJII", "V", true);
         assertTrue(calls(initialize, BIZ_OBSERVER, "LIZ"));
-        assertTrue(calls(initialize, "LX/1QuJ;", "LIZ"));
-        Method facade = callable("LX/1QuJ;", "LIZ", "V", false, CLIENT_OBSERVER);
+        assertTrue(calls(initialize, "LX/16Tc;", "LIZ"));
+        Method facade = callable("LX/16Tc;", "LIZ", "V", false, CLIENT_OBSERVER);
         assertTrue(calls(facade, CORE_OBSERVER, "LIZ"));
         Method register = callable(CORE_OBSERVER, "LIZ", "V", false, CLIENT_OBSERVER);
         assertTrue(calls(register, OBSERVER_API, "registerGlobal"));
@@ -133,30 +137,30 @@ public final class BackgroundMessageHostContractTest {
 
     @Test public void synchronousConversationLookupReadsMemoryAndDoesNotQueryTheDatabase() {
         Method lookup = callable(CONVERSATIONS, "getConversation", CONVERSATION, false, "Ljava/lang/String;");
-        assertTrue(calls(lookup, "LX/1QW8;", "getConversation"));
-        Method cache = callable("LX/1QW8;", "getConversation", CONVERSATION, false, "Ljava/lang/String;");
+        assertTrue(calls(lookup, "LX/16Pt;", "getConversation"));
+        Method cache = callable("LX/16Pt;", "getConversation", CONVERSATION, false, "Ljava/lang/String;");
         assertTrue(calls(cache, "Lcom/bytedance/im/core/model/cache/IMMemoryCache;", "get"));
         assertFalse("A cold cache miss is not proof that the conversation is missing from local storage",
                 calls(lookup, "Lcom/bytedance/im/core/db/delegate/IIMConversationDaoDelegate;", "getConversation"));
-        assertFalse(calls(lookup, "LX/1QjB;", "executeDB"));
+        assertFalse(calls(lookup, "LX/1Z9A;", "executeDB"));
     }
 
     @Test public void asynchronousConversationLookupSchedulesALocalReadAndReturnsTheResolvedObject() {
         Method async = callable(CONVERSATIONS, "getConversationAsync", "V", false, "Ljava/lang/String;", LISTENER);
-        assertTrue(calls(async, CONVERSATIONS, "LJJZZI"));
-        Method cold = callable(CONVERSATIONS, "LJJZZI", "V", false, "Ljava/lang/String;", "Z", LISTENER);
+        assertTrue(calls(async, CONVERSATIONS, "LJLIIL"));
+        Method cold = callable(CONVERSATIONS, "LJLIIL", "V", false, "Ljava/lang/String;", "Z", LISTENER);
         assertTrue(calls(cold, CONVERSATIONS, "getConversation"));
-        assertTrue(calls(cold, "LX/1QjB;", "executeDB"));
+        assertTrue(calls(cold, "LX/1Z9A;", "executeDB"));
         assertTrue(referencesField(cold, "Lcom/bytedance/im/core/db/thread/DbType;", "CONV"));
         assertTrue(referencesField(cold, "Lcom/bytedance/im/core/db/thread/DbAction;", "READ"));
         assertTrue(strings(cold).contains("ConversationListModel_getConversation"));
-        Method read = callable("LY/ATRunnableS33S1110000_49;", "onRun", "Ljava/lang/Object;", false);
+        Method read = callable("LY/ATRunnableS26S1110000_37;", "onRun", "Ljava/lang/Object;", false);
         assertTrue(calls(read, "Lcom/bytedance/im/core/db/delegate/IIMConversationDaoDelegate;", "getConversation"));
-        Method callback = callable("LY/ATCallbackS222S1200000_49;", "onCallback", "V", false, "Ljava/lang/Object;");
+        Method callback = callable("LY/ATCallbackS220S1200000_37;", "onCallback", "V", false, "Ljava/lang/Object;");
         assertTrue(calls(callback, LISTENER, "onSuccess"));
-        assertTrue(calls(callback, CONVERSATIONS, "b3"));
-        Method warmCache = callable(CONVERSATIONS, "b3", "V", false, "Ljava/lang/String;", "[" + CONVERSATION);
-        assertTrue(calls(warmCache, "LX/1QW8;", "J2"));
+        assertTrue(calls(callback, CONVERSATIONS, "f3"));
+        Method warmCache = callable(CONVERSATIONS, "f3", "V", false, "Ljava/lang/String;", "[" + CONVERSATION);
+        assertTrue(calls(warmCache, "LX/16Pt;", "J2"));
     }
 
     private static Method method(String owner, String name, String returns, String... parameters) {

@@ -2,6 +2,7 @@ package com.douai.module.feature;
 
 import android.app.Dialog;
 import android.content.Context;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
@@ -15,19 +16,30 @@ import io.github.libxposed.api.XposedInterface;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.WeakHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 /** Host 40.6 UI gates and owned view visibility, independent of the host's account state. */
 public final class HostBehaviorHooks implements AutoCloseable {
+    private static final String HIDDEN_SKIP = "prevent_skip_hidden";
     private final Map<String, BehaviorHookGroup> groups = new LinkedHashMap<>();
     private final Map<View, HiddenView> hidden = new WeakHashMap<>();
     private final Map<View, String> observed = new WeakHashMap<>();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Consumer<String> log;
+    private final AtomicLong hiddenCurrentHits = new AtomicLong();
+    private final AtomicLong hiddenCurrentBlocked = new AtomicLong();
+    private final AtomicLong hiddenBackgroundHits = new AtomicLong();
+    private final AtomicLong hiddenBackgroundBlocked = new AtomicLong();
+    private final AtomicBoolean hiddenCurrentLogged = new AtomicBoolean();
+    private final AtomicBoolean hiddenBackgroundLogged = new AtomicBoolean();
+    private volatile boolean hiddenSkipReady;
     private volatile LocalOptions options;
     private volatile boolean closed;
 
@@ -39,6 +51,30 @@ public final class HostBehaviorHooks implements AutoCloseable {
     public static HostBehaviorHooks install(XposedInterface framework, HostScanReport report,
                                              ClassLoader loader, Context context,
                                              LocalOptions options, Consumer<String> log) {
+        return installWithHiddenTaskContract(framework, report, loader, context, options, log, null);
+    }
+
+    enum HiddenSafetyTaskContract {
+        HOST_406(0, null), HOST_408(1, 0);
+        final int currentBranch;
+        final Integer backgroundBranch;
+        HiddenSafetyTaskContract(int currentBranch, Integer backgroundBranch) {
+            this.currentBranch = currentBranch;
+            this.backgroundBranch = backgroundBranch;
+        }
+        static HiddenSafetyTaskContract resolve(String current, String background) {
+            if ("Lkotlin/jvm/internal/ALambdaS32S1500000_4;".equals(current) && "LX/06ht;".equals(background)) return HOST_406;
+            if ("Lkotlin/jvm/internal/ALambdaS31S1500000_28;".equals(current)
+                    && "Lkotlin/jvm/internal/ALambdaS17S1600000_28;".equals(background)) return HOST_408;
+            throw new IllegalStateException("Hidden video safety task profile combination changed");
+        }
+    }
+
+    /** Package-local seam replays either proven contract with JVM fixture task classes. */
+    static HostBehaviorHooks installWithHiddenTaskContract(XposedInterface framework, HostScanReport report,
+                                                            ClassLoader loader, Context context,
+                                                            LocalOptions options, Consumer<String> log,
+                                                            HiddenSafetyTaskContract hiddenContract) {
         HostBehaviorHooks hooks = new HostBehaviorHooks(options, log);
         hooks.suppress(framework, report, loader, "remove_splash_ads", false,
                 "adv_ui_splash_gate");
@@ -47,8 +83,7 @@ public final class HostBehaviorHooks implements AutoCloseable {
         hooks.installUpdates(framework, report, loader);
         hooks.suppress(framework, report, loader, "disable_double_tap_like", null,
                 "adv_ui_double_tap", "adv_ui_big_digg");
-        hooks.suppress(framework, report, loader, "prevent_skip_hidden", null,
-                "adv_ui_delete_aweme", "adv_ui_delete_aweme_full_feed");
+        hooks.installHiddenSkip(framework, report, loader, hiddenContract);
         hooks.suppress(framework, report, loader, "prevent_insert_video", null,
                 "adv_ui_insert_single", "adv_ui_insert_single_fallback",
                 "adv_ui_insert_list", "adv_ui_insert_list_fallback");
@@ -61,7 +96,21 @@ public final class HostBehaviorHooks implements AutoCloseable {
 
     public boolean supports(String key) {
         BehaviorHookGroup group = groups.get(key);
-        return group != null && group.isActive();
+        return group != null && group.isActive() && (!HIDDEN_SKIP.equals(key) || hiddenSkipReady);
+    }
+
+    /** Aggregate route counters contain no work IDs, provider data, content, or URLs. */
+    public void appendHiddenSkipDiagnostics(Bundle snapshot) {
+        if (snapshot == null) return;
+        LocalOptions current = options;
+        BehaviorHookGroup group = groups.get(HIDDEN_SKIP);
+        snapshot.putBoolean("hidden_skip_enabled", !closed && current != null && current.enabled(HIDDEN_SKIP));
+        snapshot.putBoolean("hidden_skip_installed", supports(HIDDEN_SKIP));
+        snapshot.putLong("hidden_skip_current_hits", hiddenCurrentHits.get());
+        snapshot.putLong("hidden_skip_current_blocked", hiddenCurrentBlocked.get());
+        snapshot.putLong("hidden_skip_background_hits", hiddenBackgroundHits.get());
+        snapshot.putLong("hidden_skip_background_blocked", hiddenBackgroundBlocked.get());
+        snapshot.putString("hidden_skip_failure", group == null ? "" : group.installationFailure());
     }
 
     public void setOptions(LocalOptions options) {
@@ -96,6 +145,107 @@ public final class HostBehaviorHooks implements AutoCloseable {
             }
             reportInstalled(key, targets.size());
         } catch (Throwable failure) { group.fail(failure); }
+    }
+
+    private void installHiddenSkip(XposedInterface framework, HostScanReport report, ClassLoader loader,
+                                   HiddenSafetyTaskContract fixtureContract) {
+        BehaviorHookGroup group = newGroup(HIDDEN_SKIP);
+        try {
+            Method baseDelete = HostTargets.method(report, "adv_ui_delete_aweme", loader);
+            Method fullDelete = HostTargets.method(report, "adv_ui_delete_aweme_full_feed", loader);
+            Method currentTask = HostTargets.method(report, "adv_ui_hidden_recall_task", loader);
+            Method backgroundTask = HostTargets.method(report, "adv_ui_hidden_background_task", loader);
+            HiddenSafetyTaskContract contract = fixtureContract != null ? fixtureContract
+                    : HiddenSafetyTaskContract.resolve(
+                            HostTargets.candidate(report, "adv_ui_hidden_recall_task").getClassDescriptor(),
+                            HostTargets.candidate(report, "adv_ui_hidden_background_task").getClassDescriptor());
+            for (Method target : new Method[]{baseDelete, fullDelete}) {
+                Class<?>[] parameters = target.getParameterTypes();
+                if (Modifier.isStatic(target.getModifiers()) || target.getReturnType() != void.class
+                        || parameters.length != 2 || parameters[0] != int.class || parameters[1].isPrimitive()) {
+                    throw new IllegalStateException("Hidden video legacy removal contract changed");
+                }
+            }
+            for (Method target : new Method[]{currentTask, backgroundTask}) {
+                if (Modifier.isStatic(target.getModifiers()) || target.getParameterCount() != 0
+                        || target.getReturnType() != Object.class || !"invoke".equals(target.getName())) {
+                    throw new IllegalStateException("Hidden video safety task contract changed");
+                }
+            }
+            Field discriminator = currentTask.getDeclaringClass().getDeclaredField("$t");
+            Field backgroundDiscriminator = null;
+            if (contract.backgroundBranch != null) {
+                backgroundDiscriminator = backgroundTask.getDeclaringClass().getDeclaredField("$t");
+            } else {
+                for (Field field : backgroundTask.getDeclaringClass().getDeclaredFields()) {
+                    if ("$t".equals(field.getName())) throw new IllegalStateException("Dedicated safety task unexpectedly has a discriminator");
+                }
+            }
+            for (Field field : new Field[]{discriminator, backgroundDiscriminator}) {
+                if (field == null) continue;
+                if (field.getType() != int.class || Modifier.isStatic(field.getModifiers())) {
+                    throw new IllegalStateException("Hidden video safety task discriminator changed");
+                }
+                field.setAccessible(true);
+            }
+            final Field backgroundBranchField = backgroundDiscriminator;
+            Class<?> unitType = Class.forName("kotlin.Unit", false, loader);
+            Field instance = unitType.getField("INSTANCE");
+            if (!Modifier.isStatic(instance.getModifiers()) || instance.getType() != unitType) {
+                throw new IllegalStateException("Host Kotlin Unit contract changed");
+            }
+            Object hostUnit = instance.get(null);
+            if (!unitType.isInstance(hostUnit)) throw new IllegalStateException("Host Kotlin Unit instance unavailable");
+
+            // Ready remains false until all four handles exist, including during partial installation.
+            group.add(framework, baseDelete, chain -> enabled(HIDDEN_SKIP) ? null : chain.proceed());
+            group.add(framework, fullDelete, chain -> enabled(HIDDEN_SKIP) ? null : chain.proceed());
+            group.add(framework, currentTask, chain -> {
+                if (closed || !hiddenSkipReady || !group.isActive()) return chain.proceed();
+                int branch;
+                try { branch = discriminator.getInt(chain.getThisObject()); }
+                catch (ReflectiveOperationException | RuntimeException failure) {
+                    hiddenSkipReady = false;
+                    group.fail(failure);
+                    return chain.proceed();
+                }
+                if (branch != contract.currentBranch) return chain.proceed();
+                hiddenCurrentHits.incrementAndGet();
+                if (!enabled(HIDDEN_SKIP)) return chain.proceed();
+                hiddenCurrentBlocked.incrementAndGet();
+                logHiddenSkipOnce(hiddenCurrentLogged, "current");
+                return hostUnit;
+            });
+            group.add(framework, backgroundTask, chain -> {
+                if (closed || !hiddenSkipReady || !group.isActive()) return chain.proceed();
+                if (backgroundBranchField != null) {
+                    int branch;
+                    try { branch = backgroundBranchField.getInt(chain.getThisObject()); }
+                    catch (ReflectiveOperationException | RuntimeException failure) {
+                        hiddenSkipReady = false;
+                        group.fail(failure);
+                        return chain.proceed();
+                    }
+                    if (branch != contract.backgroundBranch) return chain.proceed();
+                }
+                hiddenBackgroundHits.incrementAndGet();
+                if (!enabled(HIDDEN_SKIP)) return chain.proceed();
+                hiddenBackgroundBlocked.incrementAndGet();
+                logHiddenSkipOnce(hiddenBackgroundLogged, "background");
+                return hostUnit;
+            });
+            hiddenSkipReady = true;
+            reportInstalled(HIDDEN_SKIP, 4);
+        } catch (Throwable failure) {
+            hiddenSkipReady = false;
+            group.fail(failure);
+        }
+    }
+
+    private void logHiddenSkipOnce(AtomicBoolean logged, String route) {
+        if (!logged.compareAndSet(false, true)) return;
+        try { log.accept("Hidden video auto-skip blocked: route=" + route); }
+        catch (Throwable ignored) { }
     }
 
     private void installUpdates(XposedInterface framework, HostScanReport report, ClassLoader loader) {
@@ -237,6 +387,7 @@ public final class HostBehaviorHooks implements AutoCloseable {
     @Override public void close() {
         if (closed) return;
         closed = true;
+        hiddenSkipReady = false;
         for (BehaviorHookGroup group : groups.values()) group.close();
         onMain(() -> {
             for (HiddenView state : new ArrayList<>(hidden.values())) state.restore();

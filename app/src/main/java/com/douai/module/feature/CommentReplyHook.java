@@ -22,6 +22,9 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -77,7 +80,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
     private final Sender sender;
     private final Generator generator;
     private final LongSupplier ownAccount;
-    private final ExecutorService scanner, worker;
+    private final ExecutorService scanner, worker, ledgerWorker;
     private final CommentReplyLedger ledger;
     private final AutomationRateLimiter rateLimiter;
     private final Consumer<String> log;
@@ -116,6 +119,17 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
     CommentReplyHook(Context context, LocalOptions options, AutomationDispatcher dispatcher,
                      Source source, Sender sender, Generator generator, LongSupplier ownAccount,
                      ExecutorService scanner, ExecutorService worker, Consumer<String> log) {
+        this(context, options, dispatcher, source, sender, generator, ownAccount, scanner, worker,
+                new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, new ArrayBlockingQueue<>(64), action -> {
+                    Thread thread = new Thread(action, "DouAi-comment-reply-ledger");
+                    thread.setDaemon(true);
+                    return thread;
+                }), log);
+    }
+
+    CommentReplyHook(Context context, LocalOptions options, AutomationDispatcher dispatcher,
+                     Source source, Sender sender, Generator generator, LongSupplier ownAccount,
+                     ExecutorService scanner, ExecutorService worker, ExecutorService ledgerWorker, Consumer<String> log) {
         Context app = context.getApplicationContext();
         if (!(app instanceof Application)) throw new IllegalArgumentException("Application context required");
         this.application = (Application) app;
@@ -127,6 +141,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
         this.ownAccount = ownAccount;
         this.scanner = scanner;
         this.worker = worker;
+        this.ledgerWorker = ledgerWorker;
         this.log = log == null ? ignored -> { } : log;
         ledger = new CommentReplyLedger(app);
         rateLimiter = new AutomationRateLimiter(app);
@@ -276,11 +291,11 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                             deferred = true;
                             continue;
                         }
-                        if (!ledger.claim(account, event.incomingId, event.rootId, threadLimit)) {
+                        Task task = new Task(account, epoch, identity, event);
+                        if (!ledger.claim(account, event.incomingId, event.rootId, threadLimit, task.id)) {
                             deferred = true;
                             continue;
                         }
-                        Task task = new Task(account, epoch, identity, event);
                         tasks.put(identity, task);
                         deferred = true;
                         long delay = Math.max(2, Math.min(3600, options.integer("reply_delay_seconds", 2))) * 1000L;
@@ -291,10 +306,12 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                         }, delay);
                     }
                     if (!deferred && tasks.isEmpty()) ledger.advance(account, Math.min(newest, source.watermarkCeiling()));
-                    diagnostic = deferred ? "等待处理或发送额度" : "已检查新回复";
+                    CommentReplyLedger.Health health = ledger.health();
+                    diagnostic = health.blocked() ? health.diagnostic() : deferred ? "等待处理或发送额度" : "已检查新回复";
                 } catch (Exception failure) {
                     if (valid(account, epoch)) {
-                        diagnostic = "扫描暂未完成，稍后重试";
+                        CommentReplyLedger.Health health = ledger.health();
+                        diagnostic = health.blocked() ? health.diagnostic() : "扫描暂未完成，稍后重试";
                         safeLog("Comment reply scan failed: stage=" + stage + "; "
                                 + NativeCommentReplyInbox.failureDiagnostic(failure));
                     }
@@ -369,18 +386,33 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
 
     private void send(Task task, Consumer<String> done) {
         task.stage = "publish";
+        // Persist both allowances and the submission barrier before the native publisher posts to main.
+        submitLedger(() -> {
+            if (!valid(task)) { task.deferCancellation = true; done.accept("cancelled"); return; }
+            LocalOptions current = options;
+            task.reservation = rateLimiter.tryReserve(KIND, task.account, task.event.senderUid, current);
+            if (task.reservation == null) { task.boundaryFailed = true; done.accept("cancelled"); return; }
+            if (!valid(task) || !ledger.submitted(task.account, task.event.incomingId, task.id)) {
+                rateLimiter.release(task.reservation);
+                task.reservation = null;
+                task.boundaryFailed = true;
+                done.accept("cancelled");
+                return;
+            }
+            task.persistedSubmission = true;
+            if (!valid(task)) { task.deferCancellation = true; done.accept("cancelled"); return; }
+            sendReserved(task, done);
+        }, () -> {
+            task.boundaryFailed = true;
+            done.accept(task.submitted ? "submitted" : "cancelled");
+        });
+    }
+
+    private void sendReserved(Task task, Consumer<String> done) {
         sender.send(task.event, task.text, task.audio, () -> valid(task), () -> {
             synchronized (stateLock) {
-                if (!valid(task)) return false;
-                task.reservation = rateLimiter.tryReserve(KIND, task.account, task.event.senderUid, options);
-                if (task.reservation == null) { task.boundaryFailed = true; return false; }
-                // Configuration changes cannot interleave with this durable submission boundary.
-                if (!valid(task) || !ledger.submitted(task.account, task.event.incomingId)) {
-                    rateLimiter.release(task.reservation);
-                    task.reservation = null;
-                    task.boundaryFailed = true;
-                    return false;
-                }
+                // No disk work or ledger lock on main. The worker already owns this durable attempt.
+                if (!valid(task) || !task.persistedSubmission || task.reservation == null) return false;
                 task.submitted = true;
                 if (task.audio != null) new Handler(Looper.getMainLooper()).postDelayed(task.audio::delete, 600_000);
                 return true;
@@ -389,22 +421,51 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
             safeLog("Comment reply native request accepted");
         }, status -> {
             if (task.finished.get() && !task.submitted) return;
-            if ("failed".equals(status) || "cancelled".equals(status)) rateLimiter.release(task.reservation);
-            if (task.audio != null && ("sent".equals(status) || "failed".equals(status) || "cancelled".equals(status))) task.audio.delete();
-            if ("cancelled".equals(status) && (task.boundaryFailed || !valid(task.account, task.epoch))) {
-                ledger.defer(task.account, task.event.incomingId);
-            } else ledger.finish(task.account, task.event.incomingId, status);
-            synchronized (stateLock) {
-                if ("sent".equals(status) && valid(task.account, task.epoch) && task.remembered.compareAndSet(false, true)) {
-                    try { generator.acknowledged(task.account, task.event, task.settings, task.text, task.images, task.input); }
-                    catch (Exception failure) { safeLog("Could not retain acknowledged comment reply context"); }
+            if ("submitted".equals(status)) task.uncertain = true;
+            if ("cancelled".equals(status) && shouldDeferCancellation(task)) task.deferCancellation = true;
+            submitLedger(() -> {
+                String outcome = task.uncertain && task.submitted && ("failed".equals(status) || "cancelled".equals(status)) ? "submitted" : status;
+                if ("failed".equals(outcome) || "cancelled".equals(outcome)) rateLimiter.release(task.reservation);
+                if (task.audio != null && ("sent".equals(outcome) || "failed".equals(outcome) || "cancelled".equals(outcome))) task.audio.delete();
+                persistCompletion(task, outcome);
+                synchronized (stateLock) {
+                    if ("sent".equals(outcome) && valid(task.account, task.epoch) && task.remembered.compareAndSet(false, true)) {
+                        try { generator.acknowledged(task.account, task.event, task.settings, task.text, task.images, task.input); }
+                        catch (Exception failure) { safeLog("Could not retain acknowledged comment reply context"); }
+                    }
                 }
-            }
-            if (task.finished.get() && ("sent".equals(status) || "failed".equals(status))) {
-                dispatcher.recordOutcome(entry(task, status));
-            }
-            done.accept(status);
+                if (task.finished.get() && ("sent".equals(outcome) || "failed".equals(outcome))) dispatcher.recordOutcome(entry(task, outcome));
+                done.accept(outcome);
+            }, () -> done.accept(task.submitted ? "submitted" : "cancelled"));
         });
+    }
+
+    private void submitLedger(Runnable action, Runnable rejected) {
+        try { ledgerWorker.execute(() -> {
+            try { action.run(); }
+            catch (RuntimeException failure) {
+                diagnostic = "评论回复账本处理失败，保留发送占位，稍后检查";
+                safeLog("Comment reply ledger task failed: " + failure.getClass().getSimpleName());
+                rejected.run();
+            }
+        }); }
+        catch (RejectedExecutionException failure) {
+            diagnostic = "评论回复账本处理繁忙，保留发送占位，稍后检查";
+            safeLog("Comment reply ledger worker unavailable; durable claims remain protected");
+            rejected.run();
+        }
+    }
+
+    private void persistCompletion(Task task, String status) {
+        boolean defer = "deferred".equals(status) || !task.submitted && "submitted".equals(status)
+                || "cancelled".equals(status) && task.deferCancellation;
+        if (defer && task.persistedSubmission && !task.submitted) ledger.deferBeforeInvocation(task.account, task.event.incomingId, task.id);
+        else if (defer) ledger.defer(task.account, task.event.incomingId, task.id);
+        else ledger.finish(task.account, task.event.incomingId, "submitted".equals(status) ? "unknown" : status, task.id);
+    }
+
+    private boolean shouldDeferCancellation(Task task) {
+        return task.boundaryFailed || !valid(task.account, task.epoch) || !dispatcher.isForeground(resumed.get());
     }
 
     private void fail(Task task, String reason) {
@@ -462,17 +523,20 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
     private void complete(Task task, String status) {
         synchronized (stateLock) {
             if (!task.finished.compareAndSet(false, true)) return;
+            if ("submitted".equals(status) && task.submitted) task.uncertain = true;
+            // Capture why cancellation happened before a later resume can change the foreground state.
+            if ("cancelled".equals(status) && shouldDeferCancellation(task)) task.deferCancellation = true;
             task.media.cancel();
-            // A callback timeout preserves the durable submitted state and never opens a retry.
-            if ("deferred".equals(status) || "cancelled".equals(status)
-                    && (task.boundaryFailed || !valid(task.account, task.epoch)
-                        || !dispatcher.isForeground(resumed.get()))) ledger.defer(task.account, task.event.incomingId);
-            else ledger.finish(task.account, task.event.incomingId, status);
+        }
+        submitLedger(() -> {
+            // Keep this identity queued until its final durable transition; old callbacks carry its token.
+            persistCompletion(task, status);
+            if (!task.submitted) rateLimiter.release(task.reservation);
             tasks.remove(task.identity, task);
             if (task.audio != null && !task.submitted) task.audio.delete();
             if ("failed".equals(status) && task.submitted) dispatcher.reportFinalFailure(entry(task, "failed"));
-        }
-        signal();
+            signal();
+        }, () -> { tasks.remove(task.identity, task); signal(); });
     }
 
     private AutomationHistoryStore.Entry entry(Task task, String status) {
@@ -539,6 +603,8 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
         generator.close();
         scanner.shutdownNow();
         worker.shutdownNow();
+        // Final cancellation and publisher callbacks already queued above must be allowed to persist.
+        ledgerWorker.shutdown();
     }
 
     private static final class Task {
@@ -548,7 +614,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
         final AtomicBoolean finished = new AtomicBoolean();
         final AtomicBoolean remembered = new AtomicBoolean();
         volatile String text = "", model = "";
-        volatile boolean submitted, boundaryFailed;
+        volatile boolean submitted, persistedSubmission, boundaryFailed, uncertain, deferCancellation;
         volatile AutomationRateLimiter.Reservation reservation;
         volatile SpeechPreparation.Audio audio;
         volatile LocalOptions settings;

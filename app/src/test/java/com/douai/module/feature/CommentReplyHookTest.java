@@ -41,7 +41,7 @@ public final class CommentReplyHookTest {
     private Activity activity;
     private AutomationDispatcher dispatcher;
     private CommentReplyHook hook;
-    private ManualExecutor scanner, generatorWorker, dispatchWorker;
+    private ManualExecutor scanner, generatorWorker, dispatchWorker, ledgerWorker;
     private FakeSource source;
     private FakeSender sender;
     private FakeGenerator generator;
@@ -76,6 +76,7 @@ public final class CommentReplyHookTest {
 
     @After public void close() {
         hook.close();
+        ledgerWorker.runAll();
         dispatcher.close();
         dispatchWorker.runAll();
         activity.finish();
@@ -716,6 +717,113 @@ public final class CommentReplyHookTest {
         assertEquals(1, history().size());
     }
 
+    @Test public void durableReservationAndReceiptCommitsRunOnlyOnTheLedgerWorker() throws Exception {
+        List<Thread> commits = new ArrayList<>();
+        android.content.SharedPreferences records = activity.getSharedPreferences("douai_comment_reply_ledger", Context.MODE_PRIVATE);
+        replaceField("ledger", new CommentReplyLedger(records, java.time.Clock.systemUTC(), editor -> {
+            commits.add(Thread.currentThread());
+            return editor.commit();
+        }));
+        replaceField("rateLimiter", new AutomationRateLimiter(activity.getSharedPreferences("douai_automation_limits", Context.MODE_PRIVATE),
+                java.time.Clock.systemUTC(), editor -> {
+                    commits.add(Thread.currentThread());
+                    return editor.commit();
+                }));
+        sender.delaySubmission = true;
+        open();
+        source.events.put(100L, List.of(event("async-ledger", "root", "200", 1001)));
+        hook.requestScan();
+        ledgerWorker.paused = true;
+        processReplies();
+        assertTrue(sender.delayed.isEmpty());
+        assertEquals("pending", new org.json.JSONObject(records.getString("incoming.100.async-ledger", "")).getString("status"));
+
+        commits.clear();
+        ledgerWorker.paused = false;
+        drainLedgerOffMain();
+        assertEquals(1, sender.delayed.size());
+        assertFalse(commits.isEmpty());
+        assertTrue(commits.stream().noneMatch(thread -> thread == Thread.currentThread()));
+        assertEquals("submitted", new org.json.JSONObject(records.getString("incoming.100.async-ledger", "")).getString("status"));
+
+        commits.clear();
+        sender.delayed.get(0).run();
+        assertEquals(List.of("async-ledger"), sender.sent);
+        assertTrue("The main-thread boundary and native callback must not write either preferences file", commits.isEmpty());
+        assertEquals("submitted", new org.json.JSONObject(records.getString("incoming.100.async-ledger", "")).getString("status"));
+        drainLedgerOffMain();
+        assertFalse(commits.isEmpty());
+        assertTrue(commits.stream().noneMatch(thread -> thread == Thread.currentThread()));
+        pump();
+        assertEquals("sent", history().get(0).status);
+    }
+
+    @Test public void accountChangeDuringDurableReservationCannotInvokeTheNativeSender() throws Exception {
+        android.content.SharedPreferences records = activity.getSharedPreferences("douai_comment_reply_ledger", Context.MODE_PRIVATE);
+        replaceField("ledger", new CommentReplyLedger(records, java.time.Clock.systemUTC(), editor -> {
+            boolean committed = editor.commit();
+            if (records.getString("incoming.100.account-race", "").contains("\"submitted\"")) account.set(101);
+            return committed;
+        }));
+        open();
+        source.events.put(100L, List.of(event("account-race", "root", "200", 1001)));
+        hook.requestScan();
+        processReplies();
+        assertTrue(sender.sent.isEmpty());
+        assertTrue(sender.delayed.isEmpty());
+        assertTrue(ledger().retryable(100, "account-race"));
+        assertTrue(activity.getSharedPreferences("douai_automation_limits", Context.MODE_PRIVATE).getAll().isEmpty());
+    }
+
+    @Test public void failedSubmissionPersistenceNeverCallsNativeAndReportsAnUnhealthyLedger() throws Exception {
+        android.content.SharedPreferences records = activity.getSharedPreferences("douai_comment_reply_ledger", Context.MODE_PRIVATE);
+        boolean[] failWrites = {false};
+        replaceField("ledger", new CommentReplyLedger(records, java.time.Clock.systemUTC(), editor -> !failWrites[0] && editor.commit()));
+        open();
+        source.events.put(100L, List.of(event("disk-failure", "root", "200", 1001)));
+        hook.requestScan();
+        ledgerWorker.paused = true;
+        processReplies();
+        failWrites[0] = true;
+        ledgerWorker.paused = false;
+        pump();
+        assertTrue(sender.sent.isEmpty());
+        assertTrue(ledger().health().persistenceFailed);
+        hook.requestScan();
+        pump();
+        assertTrue(hook.diagnostic(), hook.diagnostic().contains("写入失败"));
+    }
+
+    @Test public void rejectedLedgerWorkLeavesTheClaimProtectedAndDoesNotInvokeNative() {
+        open();
+        source.events.put(100L, List.of(event("io-full", "root", "200", 1001)));
+        hook.requestScan();
+        ledgerWorker.stopped = true;
+        processReplies();
+        assertTrue(sender.sent.isEmpty());
+        assertFalse(ledger().retryable(100, "io-full"));
+        assertTrue(hook.diagnostic(), hook.diagnostic().contains("账本处理繁忙"));
+    }
+
+    @Test public void aLateFailureAfterAnUnconfirmedSendKeepsItsClaimAndAllowance() {
+        sender.outcome = "submitted";
+        open();
+        source.events.put(100L, List.of(event("unknown-late-failure", "root", "200", 1001)));
+        hook.requestScan();
+        processReplies();
+        int reserved = activity.getSharedPreferences("douai_automation_limits", Context.MODE_PRIVATE).getAll().size();
+        assertEquals(1, reserved);
+        sender.callbacks.get(0).accept("failed");
+        pump();
+        assertFalse(ledger().retryable(100, "unknown-late-failure"));
+        assertEquals(reserved, activity.getSharedPreferences("douai_automation_limits", Context.MODE_PRIVATE).getAll().size());
+        assertEquals("submitted", history().get(0).status);
+        advanceMillis(65_000);
+        hook.requestScan();
+        pump();
+        assertEquals(List.of("unknown-late-failure"), sender.sent);
+    }
+
     @Test public void manuallyCancellingThePreviewIsTerminalAcrossRescansAndRecreation() {
         configure("reply_tip", true);
         open();
@@ -774,6 +882,7 @@ public final class CommentReplyHookTest {
         generator.duringGenerate = () -> {
             generator.duringGenerate = null;
             ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(120));
+            ledgerWorker.runAll();
             assertTrue(ledger().retryable(100, "retry-after-timeout"));
             android.content.SharedPreferences records = activity.getSharedPreferences("douai_comment_reply_ledger", Context.MODE_PRIVATE);
             String key = "incoming.100.retry-after-timeout";
@@ -1017,6 +1126,7 @@ public final class CommentReplyHookTest {
         assertTrue(ring.performClick());
         // Production registers Dispatcher first, so its pause callback closes the dialog first.
         dispatcher.onActivityPaused(activity);
+        ledgerWorker.runAll();
         assertTrue(ledger().retryable(100, "background-details"));
         hook.onActivityPaused(activity);
         advanceMillis(600);
@@ -1028,6 +1138,22 @@ public final class CommentReplyHookTest {
         advanceMillis(8000);
         processReplies();
         assertEquals(List.of("background-details"), sender.sent);
+    }
+
+    @Test public void resumingBeforeCancellationPersistsDoesNotTurnABackgroundDeferralIntoATerminalCancellation() {
+        configure("reply_tip", true);
+        open();
+        source.events.put(100L, List.of(event("quick-resume", "root", "200", 1001)));
+        hook.requestScan();
+        processReplies();
+        View ring = activity.getWindow().getDecorView().findViewWithTag("automation.reply.ring");
+        assertNotNull(ring);
+        assertTrue(ring.performClick());
+        dispatcher.onActivityPaused(activity);
+        dispatcher.onActivityResumed(activity);
+        ledgerWorker.runAll();
+        assertTrue(ledger().retryable(100, "quick-resume"));
+        assertTrue(sender.sent.isEmpty());
     }
 
     @Test public void commentRepliesUseTheParentPreviewAndCountdown() {
@@ -1188,6 +1314,7 @@ public final class CommentReplyHookTest {
                 sender.boundaries.get(0).getAsBoolean());
         sender.delayed.get(0).run();
         assertTrue(sender.sent.isEmpty());
+        ledgerWorker.runAll();
         assertTrue(ledger().retryable(100, "disable-before-native"));
         assertTrue(new AutomationRateLimiter(activity).canSend("comment_reply", 100, "200", new LocalOptions(values)));
     }
@@ -1520,10 +1647,12 @@ public final class CommentReplyHookTest {
     }
 
     private void createHook(CommentReplyHook.Source replySource, Consumer<String> diagnostics) {
+        if (ledgerWorker != null) ledgerWorker.runAll();
         scanner = new ManualExecutor();
         generatorWorker = new ManualExecutor();
+        ledgerWorker = new ManualExecutor();
         hook = new CommentReplyHook(activity, new LocalOptions(values), dispatcher, replySource, sender, generator,
-                account::get, scanner, generatorWorker, diagnostics);
+                account::get, scanner, generatorWorker, ledgerWorker, diagnostics);
     }
 
     private void configure(String key, Object value) {
@@ -1547,6 +1676,7 @@ public final class CommentReplyHookTest {
             generatorWorker.runAll();
             ShadowLooper.idleMainLooper();
             dispatchWorker.runAll();
+            ledgerWorker.runAll();
         }
         ShadowLooper.idleMainLooper();
     }
@@ -1565,6 +1695,24 @@ public final class CommentReplyHookTest {
 
     private CommentReplyLedger ledger() { return (CommentReplyLedger) HostTargets.read(hook, "ledger"); }
     private List<AutomationHistoryStore.Entry> history() { return new AutomationHistoryStore(activity).read("comment_reply"); }
+
+    private void replaceField(String name, Object value) throws Exception {
+        java.lang.reflect.Field field = CommentReplyHook.class.getDeclaredField(name);
+        field.setAccessible(true);
+        field.set(hook, value);
+    }
+
+    private void drainLedgerOffMain() throws Exception {
+        java.util.concurrent.atomic.AtomicReference<Throwable> failure = new java.util.concurrent.atomic.AtomicReference<>();
+        Thread io = new Thread(() -> {
+            try { ledgerWorker.runAll(); }
+            catch (Throwable error) { failure.set(error); }
+        }, "comment-reply-ledger-test");
+        io.start();
+        io.join(5_000);
+        assertFalse("Ledger worker did not finish", io.isAlive());
+        if (failure.get() != null) throw new AssertionError(failure.get());
+    }
 
     private static CommentReplyEvent event(String id, String root, String sender, long createdAt) {
         return new CommentReplyEvent("notice-" + id, "work", id, root, sender, "对方", "回复 " + id,
@@ -1668,12 +1816,12 @@ public final class CommentReplyHookTest {
 
     private static final class ManualExecutor extends AbstractExecutorService {
         final Queue<Runnable> tasks = new ArrayDeque<>();
-        boolean stopped;
+        boolean stopped, paused;
         @Override public void execute(Runnable task) {
             if (stopped) throw new java.util.concurrent.RejectedExecutionException();
             tasks.add(task);
         }
-        void runAll() { while (!tasks.isEmpty()) tasks.remove().run(); }
+        void runAll() { if (!paused) while (!tasks.isEmpty()) tasks.remove().run(); }
         @Override public void shutdown() { stopped = true; }
         @Override public List<Runnable> shutdownNow() { stopped = true; List<Runnable> remaining = new ArrayList<>(tasks); tasks.clear(); return remaining; }
         @Override public boolean isShutdown() { return stopped; }

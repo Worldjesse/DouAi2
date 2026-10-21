@@ -67,12 +67,12 @@ public final class FeedUiHideHookTest {
     @Test
     public void matchesThe40_6FeedActionAndAuthorViewIds() {
         int[] resourceIds = {
-                2131374336, 2131374348, 2131374349, 2131374369,
-                2131371282, 2131371297, 2131371374, 2131371600,
-                2131401927, 2131405160, 2131405374,
-                2131415727, 2131415074, 2131415061, 2131379757, 2131379745,
-                2131370690, 2131386250, 2131380047, 2131380048,
-                2131398470, 2131401779, 2131410329
+                2131374327, 2131374339, 2131374340, 2131374360,
+                2131371285, 2131371299, 2131371376, 2131371605,
+                2131401927, 2131405175, 2131405391,
+                2131415727, 2131415055, 2131415033, 2131379772, 2131379761,
+                2131370692, 2131386238, 2131380062, 2131380063,
+                2131398470, 2131401805, 2131410333
         };
 
         for (int resourceId : resourceIds) {
@@ -102,7 +102,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         TextView digg = new TextView(activity);
-        digg.setId(2131374336);
+        digg.setId(2131374327);
         digg.setVisibility(View.VISIBLE);
         root.addView(digg, new FrameLayout.LayoutParams(120, 48));
         activity.setContentView(root);
@@ -140,7 +140,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         TextView digg = new TextView(activity);
-        digg.setId(2131374336);
+        digg.setId(2131374327);
         root.addView(digg, new FrameLayout.LayoutParams(120, 48));
         activity.setContentView(root);
 
@@ -185,7 +185,7 @@ public final class FeedUiHideHookTest {
         widgets.addView(new View(activity));
         widgets.addView(new TextView(activity));
         FrameLayout right = new FrameLayout(activity);
-        right.setId(2131402155);
+        right.setId(2131402182);
         widgets.addView(right);
         right.addView(new View(activity));
         TextView author = new TextView(activity);
@@ -239,11 +239,11 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         FrameLayout right = new FrameLayout(activity);
-        right.setId(2131402155);
+        right.setId(2131402182);
         right.setAlpha(0.6f);
         root.addView(right);
         TextView star = new TextView(activity);
-        star.setId(2131374349);
+        star.setId(2131374340);
         star.setAlpha(0.8f);
         right.addView(star);
         right.addView(new View(activity));
@@ -281,7 +281,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         FrameLayout right = new FrameLayout(activity);
-        right.setId(2131402155);
+        right.setId(2131402182);
         root.addView(right);
         activity.setContentView(root);
         Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
@@ -311,7 +311,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         FrameLayout right = new FrameLayout(activity);
-        right.setId(2131402155);
+        right.setId(2131402182);
         root.addView(right);
         for (int index = 0; index < 1024; index++) root.addView(new View(activity));
         activity.setContentView(root);
@@ -341,7 +341,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         View target = new View(activity);
-        target.setId(2131374336);
+        target.setId(2131374327);
         root.addView(target);
         activity.setContentView(root);
         Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
@@ -426,7 +426,7 @@ public final class FeedUiHideHookTest {
             idleMainLooper();
             for (int frame = 0; frame < 20; frame++) root.getViewTreeObserver().dispatchOnPreDraw();
             View inserted = new View(activity);
-            inserted.setId(2131374336);
+            inserted.setId(2131374327);
             tail.addView(inserted);
             for (int frame = 0; frame < 16; frame++) root.getViewTreeObserver().dispatchOnPreDraw();
             assertEquals("Insertion at the end of a large tree must be detected without a layout event", View.INVISIBLE, inserted.getVisibility());
@@ -464,7 +464,7 @@ public final class FeedUiHideHookTest {
             idleMainLooper();
             requestedFrames.clear();
             View inserted = new View(activity);
-            inserted.setId(2131374336);
+            inserted.setId(2131374327);
             tail.addView(inserted);
             root.getViewTreeObserver().dispatchOnGlobalLayout();
             long checks = hook.getStructureNodeChecks();
@@ -589,7 +589,7 @@ public final class FeedUiHideHookTest {
         int initialSearches = hook.getViewSearches();
 
         View lateControl = new View(activity);
-        lateControl.setId(2131374336);
+        lateControl.setId(2131374327);
         nested.addView(lateControl);
         root.getViewTreeObserver().dispatchOnGlobalLayout();
         root.getViewTreeObserver().dispatchOnPreDraw();
@@ -613,7 +613,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         FrameLayout bottomTools = new FrameLayout(activity);
-        bottomTools.setId(2131367345);
+        bottomTools.setId(2131367357);
         root.addView(bottomTools);
         View tool = new View(activity);
         bottomTools.addView(tool);
@@ -631,7 +631,7 @@ public final class FeedUiHideHookTest {
             for (int frame = 0; frame < 12; frame++) root.getViewTreeObserver().dispatchOnPreDraw();
 
             View progress = new View(activity);
-            progress.setId(2131378120);
+            progress.setId(2131378139);
             progress.setAlpha(0.7f);
             bottomTools.addView(progress);
             root.getViewTreeObserver().dispatchOnPreDraw();
@@ -647,7 +647,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         FrameLayout tools = new FrameLayout(activity);
-        tools.setId(2131367345);
+        tools.setId(2131367357);
         tools.setVisibility(View.GONE);
         tools.setAlpha(0f);
         root.addView(tools);
@@ -684,7 +684,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         View like = new View(activity);
-        like.setId(2131374356);
+        like.setId(2131374347);
         like.setAlpha(0f);
         root.addView(like);
         activity.setContentView(root);
@@ -713,7 +713,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         FrameLayout tools = new FrameLayout(activity);
-        tools.setId(2131367345);
+        tools.setId(2131367357);
         root.addView(tools);
         View tool = new View(activity);
         tools.addView(tool);
@@ -870,12 +870,12 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         FrameLayout tools = new FrameLayout(activity);
-        tools.setId(2131367345);
+        tools.setId(2131367357);
         root.addView(tools);
         View tool = new View(activity);
         tools.addView(tool);
         FrameLayout mount = new FrameLayout(activity);
-        mount.setId(2131378120);
+        mount.setId(2131378139);
         mount.setAlpha(0f);
         tools.addView(mount);
         activity.setContentView(root);
@@ -966,7 +966,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         FrameLayout tools = new FrameLayout(activity);
-        tools.setId(2131367345);
+        tools.setId(2131367357);
         root.addView(tools);
         View tool = new View(activity);
         tools.addView(tool);
@@ -1012,7 +1012,7 @@ public final class FeedUiHideHookTest {
             idleMainLooper();
             for (int frame = 0; frame < 12; frame++) root.getViewTreeObserver().dispatchOnPreDraw();
             View feedback = new View(activity);
-            feedback.setId(2131371905);
+            feedback.setId(2131371909);
             nested.addView(feedback);
             root.getViewTreeObserver().dispatchOnPreDraw();
             assertEquals("Late feedback must join the active hide targets", View.GONE, feedback.getVisibility());
@@ -1030,7 +1030,7 @@ public final class FeedUiHideHookTest {
         caption.setText("这段视频获得了100人推荐");
         root.addView(caption);
         View progress = new View(activity);
-        progress.setId(2131378120);
+        progress.setId(2131378139);
         root.addView(progress);
         activity.setContentView(root);
         SharedPreferences preferences = componentPreferences();
@@ -1077,12 +1077,12 @@ public final class FeedUiHideHookTest {
             intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
             idleMainLooper();
             View declaration = new View(activity);
-            declaration.setId(2131378315);
+            declaration.setId(2131378332);
             android.widget.LinearLayout declarationBackground = new android.widget.LinearLayout(activity);
             declarationBackground.setBackgroundColor(android.graphics.Color.BLACK);
             declarationBackground.addView(declaration);
             FrameLayout anchors = new FrameLayout(activity);
-            anchors.setId(2131378359);
+            anchors.setId(2131378377);
             TextView poi = new TextView(activity);
             poi.setText("泰州市·兴化市");
             anchors.addView(poi);
@@ -1115,7 +1115,7 @@ public final class FeedUiHideHookTest {
         FrameLayout root = new FrameLayout(activity);
         android.widget.LinearLayout wrapper = new android.widget.LinearLayout(activity);
         View declaration = new View(activity);
-        declaration.setId(2131378315);
+        declaration.setId(2131378332);
         wrapper.addView(declaration);
         root.addView(wrapper);
         activity.setContentView(root);
@@ -1178,12 +1178,12 @@ public final class FeedUiHideHookTest {
         try {
             intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
             idleMainLooper();
-            reused.setId(2131371905);
+            reused.setId(2131371909);
             root.getViewTreeObserver().dispatchOnPreDraw();
             assertEquals(View.GONE, reused.getVisibility());
             FrameLayout replacement = new FrameLayout(activity);
             View feedback = new View(activity);
-            feedback.setId(2131371905);
+            feedback.setId(2131371909);
             replacement.addView(feedback);
             root.removeView(branch);
             root.addView(replacement);
@@ -1226,7 +1226,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         View byId = new View(activity);
-        byId.setId(2131374336);
+        byId.setId(2131374327);
         View byDescription = new View(activity);
         byDescription.setContentDescription("like");
         TextView byText = new TextView(activity);
@@ -1333,7 +1333,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         FrameLayout right = new FrameLayout(activity);
-        right.setId(2131402155);
+        right.setId(2131402182);
         right.setAlpha(0.75f);
         right.setClickable(true);
         right.setFocusable(true);
@@ -1384,7 +1384,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         View button = new View(activity);
-        button.setId(2131374336);
+        button.setId(2131374327);
         root.addView(button);
         activity.setContentView(root);
         Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
@@ -1418,7 +1418,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         View button = new View(activity);
-        button.setId(2131374336);
+        button.setId(2131374327);
         root.addView(button);
         activity.setContentView(root);
         Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
@@ -1444,11 +1444,11 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         View avatar = new View(activity);
-        avatar.setId(2131366221);
+        avatar.setId(2131366240);
         avatar.setAlpha(0.8f);
         root.addView(avatar);
         View like = new View(activity);
-        like.setId(2131374356);
+        like.setId(2131374347);
         like.setClickable(true);
         root.addView(like);
         TextView description = new TextView(activity);
@@ -1494,20 +1494,20 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         FrameLayout bottomTools = new FrameLayout(activity);
-        bottomTools.setId(2131367345);
+        bottomTools.setId(2131367357);
         root.addView(bottomTools);
         View tool = new View(activity);
         bottomTools.addView(tool);
         View progress = new View(activity);
-        progress.setId(2131378120);
+        progress.setId(2131378139);
         progress.setAlpha(0.7f);
         progress.setClickable(true);
         bottomTools.addView(progress);
         View like = new View(activity);
-        like.setId(2131374356);
+        like.setId(2131374347);
         root.addView(like);
         View comment = new View(activity);
-        comment.setId(2131371412);
+        comment.setId(2131371414);
         root.addView(comment);
         activity.setContentView(root);
         SharedPreferences preferences = componentPreferences();
@@ -1558,13 +1558,13 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         View first = new View(activity);
-        first.setId(2131374356);
+        first.setId(2131374347);
         root.addView(first);
         View second = new View(activity);
-        second.setId(2131374356);
+        second.setId(2131374347);
         root.addView(second);
         View progress = new View(activity);
-        progress.setId(2131378120);
+        progress.setId(2131378139);
         root.addView(progress);
         activity.setContentView(root);
         SharedPreferences preferences = componentPreferences();
@@ -1588,7 +1588,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         View like = new View(activity);
-        like.setId(2131374356);
+        like.setId(2131374347);
         like.setClickable(true);
         root.addView(like);
         activity.setContentView(root);
@@ -1624,10 +1624,10 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         View collect = new View(activity);
-        collect.setId(2131371071);
+        collect.setId(2131371073);
         root.addView(collect);
         View follow = new View(activity);
-        follow.setId(2131379757);
+        follow.setId(2131379772);
         root.addView(follow);
         activity.setContentView(root);
         SharedPreferences preferences = componentPreferences();
@@ -1648,7 +1648,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         View comment = new View(activity);
-        comment.setId(2131371412);
+        comment.setId(2131371414);
         int[] clicks = {0};
         comment.setOnClickListener(view -> clicks[0]++);
         root.addView(comment);
@@ -1691,7 +1691,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         View comment = new View(activity);
-        comment.setId(2131371412);
+        comment.setId(2131371414);
         root.addView(comment);
         activity.setContentView(root);
         SharedPreferences preferences = componentPreferences();
@@ -1720,7 +1720,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         View like = new View(activity);
-        like.setId(2131374356);
+        like.setId(2131374347);
         root.addView(like);
         activity.setContentView(root);
         SharedPreferences preferences = componentPreferences();
@@ -1755,7 +1755,7 @@ public final class FeedUiHideHookTest {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
         View like = new View(activity);
-        like.setId(2131374356);
+        like.setId(2131374347);
         root.addView(like);
         activity.setContentView(root);
         SharedPreferences preferences = componentPreferences();
@@ -1821,7 +1821,7 @@ public final class FeedUiHideHookTest {
         FrameLayout content = new FrameLayout(activity);
         FrameLayout feed = new FrameLayout(activity);
         View like = new View(activity);
-        like.setId(2131374356);
+        like.setId(2131374347);
         feed.addView(like);
         content.addView(feed);
         TextView windowControl = new TextView(activity);

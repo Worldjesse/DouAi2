@@ -11,11 +11,31 @@ import static org.junit.Assert.*;
 
 public final class HostAdaptationTest {
     @Test public void versionEvidenceRequiresPackageNameAndActualVersionCode() {
+        assertTrue(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.8.0", 400801L));
         assertTrue(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.6.0", 400601L));
-        assertFalse(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.6.0", 40609900L));
-        assertFalse(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.7.0", 400601L));
-        assertFalse(HostAdaptation.matchesVersion("com.douai.module", "40.6.0", 400601L));
+        assertFalse(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.6.0", 400801L));
+        assertFalse(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.8.0", 400601L));
+        assertFalse(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.8.0", 40809985L));
+        assertFalse(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.7.0", 400801L));
+        assertFalse(HostAdaptation.matchesVersion("com.douai.module", "40.8.0", 400801L));
         assertFalse(HostAdaptation.matchesVersion(null, null, 0L));
+    }
+
+    @Test public void bothProfilesKeepIndependentRulesAndImmutableResourceEvidence() throws Exception {
+        for (HostAdaptation.Profile profile : new HostAdaptation.Profile[]{
+                HostAdaptation.PROFILE_406, HostAdaptation.PROFILE_408}) {
+            assertSame(profile, HostAdaptation.forVersion(profile.versionName, profile.versionCode));
+            try (FileInputStream input = new FileInputStream(HostApkTestProfile.assetFile(profile.rulesAsset))) {
+                assertEquals(profile.fingerprint, HostRuleSet.parse(input).getFingerprint());
+            }
+            assertEquals(51, profile.getFeedResources().size());
+            assertThrows(UnsupportedOperationException.class, () -> profile.getFeedResources().clear());
+        }
+        assertNotEquals(HostAdaptation.PROFILE_406.rulesAsset, HostAdaptation.PROFILE_408.rulesAsset);
+        assertFalse(HostAdaptation.PROFILE_406.matchesRules(HostAdaptation.PROFILE_408.fingerprint));
+        assertFalse(HostAdaptation.PROFILE_408.matchesRules(HostAdaptation.PROFILE_406.fingerprint));
+        assertEquals("d5s", HostAdaptation.PROFILE_406.getFeedResources().get(2131369826));
+        assertEquals("d5w", HostAdaptation.PROFILE_408.getFeedResources().get(2131369833));
     }
 
     @Test public void staticEvidenceBindsThePackagedRulesAndFeatureReferences() throws Exception {
@@ -32,12 +52,12 @@ public final class HostAdaptationTest {
             for (String rule : feature.rules) assertTrue(feature.id + " references " + rule, ids.contains(rule));
         }
         assertEquals(51, HostAdaptation.getFeedResources().size());
-        assertEquals("d5s", HostAdaptation.getFeedResources().get(2131369826));
-        assertEquals("jb1", HostAdaptation.getFeedResources().get(2131378315));
-        assertEquals("jc5", HostAdaptation.getFeedResources().get(2131378359));
-        assertEquals("jc7", HostAdaptation.getFeedResources().get(2131378361));
-        assertEquals("comment_layout", HostAdaptation.getFeedResources().get(2131371412));
-        assertEquals("j_l", HostAdaptation.getFeedResources().get(2131379757));
+        assertEquals("d5w", HostAdaptation.getFeedResources().get(2131369833));
+        assertEquals("jcb", HostAdaptation.getFeedResources().get(2131378332));
+        assertEquals("jdf", HostAdaptation.getFeedResources().get(2131378377));
+        assertEquals("jdh", HostAdaptation.getFeedResources().get(2131378379));
+        assertEquals("comment_layout", HostAdaptation.getFeedResources().get(2131371414));
+        assertEquals("j_x", HostAdaptation.getFeedResources().get(2131379772));
     }
 
     @Test public void speechCapabilitiesCoverTheirScanAndRuntimeContractTargets() {

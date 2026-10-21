@@ -4,10 +4,12 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.res.Resources;
+import android.database.DataSetObserver;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.BitmapDrawable;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.ListView;
@@ -16,14 +18,22 @@ import android.view.View;
 import com.douai.module.R;
 import com.douai.module.BuildConfig;
 import com.douai.module.feature.ProfileListEntry;
+import com.douai.module.feature.AvatarImageLoader;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.util.Arrays;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.TimeUnit;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.shadows.ShadowLooper;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.GraphicsMode;
 import static org.junit.Assert.*;
@@ -119,6 +129,99 @@ public final class MemberListViewTest {
             row.performClick();
             assertTrue(members.selected().isEmpty());
         } finally { members.close(); activity.finish(); }
+    }
+
+    @Test public void sharedAvatarRequestUpdatesOnlyItsBoundRowsAndCacheAvoidsAnotherLoad() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        QueuedExecutor images = new QueuedExecutor();
+        int[] loads = {0}, dataChanges = {0};
+        Bitmap avatar = Bitmap.createBitmap(128, 128, Bitmap.Config.ARGB_8888);
+        String url = "https://p3.douyinpic.com/shared.png";
+        MemberListView members = new MemberListView(activity, false, Arrays.asList(
+                new ProfileListEntry("101", "Alice", url), new ProfileListEntry("202", "Bob", url)),
+                Collections.emptySet(), false, images, (source, request) -> { loads[0]++; return avatar; });
+        try {
+            ListView list = members.findViewWithTag("settings.followLists.members");
+            list.getAdapter().registerDataSetObserver(new DataSetObserver() {
+                @Override public void onChanged() { dataChanges[0]++; }
+            });
+            View first = list.getAdapter().getView(0, null, list);
+            View second = list.getAdapter().getView(1, null, list);
+            images.runAll();
+            ShadowLooper.idleMainLooper();
+            assertEquals(1, loads[0]);
+            assertSame(avatar, ((BitmapDrawable) avatar(first).getDrawable()).getBitmap());
+            assertSame(avatar, ((BitmapDrawable) avatar(second).getDrawable()).getBitmap());
+            assertEquals(0, dataChanges[0]);
+            View cached = list.getAdapter().getView(0, null, list);
+            images.runAll();
+            assertEquals(1, loads[0]);
+            assertSame(avatar, ((BitmapDrawable) avatar(cached).getDrawable()).getBitmap());
+        } finally { members.close(); avatar.recycle(); activity.finish(); }
+    }
+
+    @Test public void recycledRowCancelsItsUnusedQueuedRequestAndReceivesOnlyTheNewAvatar() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        QueuedExecutor images = new QueuedExecutor();
+        List<String> loaded = new ArrayList<>();
+        Bitmap avatar = Bitmap.createBitmap(128, 128, Bitmap.Config.ARGB_8888);
+        String firstUrl = "https://p3.douyinpic.com/alice.png", secondUrl = "https://p3.douyinpic.com/bob.png";
+        MemberListView members = new MemberListView(activity, false, Arrays.asList(
+                new ProfileListEntry("101", "Alice", firstUrl), new ProfileListEntry("202", "Bob", secondUrl)),
+                Collections.emptySet(), false, images, (source, request) -> { loaded.add(source); return avatar; });
+        try {
+            ListView list = members.findViewWithTag("settings.followLists.members");
+            View row = list.getAdapter().getView(0, null, list);
+            row = list.getAdapter().getView(1, row, list);
+            images.runAll();
+            ShadowLooper.idleMainLooper();
+            assertEquals(Collections.singletonList(secondUrl), loaded);
+            assertEquals(secondUrl, avatar(row).getTag());
+            assertSame(avatar, ((BitmapDrawable) avatar(row).getDrawable()).getBitmap());
+        } finally { members.close(); avatar.recycle(); activity.finish(); }
+    }
+
+    @Test public void closingCancelsRequestsAndRecyclesResultsAlreadyWaitingForMainThread() throws Exception {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        QueuedExecutor images = new QueuedExecutor();
+        AvatarImageLoader.Request[] request = {null};
+        Bitmap avatar = Bitmap.createBitmap(128, 128, Bitmap.Config.ARGB_8888);
+        String url = "https://p3.douyinpic.com/alice.png";
+        MemberListView members = new MemberListView(activity, false,
+                Collections.singletonList(new ProfileListEntry("101", "Alice", url)),
+                Collections.emptySet(), false, images, (source, pending) -> { request[0] = pending; return avatar; });
+        try {
+            ListView list = members.findViewWithTag("settings.followLists.members");
+            View row = list.getAdapter().getView(0, null, list);
+            Drawable placeholder = avatar(row).getDrawable();
+            images.runAll();
+            members.close();
+            assertTrue(images.isShutdown());
+            try { request[0].load(url); fail("Closed member picker must cancel its request"); }
+            catch (CancellationException expected) { }
+            ShadowLooper.idleMainLooper();
+            assertSame(placeholder, avatar(row).getDrawable());
+            assertTrue(avatar.isRecycled());
+        } finally { members.close(); if (!avatar.isRecycled()) avatar.recycle(); activity.finish(); }
+    }
+
+    private static ImageView avatar(View row) { return (ImageView) ((android.view.ViewGroup) row).getChildAt(0); }
+
+    private static final class QueuedExecutor extends AbstractExecutorService {
+        final ArrayDeque<Runnable> commands = new ArrayDeque<>();
+        boolean stopped;
+        void runAll() { while (!commands.isEmpty()) commands.remove().run(); }
+        @Override public void execute(Runnable command) {
+            if (stopped) throw new java.util.concurrent.RejectedExecutionException();
+            commands.add(command);
+        }
+        @Override public void shutdown() { stopped = true; }
+        @Override public List<Runnable> shutdownNow() {
+            stopped = true; List<Runnable> remaining = new ArrayList<>(commands); commands.clear(); return remaining;
+        }
+        @Override public boolean isShutdown() { return stopped; }
+        @Override public boolean isTerminated() { return stopped && commands.isEmpty(); }
+        @Override public boolean awaitTermination(long timeout, TimeUnit unit) { return isTerminated(); }
     }
 
     private static void write(Bitmap bitmap, String name) {

@@ -110,9 +110,8 @@ final class FeedProgressDiagnostics {
     }
 
     private static boolean isProgressMount(View view) {
-        int id = view.getId();
-        String name = id == 2131378120 ? "i=8" : id == 2131378117 ? "i=5" : null;
-        return name != null && name.equals(resourceName(view));
+        int canonical = HostResourceCatalog.canonicalId(view.getId(), view.getResources());
+        return canonical == 2131378139 || canonical == 2131378134;
     }
 
     private static String resourceName(View view) {

@@ -40,17 +40,19 @@ public final class ApkArtifactContractTest {
             assertEquals("true", metadata.getProperty("staticScope"));
             assertEquals(3, metadata.size());
 
-            File source = new File("src/main/assets/douyin-host-rules.tsv");
-            if (!source.isFile()) source = new File("app/src/main/assets/douyin-host-rules.tsv");
-            assertTrue("Host rules source is missing: " + source, source.isFile());
-            byte[] packagedRules = read(release, "assets/douyin-host-rules.tsv");
-            assertArrayEquals("Packaged host rules differ from source",
-                    Files.readAllBytes(source.toPath()), packagedRules);
-            HostRuleSet rules = HostRuleSet.parse(new ByteArrayInputStream(packagedRules));
-            assertEquals(HostRuleSet.CURRENT_FORMAT_VERSION, rules.getFormatVersion());
-            assertEquals("com.ss.android.ugc.aweme", rules.getTargetPackage());
-            assertFalse(rules.getRules().isEmpty());
-            assertTrue(HostAdaptation.matchesRules(rules.getFingerprint()));
+            for (HostAdaptation.Profile profile : new HostAdaptation.Profile[]{
+                    HostAdaptation.PROFILE_406, HostAdaptation.PROFILE_408}) {
+                File source = HostApkTestProfile.assetFile(profile.rulesAsset);
+                byte[] packagedRules = read(release, "assets/" + profile.rulesAsset);
+                assertArrayEquals(profile.versionName + " packaged host rules differ from source",
+                        Files.readAllBytes(source.toPath()), packagedRules);
+                HostRuleSet rules = HostRuleSet.parse(new ByteArrayInputStream(packagedRules));
+                assertEquals(HostRuleSet.CURRENT_FORMAT_VERSION, rules.getFormatVersion());
+                assertEquals("com.ss.android.ugc.aweme", rules.getTargetPackage());
+                assertFalse(rules.getRules().isEmpty());
+                assertEquals(profile.versionName + " rules must retain their own profile fingerprint",
+                        profile.fingerprint, rules.getFingerprint());
+            }
             assertNotNull(release.getEntry("resources.arsc"));
             assertNotNull(release.getEntry("AndroidManifest.xml"));
         }
@@ -120,7 +122,7 @@ public final class ApkArtifactContractTest {
                 "androidx.activity.result.contract.ActivityResultContracts$StartActivityForResult",
                 "com.ss.android.ugc.aweme.im.business.mediaselectpage.choose.MediaChooseActivity",
                 "com.ss.android.ugc.aweme.im.business.mediaselectpage.choose.model.MediaChooseResult",
-                "com.ss.android.ugc.aweme.im.service.model.MediaModel", "X.131D",
+                "com.ss.android.ugc.aweme.im.service.model.MediaModel", "X.1UOy",
                 "extra_choose_parameters", "extra_choose_result", "getSelectedList", "getFilePath", "LJIILJJIL",
                 "getActivityResultRegistry", "onActivityResult", "getResultCode", "getData",
                 "register", "launch", "unregister", "com.google.gson.Gson",

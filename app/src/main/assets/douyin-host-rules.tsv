@@ -4,7 +4,7 @@
 # List-valued columns are pipe-delimited; escape a literal pipe or backslash with a backslash.
 # Opcode values use dexlib2 opcode names such as const-string and invoke-static, matched contiguously.
 # Empty exact_method_count or exact_field_count cells disable that count constraint.
-# These version-40.6.0 rows are static anchors; runtime hooks still require a unique exact candidate.
+# These version-40.8.0 rows are static anchors; runtime hooks still require a unique exact candidate.
 id	feature	kind	class_descriptor	class_strings	method_name	method_descriptor	method_strings	invoke_owners	field_owners	opcodes	exact_method_count	exact_field_count	field_types	field_names
 feed_view_holder	method_scan	class	Lcom/ss/android/ugc/aweme/feed/adapter/VideoViewHolder;											
 feed_aweme_accessor	method_scan	method	Lcom/ss/android/ugc/aweme/feed/adapter/VideoViewHolder;		getAweme	()Lcom/ss/android/ugc/aweme/feed/model/Aweme;								
@@ -24,10 +24,10 @@ retrofit_response_url	method_scan	method	Lcom/bytedance/retrofit2/client/Respons
 main_feed_response_model	method_scan	class	Lcom/ss/android/ugc/aweme/feed/model/FeedItemList;										Ljava/util/List;	items
 download_native_module	method_scan	class	Lcom/ss/android/ugc/aweme/feed/long_press_panel/modules/business/homepage/LppDownloadModule;											
 download_native_module_name	method_scan	method	Lcom/ss/android/ugc/aweme/feed/long_press_panel/modules/business/homepage/LppDownloadModule;		moduleName	()Ljava/lang/String;								
-download_native_view_factory	method_scan	method	Lcom/ss/android/ugc/aweme/feed/long_press_panel/modules/business/homepage/LppDownloadModule;		LJJIFFI	(Landroid/content/Context;Landroid/view/ViewGroup;)Landroid/view/View;								
+download_native_view_factory	method_scan	method	Lcom/ss/android/ugc/aweme/feed/long_press_panel/modules/business/homepage/LppDownloadModule;		LJJI	(Landroid/content/Context;Landroid/view/ViewGroup;)Landroid/view/View;								
 download_native_click	method_scan	method	Lcom/ss/android/ugc/aweme/feed/long_press_panel/modules/business/homepage/LppDownloadModule;		LJJIJIL	(Landroid/view/View;)V								
-home_tab_list_provider	method_scan	method	Lcom/ss/android/ugc/aweme/homepage/tab/HomeTabServiceImpl;		LJIJI	()Ljava/util/List;								
-home_tab_model	method_scan	class	LX/1BkK;										Ljava/lang/String;	tabId|tabTitle|tabType
+home_tab_list_provider	method_scan	method	Lcom/ss/android/ugc/aweme/homepage/tab/HomeTabServiceImpl;		LJIJJ	()Ljava/util/List;								
+home_tab_model	method_scan	class	LX/0ipH;										Ljava/lang/String;	tabId|tabTitle|tabType
 feed_holder_page_selected	method_scan	method	Lcom/ss/android/ugc/aweme/feed/adapter/VideoViewHolder;		onPageSelected	()V								
 feed_holder_quick_root	method_scan	class	Lcom/ss/android/ugc/aweme/feed/adapter/VideoViewHolder;										Landroid/view/View;	z
 feed_holder_main_root	method_scan	class	Lcom/ss/android/ugc/aweme/feed/adapter/VideoViewHolder;										Landroid/widget/FrameLayout;	w
@@ -41,26 +41,26 @@ host_settings_activity	method_scan	class	Lcom/ss/android/ugc/aweme/setting/ui/Do
 host_settings_scroll	method_scan	class	Lcom/ss/android/ugc/aweme/setting/ui/SettingNestedScrollView;											
 component_player_pause	method_scan	method	Lcom/ss/android/ugc/aweme/feed/controller/refactor/impl_pm/PMPlayListenerDispatcherV2;		onPausePlay	(Ljava/lang/String;)V	on_pause_play							
 component_player_playing	method_scan	method	Lcom/ss/android/ugc/aweme/feed/controller/refactor/impl_pm/PMPlayListenerDispatcherV2;		onPlaying	(Ljava/lang/String;)V	on_playing							
-component_short_progress_legacy	method_scan	method	LX/1QBp;		LIZ	(Lcom/ss/android/ugc/aweme/feed/model/Aweme;Ljava/lang/Integer;)Z								
-component_short_progress_pro	method_scan	method	LX/1PIm;		LIZ	(Lcom/ss/android/ugc/aweme/feed/model/Aweme;)Z								
-home_tab_select_or_refresh	method_scan	method	Lcom/ss/android/ugc/aweme/homepage/tab/HomeTabServiceImpl;		LJIILLIIL	(Ljava/lang/Boolean;Ljava/lang/String;)V								
+component_short_progress_legacy	method_scan	method	LX/0trV;		LIZ	(Lcom/ss/android/ugc/aweme/feed/model/Aweme;Ljava/lang/Integer;)Z		Lcom/ss/android/ugc/aweme/commercialize/utils/AwemeAdRankUtilsKt;						
+component_short_progress_pro	method_scan	method	LX/1EzH;		LIZ	(Lcom/ss/android/ugc/aweme/feed/model/Aweme;)Z		Lcom/ss/android/ugc/aweme/commercialize/utils/AwemeAdRankUtilsKt;	Lcom/ss/android/ugc/aweme/feed/model/Video;					
+home_tab_select_or_refresh	method_scan	method	Lcom/ss/android/ugc/aweme/homepage/tab/HomeTabServiceImpl;		LJJIJIIJI	(Ljava/lang/Boolean;Ljava/lang/String;)V								
 feed_holder_selected	method_scan	method	Lcom/ss/android/ugc/aweme/feed/adapter/VideoViewHolder;		onViewHolderSelected	(I)V								
-digg_core_presenter_bind	method_scan	method	Lcom/ss/android/ugc/aweme/feed/quick/component/digg/core/DiggCorePresenter;		LLLIZZ	(Lcom/ss/android/ugc/aweme/kiwi/model/QModel;LX/0wHb;)V								
-digg_view_model_like	method_scan	method	Lcom/ss/android/ugc/aweme/feed/quick/component/digg/DiggViewModel;		qA	(Landroid/app/Activity;Ljava/lang/String;Lkotlin/jvm/functions/Function2;)V								
+digg_core_presenter_bind	method_scan	method	Lcom/ss/android/ugc/aweme/feed/quick/component/digg/core/DiggCorePresenter;		LLLIZZ	(Lcom/ss/android/ugc/aweme/kiwi/model/QModel;LX/15B2;)V								
+digg_view_model_like	method_scan	method	Lcom/ss/android/ugc/aweme/feed/quick/component/digg/DiggViewModel;		uA	(Landroid/app/Activity;Ljava/lang/String;Lkotlin/jvm/functions/Function2;)V								
 digg_view_model_state	method_scan	class	Lcom/ss/android/ugc/aweme/feed/quick/component/digg/DiggViewModel;										Lcom/ss/android/ugc/aweme/feed/model/Aweme;	b
-auto_next_vm_factory	method_scan	method	LX/0xN8;		LIZ	(Landroid/content/Context;)Lcom/ss/android/ugc/aweme/feed/plato/business/contentconsumption/autonext/AutoNextViewModel;								
-auto_next_vm_enabled	method_scan	method	Lcom/ss/android/ugc/aweme/feed/plato/business/contentconsumption/autonext/AutoNextViewModel;		rA	()Z								
-auto_next_vm_set_enabled	method_scan	method	Lcom/ss/android/ugc/aweme/feed/plato/business/contentconsumption/autonext/AutoNextViewModel;		sA	(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Z)V								
+auto_next_vm_factory	method_scan	method	LX/0tqV;		LIZ	(Landroid/content/Context;)Lcom/ss/android/ugc/aweme/feed/plato/business/contentconsumption/autonext/AutoNextViewModel;								
+auto_next_vm_enabled	method_scan	method	Lcom/ss/android/ugc/aweme/feed/plato/business/contentconsumption/autonext/AutoNextViewModel;		vA	()Z								
+auto_next_vm_set_enabled	method_scan	method	Lcom/ss/android/ugc/aweme/feed/plato/business/contentconsumption/autonext/AutoNextViewModel;		xA	(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Z)V								
 comment_longpress_bind	method_scan	method	Lcom/ss/android/ugc/aweme/comment/ui/longpress/CommentLongPressItemPresenter;		onBind	(Lcom/ss/android/ugc/aweme/kiwi/model/QModel;)V								
-comment_longpress_item_model	method_scan	class	Lcom/ss/android/ugc/aweme/comment/ui/longpress/CommentLongPressItemModel;										LX/0y3L;	k
-comment_panel_params	method_scan	class	LX/0y3L;										Landroidx/fragment/app/FragmentActivity;|Ljava/lang/String;|Lcom/ss/android/ugc/aweme/comment/model/Comment;	LJFF|LJIIIZ|LJIIIIZZ
+comment_longpress_item_model	method_scan	class	Lcom/ss/android/ugc/aweme/comment/ui/longpress/CommentLongPressItemModel;										LX/13TL;	k
+comment_panel_params	method_scan	class	LX/13TL;										Landroidx/fragment/app/FragmentActivity;|Ljava/lang/String;|Lcom/ss/android/ugc/aweme/comment/model/Comment;	LJFF|LJIIIZ|LJIIIIZZ
 comment_model	method_scan	class	Lcom/ss/android/ugc/aweme/comment/model/Comment;										Ljava/lang/String;|Ljava/util/List;	text|imageList|videoList
 comment_image_model	method_scan	class	Lcom/ss/android/ugc/aweme/comment/model/CommentImageStruct;										Lcom/ss/android/ugc/aweme/base/model/UrlModel;	f
 comment_video_model	method_scan	class	Lcom/ss/android/ugc/aweme/comment/model/CommentVideoStruct;										Lcom/ss/android/ugc/aweme/feed/model/Aweme;	b
 portrait_comment_editor_field	auto_comment	class	Lcom/ss/android/ugc/aweme/comment/keyboard/refactor/inputbar/edit/AbsInputBarEditModule;										Lcom/ss/android/ugc/aweme/comment/widget/CommentMentionEditText;	n
-portrait_comment_context_holder	auto_comment	class	Lcom/ss/android/ugc/aweme/comment/keyboard/refactor/BaseCmtInputModule;										LX/0yK6;	e
-portrait_comment_context_state	auto_comment	class	LX/0yBB;										LX/0yAS;	e
-portrait_comment_aweme_resolver	auto_comment	method	LX/0yAP;		LIZJ	(LX/0yAS;)Lcom/ss/android/ugc/aweme/feed/model/Aweme;								
+portrait_comment_context_holder	auto_comment	class	Lcom/ss/android/ugc/aweme/comment/keyboard/refactor/BaseCmtInputModule;										LX/13lw;	e
+portrait_comment_context_state	auto_comment	class	LX/13ez;										LX/13ea;	e
+portrait_comment_aweme_resolver	auto_comment	method	LX/13eY;		LIZJ	(LX/13ea;)Lcom/ss/android/ugc/aweme/feed/model/Aweme;								
 auto_message_editor_bind	auto_message	method	Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerUI2;		onViewCreated	(Landroid/view/View;)V								
 auto_message_editor_fields	auto_message	class	Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerUI2;										Lcom/ss/android/ugc/aweme/im/sdk/chat/SessionInfo;|Lcom/ss/android/ugc/aweme/im/widget/SearchableEditText;	e|m
 auto_message_session_info	auto_message	class	Lcom/ss/android/ugc/aweme/im/sdk/chat/SessionInfo;										Ljava/lang/String;	conversationId
@@ -69,32 +69,34 @@ auto_message_single_chat_module	auto_message	class	Lcom/ss/android/ugc/aweme/im/
 auto_message_editor_getter	auto_message	method	Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerUI2;		getEditTextView	()Landroid/widget/EditText;								
 auto_message_text_api	auto_message	method	Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerUI2;		setText	(Ljava/lang/CharSequence;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/util/Map;)V								
 auto_message_input_logic	auto_message	class	Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerLogic2;											
-auto_message_plain_text_mode	auto_message	class	LX/0s5x;											
+auto_message_plain_text_mode	auto_message	class	LX/0Yca;	text							3	0		
 component_top_navigation	method_scan	class	Lcom/ss/android/ugc/aweme/homepage/tab/top/ui/titlebar/MainTitleBar;											
-component_bottom_navigation	method_scan	class	LX/1Br3;											
-adv_ui_splash_gate	basic	method	Lcom/bytedance/ies/ugc/aweme/commercialize/splash/core/SplashService;		LJIILIIL	(Landroid/app/Activity;Z)Z	SSM:StateController|onBeforeSuperCreate							
-adv_ui_teen_guide	basic	method	Lcom/ss/android/ugc/aweme/compliance/protection/serviceimpl/TeenModeServiceImpl;		LJJJJ	(Landroid/content/Context;Ljava/lang/String;LY/ADListenerS1387S0100000_27;)Z	showTeenModeGuideDialog							
+component_bottom_navigation	method_scan	class	LX/0isP;	MainBottomTabViewNew									Lcom/bytedance/dux/image/DuxImageView;	b
+adv_ui_splash_gate	basic	method	Lcom/bytedance/ies/ugc/aweme/commercialize/splash/core/SplashService;		LJIIIZ	(Landroid/app/Activity;Z)Z	SSM:StateController|onBeforeSuperCreate							
+adv_ui_teen_guide	basic	method	Lcom/ss/android/ugc/aweme/compliance/protection/serviceimpl/TeenModeServiceImpl;		LJIILIIL	(Landroid/content/Context;Ljava/lang/String;LY/ADListenerS1408S0100000_24;)Z	showTeenModeGuideDialog							
 adv_ui_update_dialog	basic	class	Lcom/ss/android/ugc/aweme/update/dialog/ui/UpdateNotifyDialog;											
 adv_ui_update_bottom	basic	class	Lcom/ss/android/ugc/aweme/update/dialog/ui/BottomUpdateDialogPanel;											
-adv_ui_double_tap	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLJLL	(Landroid/view/MotionEvent;)V								
-adv_ui_big_digg	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLJL	(Landroid/view/MotionEvent;Lcom/ss/android/ugc/aweme/feed/adapter/IFeedViewHolder;Lcom/ss/android/ugc/aweme/feed/model/Aweme;)V								
-adv_ui_delete_aweme	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LJLJL	(ILcom/ss/android/ugc/aweme/feed/model/Aweme;)V								
-adv_ui_delete_aweme_full_feed	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/FullFeedFragmentPanel;		LJLJL	(ILcom/ss/android/ugc/aweme/feed/model/Aweme;)V								
-adv_ui_insert_single	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLLIIIL	(ILcom/ss/android/ugc/aweme/feed/model/Aweme;)V								
-adv_ui_insert_single_fallback	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLLIIL	(ILcom/ss/android/ugc/aweme/feed/model/Aweme;)V								
-adv_ui_insert_list	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLLIL	(ILjava/util/List;)V								
-adv_ui_insert_list_fallback	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLLIILIL	(ILjava/util/List;)V	insertItemFallbackLogic							
-adv_ui_long_press_speed	interface	method	Lcom/ss/android/ugc/aweme/control/speed/presenter/FeedLongPressFastSpeedPresenter;		LLLLLJIL	(FFF)V	familiar_long_press_speed_view							
-adv_ui_black_spaces	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLLFF	()V	handleTopAndBottomSpace						Landroid/view/View;|Lcom/ss/android/ugc/aweme/feed/ui/bottom/BottomSpace;	i|j
+adv_ui_double_tap	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLLIIL	(Landroid/view/MotionEvent;)V								
+adv_ui_big_digg	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLLIIIIL	(Landroid/view/MotionEvent;Lcom/ss/android/ugc/aweme/feed/adapter/IFeedViewHolder;Lcom/ss/android/ugc/aweme/feed/model/Aweme;)V								
+adv_ui_delete_aweme	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLFF	(ILcom/ss/android/ugc/aweme/feed/model/Aweme;)V								
+adv_ui_delete_aweme_full_feed	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/FullFeedFragmentPanel;		LLFF	(ILcom/ss/android/ugc/aweme/feed/model/Aweme;)V								
+adv_ui_hidden_recall_task	interface	method	Lkotlin/jvm/internal/ALambdaS31S1500000_28;		invoke	()Ljava/lang/Object;	safety_check_recall|recall	LX/07OG;						$t
+adv_ui_hidden_background_task	interface	method	Lkotlin/jvm/internal/ALambdaS17S1600000_28;		invoke	()Ljava/lang/Object;	safety_check|safety_check_recall	Lcom/ss/android/ugc/aweme/feed/plato/core/IFeedDataContext;						$t
+adv_ui_insert_single	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLLLIL	(ILcom/ss/android/ugc/aweme/feed/model/Aweme;)V								
+adv_ui_insert_single_fallback	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLLLJ	(ILcom/ss/android/ugc/aweme/feed/model/Aweme;)V								
+adv_ui_insert_list	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLLLL	(ILjava/util/List;)V								
+adv_ui_insert_list_fallback	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLLLJI	(ILjava/util/List;)V	insertItemFallbackLogic							
+adv_ui_long_press_speed	interface	method	Lcom/ss/android/ugc/aweme/control/speed/presenter/FeedLongPressFastSpeedPresenter;		LLLLLLIL	(FFF)V	FeedLongPressFastSpeedPresenter#enterFastSpeedMode|speed_up_play							
+adv_ui_black_spaces	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLLJIL	()V	handleTopAndBottomSpace						Landroid/view/View;|Lcom/ss/android/ugc/aweme/feed/ui/bottom/BottomSpace;	i|j
 adv_ui_publish_attach	interface	method	Lcom/ss/android/ugc/aweme/tools/external/hometab/bottom/PublishButton;		onAttachedToWindow	()V								
 adv_player_set_speed	playback	method	Lcom/ss/android/ugc/aweme/feed/controller/FeedPlayerWrapper;		setSpeed	(F)V								
-adv_player_get_speed	playback	method	Lcom/ss/android/ugc/aweme/feed/controller/FeedPlayerWrapper;		LJFF	()F								
+adv_player_get_speed	playback	method	Lcom/ss/android/ugc/aweme/feed/controller/FeedPlayerWrapper;		LIZJ	()F								
 adv_player_resume	playback	method	Lcom/ss/android/ugc/aweme/feed/controller/FeedPlayerWrapper;		resumePlay	()V								
-adv_player_play	playback	method	Lcom/ss/android/ugc/aweme/feed/controller/FeedPlayerWrapper;		LJJIJ	(Lcom/ss/android/ugc/aweme/feed/model/Video;Lcom/ss/android/ugc/aweme/player/sdk/api/OnUIPlayListener;ILjava/lang/String;ZLjava/lang/String;ZZII)Ljava/lang/String;								
+adv_player_play	playback	method	Lcom/ss/android/ugc/aweme/feed/controller/FeedPlayerWrapper;		LJJIJLIJ	(Lcom/ss/android/ugc/aweme/feed/model/Video;Lcom/ss/android/ugc/aweme/player/sdk/api/OnUIPlayListener;ILjava/lang/String;ZLjava/lang/String;ZZII)Ljava/lang/String;								
 adv_player_manager_set_speed	playback	method	Lcom/ss/android/ugc/aweme/video/PlayerManager;		setSpeed	(F)V								
-adv_player_manager_get_speed	playback	method	Lcom/ss/android/ugc/aweme/video/PlayerManager;		LJFF	()F								
+adv_player_manager_get_speed	playback	method	Lcom/ss/android/ugc/aweme/video/PlayerManager;		LIZJ	()F								
 adv_player_manager_resume	playback	method	Lcom/ss/android/ugc/aweme/video/PlayerManager;		resumePlay	()V								
-adv_player_manager_play	playback	method	Lcom/ss/android/ugc/aweme/video/PlayerManager;		LJJIJ	(Lcom/ss/android/ugc/aweme/feed/model/Video;Lcom/ss/android/ugc/aweme/player/sdk/api/OnUIPlayListener;ILjava/lang/String;ZLjava/lang/String;ZZII)Ljava/lang/String;								
+adv_player_manager_play	playback	method	Lcom/ss/android/ugc/aweme/video/PlayerManager;		LJJIJLIJ	(Lcom/ss/android/ugc/aweme/feed/model/Video;Lcom/ss/android/ugc/aweme/player/sdk/api/OnUIPlayListener;ILjava/lang/String;ZLjava/lang/String;ZZII)Ljava/lang/String;								
 adv_player_can_auto_next	playback	method	Lcom/ss/android/ugc/aweme/feed/plato/business/pad/palycontrol/autoplay/component/PadAutoNextComponent;		checkCanMoveToNext	()Z								
 adv_player_comments_showing	playback	method	Lcom/ss/android/ugc/aweme/feed/plato/business/pad/palycontrol/autoplay/component/PadAutoNextComponent;		isCommentPanelShowing	()Z	compilation_comment_split_container							
 adv_player_scroll	playback	method	Lcom/ss/android/ugc/aweme/feed/plato/business/contentconsumption/autonext/AutoNextBaseComponent;		onPageScrolled	(IFI)V							I|Ljava/lang/String;	k|l
@@ -108,7 +110,7 @@ adv_profile_own	local_spoof	method	Lcom/ss/android/ugc/aweme/profile/panda/core/
 adv_profile_root	local_spoof	method	Lcom/ss/android/ugc/aweme/profile/panda/PandaHeaderValueArea;		LJJII	()Landroid/view/View;								
 adv_im_db_update	message	method	Lcom/bytedance/im/core/internal/db/base/AbsDBProxy;		update	(Ljava/lang/String;Landroid/content/ContentValues;Ljava/lang/String;[Ljava/lang/String;)I								
 adv_im_db_insert	message	method	Lcom/bytedance/im/core/internal/db/base/AbsDBProxy;		insert	(Ljava/lang/String;Ljava/lang/String;Landroid/content/ContentValues;)J								
-adv_im_global_received	message	method	LX/1Qjr;		onGetMessage	(Ljava/util/List;ILcom/bytedance/im/core/model/ReceiveMsgExtra;)V								
+adv_im_global_received	message	method	LX/1Z8C;		onGetMessage	(Ljava/util/List;ILcom/bytedance/im/core/model/ReceiveMsgExtra;)V								
 adv_im_uid	message	method	Lcom/bytedance/im/core/mi/IMSdkContext;		getUid	()J								
 adv_im_bean	message	method	Lcom/bytedance/im/core/mi/IMSdkContext;		getBeanCreateService	()Lcom/bytedance/im/core/client/mi/IBeanCreateModel;								
 adv_im_conversations	message	method	Lcom/bytedance/im/core/mi/IMSdkContext;		getConversationListModel	()Lcom/bytedance/im/core/model/ConversationListModel;								
@@ -123,87 +125,87 @@ adv_im_all_conversations	message	method	Lcom/bytedance/im/core/model/Conversatio
 adv_im_conversation_id	message	method	Lcom/bytedance/im/core/model/Conversation;		getConversationId	()Ljava/lang/String;								
 adv_im_conversation_members	message	method	Lcom/bytedance/im/core/model/Conversation;		getMemberIds	()Ljava/util/List;								
 adv_im_single_chat	message	method	Lcom/bytedance/im/core/model/Conversation;		isSingleChat	()Z								
-adv_im_text_content	message	method	Lcom/ss/android/ugc/aweme/im/sdk/chat/model/TextContent;		LJJLJ	(Ljava/lang/String;)Lcom/ss/android/ugc/aweme/im/sdk/chat/model/TextContent;								
+adv_im_text_content	message	method	Lcom/ss/android/ugc/aweme/im/sdk/chat/model/TextContent;		LJJLL	(Ljava/lang/String;)Lcom/ss/android/ugc/aweme/im/sdk/chat/model/TextContent;								
 adv_im_send	message	method	Lcom/bytedance/im/core/internal/link/handler/sendmsg/SendMsgHandler;		send	(Lcom/bytedance/im/core/model/Message;Ljava/util/Map;)V								
 comment_request_factory	comment_tools	method	Lcom/bytedance/retrofit2/RequestFactory;		toRequest	(Lcom/bytedance/retrofit2/ExpandCallback;[Ljava/lang/Object;)Lcom/bytedance/retrofit2/client/Request;								
 media_account_service	comment_tools	method	Lcom/ss/android/ugc/aweme/account/AccountProxyService;		userService	()Lcom/ss/android/ugc/aweme/account/service/IAccountUserService;								
 media_current_user	comment_tools	method	Lcom/ss/android/ugc/aweme/user/service/AccountUserService;		getCurUser	()Lcom/ss/android/ugc/aweme/profile/model/User;								
 media_video_control	download	class	Lcom/ss/android/ugc/aweme/feed/model/VideoControl;											allowDownload|downloadIgnoreVisibility|preventDownloadType
-comment_audio_upload	comment_voice	method	Lcom/ss/android/ugc/aweme/comment/helper/AudioUploader;		LJFF	(LX/0yFr;Ljava/lang/String;LY/AObjectS313S0200000_35;LY/AObjectS814S0100000_35;)V								
+comment_audio_upload	comment_voice	method	Lcom/ss/android/ugc/aweme/comment/helper/AudioUploader;		LJI	(LX/13hh;Ljava/lang/String;LY/AObjectS314S0200000_36;LY/AObjectS808S0100000_36;)V								
 comment_uploader_path	comment_voice	method	Lcom/ss/bduploader/BDVideoUploaderBase;		setPathName	(Ljava/lang/String;)V								
 comment_uploader_listener	comment_voice	method	Lcom/ss/bduploader/BDVideoUploaderBase;		setListener	(Lcom/ss/bduploader/BDVideoUploaderListener;)V								
-comment_audio_notify	comment_voice	method	LY/AUListenerS523S0300000_32;		onNotify	(IJLcom/ss/bduploader/BDVideoInfo;)V	uploadAudio: BDUploader success							
-comment_publish_model	comment_tts	class	LX/0yFs;											A|y
-comment_attachment_model	comment_tts	class	LX/0yGo;											audio|text|imageList|video
-comment_audio_model	comment_tts	class	LX/0yHx;											localFile|duration|waveList|vid
-comment_publish_model_copy	comment_tts	method	LX/0yFs;		LIZ	()LX/0yFs;								
-comment_attachment_copy	comment_tts	method	LX/0yGo;		LJFF	()LX/0yGo;								
-comment_publish_submit	comment_tts	method	Lcom/ss/android/ugc/aweme/comment/data/publish/CommentPublishRequest;		LJIJJ	(LX/0yFs;)V								
-comment_publish_submit_checked	comment_tts	method	Lcom/ss/android/ugc/aweme/comment/data/publish/CommentPublishRequest;		LJIJJLI	(LX/0yFs;)V								
-auto_comment_work_context	auto_comment	method	LX/0yEs;		LIZ	(Lcom/ss/android/ugc/aweme/feed/model/Aweme;)LX/0yAS;								
-auto_comment_checked_request	auto_comment	method	Lcom/ss/android/ugc/aweme/comment/data/publish/CommentPublishRequest;		LJIILLIIL	(LX/0yFs;)Z								
-auto_comment_publish_success	auto_comment	method	Lcom/ss/android/ugc/aweme/comment/data/publish/CommentPublishRequest;		LJIJI	(LX/0y7U;LX/0yFs;)V								
+comment_audio_notify	comment_voice	method	LX/13jQ;		onNotify	(IJLcom/ss/bduploader/BDVideoInfo;)V	uploadAudio: BDUploader success							
+comment_publish_model	comment_tts	class	LX/13hi;											A|y
+comment_attachment_model	comment_tts	class	LX/13hf;											audio|text|imageList|video
+comment_audio_model	comment_tts	class	LX/13j0;											localFile|duration|waveList|vid
+comment_publish_model_copy	comment_tts	method	LX/13hi;		LIZ	()LX/13hi;								
+comment_attachment_copy	comment_tts	method	LX/13hf;		LJFF	()LX/13hf;								
+comment_publish_submit	comment_tts	method	Lcom/ss/android/ugc/aweme/comment/data/publish/CommentPublishRequest;		LJIJJ	(LX/13hi;)V								
+comment_publish_submit_checked	comment_tts	method	Lcom/ss/android/ugc/aweme/comment/data/publish/CommentPublishRequest;		LJIJJLI	(LX/13hi;)V								
+auto_comment_work_context	auto_comment	method	LX/12bX;		LIZ	(Lcom/ss/android/ugc/aweme/feed/model/Aweme;)LX/13ea;								
+auto_comment_checked_request	auto_comment	method	Lcom/ss/android/ugc/aweme/comment/data/publish/CommentPublishRequest;		LJIILLIIL	(LX/13hi;)Z								
+auto_comment_publish_success	auto_comment	method	Lcom/ss/android/ugc/aweme/comment/data/publish/CommentPublishRequest;		LJIJI	(LX/13hp;LX/13hi;)V								
 auto_comment_publish_failure	auto_comment	method	Lcom/ss/android/ugc/aweme/comment/data/publish/CommentPublishRequest;		LJIJ	(Ljava/lang/Exception;)V								
-auto_comment_audio_upload	auto_comment	method	Lcom/ss/android/ugc/aweme/comment/helper/AudioUploader;		LJFF	(LX/0yFr;Ljava/lang/String;LY/AObjectS313S0200000_35;LY/AObjectS814S0100000_35;)V								
+auto_comment_audio_upload	auto_comment	method	Lcom/ss/android/ugc/aweme/comment/helper/AudioUploader;		LJI	(LX/13hh;Ljava/lang/String;LY/AObjectS314S0200000_36;LY/AObjectS808S0100000_36;)V								
 adv_im_cell_bind	message	method	Lcom/ss/android/ugc/aweme/im/business/chat/msgcell/common/CellComposeAdapter;		onBindViewHolder	(Landroidx/recyclerview/widget/RecyclerView$ViewHolder;ILjava/util/List;)V								
-adv_im_cell_message	message	method	Lcom/ss/android/ugc/aweme/im/business/chat/msgcell/common/CellComposeAdapter;		LJLLLL	(I)Lcom/bytedance/im/core/model/Message;								
+adv_im_cell_message	message	method	Lcom/ss/android/ugc/aweme/im/business/chat/msgcell/common/CellComposeAdapter;		LJLLL	(I)Lcom/bytedance/im/core/model/Message;								
 adv_im_message_uuid	message	method	Lcom/bytedance/im/core/model/Message;		getUuid	()Ljava/lang/String;								
 adv_gesture_touch_layout	interface	class	Lcom/ss/android/ugc/aweme/feed/ui/LongPressLayout;										F|Z|Ljava/lang/Runnable;	lastRawX|lastRawY|enableLongClick|longPressRunnable
 auto_slide_completed	playback	method	Lcom/ss/android/ugc/aweme/feed/controller/refactor/impl_pm/PMPlayListenerDispatcherV2;		onPlayCompleted	(Ljava/lang/String;)V	on_play_completed							
-auto_slide_panel_context	playback	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		feedViewPagerContext	()Lcom/ss/android/ugc/aweme/feed/plato/core/FeedViewPagerContext;							Lcom/ss/android/ugc/aweme/feed/plato/core/FeedViewPagerContext;|Lcom/ss/android/ugc/aweme/common/widget/VerticalViewPager;|LX/1Z2B;	B3|f|L0
+auto_slide_panel_context	playback	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		feedViewPagerContext	()Lcom/ss/android/ugc/aweme/feed/plato/core/FeedViewPagerContext;							Lcom/ss/android/ugc/aweme/feed/plato/core/FeedViewPagerContext;|Lcom/ss/android/ugc/aweme/common/widget/VerticalViewPager;|LX/1fLi;	B3|f|L0
 auto_slide_current_holder	playback	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		getCurrentViewHolderP	()Lcom/ss/android/ugc/aweme/feed/adapter/IFeedViewHolder;								
 auto_slide_pager_touch	playback	method	Lcom/ss/android/ugc/aweme/common/widget/VerticalViewPager;		dispatchTouchEvent	(Landroid/view/MotionEvent;)Z								
 auto_slide_scroll_state	playback	method	Lcom/ss/android/ugc/aweme/common/widget/VerticalViewPager;		getScrollState	()I								
-auto_slide_comments_showing	playback	method	LX/1Z2B;		LJIILIIL	(Z)Z	comment_panel							
-adv_gesture_long_press	interface	method	LX/0v77;		run	()V		LX/0w4F;					Lcom/ss/android/ugc/aweme/feed/ui/LongPressLayout;	a
+auto_slide_comments_showing	playback	method	LX/1fLi;		LJIILIIL	(Z)Z	comment_panel							
+adv_gesture_long_press	interface	method	LX/1Ul9;		run	()V		LX/13EJ;					Lcom/ss/android/ugc/aweme/feed/ui/LongPressLayout;	a
 adv_gesture_item_params	interface	class	Lcom/ss/android/ugc/aweme/feed/model/VideoItemParams;										Lcom/ss/android/ugc/aweme/feed/plato/core/IFeedContext;	mFeedContext
-adv_gesture_panel_player	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLILZLL	()Lcom/ss/android/ugc/aweme/video/IPlayerManager;								
+adv_gesture_panel_player	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLJJJJJIL	()Lcom/ss/android/ugc/aweme/video/IPlayerManager;								
 adv_gesture_player_set_speed	interface	method	Lcom/ss/android/ugc/aweme/video/IPlayerManager;		setSpeed	(F)V								
-adv_gesture_player_get_speed	interface	method	Lcom/ss/android/ugc/aweme/video/IPlayerInfoProvider;		LJFF	()F								
+adv_gesture_player_get_speed	interface	method	Lcom/ss/android/ugc/aweme/video/IPlayerInfoProvider;		LIZJ	()F								
 adv_gesture_player_is_playing	interface	method	Lcom/ss/android/ugc/aweme/video/IPlayerInfoProvider;		isPlaying	()Z								
 adv_gesture_player_resume	interface	method	Lcom/ss/android/ugc/aweme/video/IPlayerManager;		resumePlay	()V								
 adv_gesture_player_pause	interface	method	Lcom/ss/android/ugc/aweme/video/IPlayerManager;		LJJIJL	()V								
-adv_gesture_panel_toggle_play	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LJJLIIIJILLIZJL	(Lcom/ss/android/ugc/aweme/feed/model/Aweme;ZZ)V								
-adv_gesture_panel_hide_play_control	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLLI	()V	hideIvPlay() hide the pause icon							
-adv_gesture_panel_show_play_control	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		x	()V	showIvPlay# the pause icon is null！							
-adv_gesture_player_play	interface	method	Lcom/ss/android/ugc/aweme/video/IPlayerManager;		LJJIJ	(Lcom/ss/android/ugc/aweme/feed/model/Video;Lcom/ss/android/ugc/aweme/player/sdk/api/OnUIPlayListener;ILjava/lang/String;ZLjava/lang/String;ZZII)Ljava/lang/String;								
+adv_gesture_panel_toggle_play	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LJJZZIII	(Lcom/ss/android/ugc/aweme/feed/model/Aweme;ZZ)V								
+adv_gesture_panel_hide_play_control	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		LLLLII	()V	hideIvPlay() hide the pause icon							
+adv_gesture_panel_show_play_control	interface	method	Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;		A	()V	showIvPlay# the pause icon is null！							
+adv_gesture_player_play	interface	method	Lcom/ss/android/ugc/aweme/video/IPlayerManager;		LJJIJLIJ	(Lcom/ss/android/ugc/aweme/feed/model/Video;Lcom/ss/android/ugc/aweme/player/sdk/api/OnUIPlayListener;ILjava/lang/String;ZLjava/lang/String;ZZII)Ljava/lang/String;								
 dm_speech_send	message_voice	method	Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerLogic2;		sendMsg	(Z)V	onSendMessageBtnClick							
-dm_speech_input_api	message_voice	method	Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerLogic2;		LJJLJLI	()Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerUIApi;								
+dm_speech_input_api	message_voice	method	Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerLogic2;		LJJZZIII	()Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerUIApi;								
 dm_speech_content	message_voice	method	Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerUI2;		content	()Landroid/text/Editable;								
 dm_speech_edit_text	message_voice	method	Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerUI2;		getEditTextView	()Landroid/widget/EditText;								
-dm_speech_send_click	message_voice	method	LY/ACListenerS916S0100000_31;		onClick	(Landroid/view/View;)V		Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerLogic2;						
-dm_speech_send_confirm	message_voice	method	LX/0s7C;		LIZ	(Landroid/view/View;)V		Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerLogic2;						
+dm_speech_send_click	message_voice	method	LY/ACListenerS845S0100000_19;	send_after_association	onClick	(Landroid/view/View;)V		LY/ACListenerS845S0100000_19;			7	2	I|Ljava/lang/Object;	$t|l0
+dm_speech_send_confirm	message_voice	method	LX/0Ye8;		LIZ	(Landroid/view/View;)V		Lcom/ss/android/ugc/aweme/im/business/chat/feature/input/drawer/new/InputDrawerLogic2;						
 dm_speech_conversation	message_voice	method	Lcom/ss/android/ugc/aweme/im/sdk/chat/SessionInfo;		getConversationId	()Ljava/lang/String;								
 dm_speech_audio_create	message_voice	method	Lcom/ss/android/ugc/aweme/im/business/chat/feature/audio/logic/AudioLogic;		onCreate	()V								
 dm_speech_audio_destroy	message_voice	method	Lcom/ss/android/ugc/aweme/im/business/chat/feature/audio/logic/AudioLogic;		onDestroy	()V								
-dm_speech_record_event	message_voice	method	LY/ArS3254S0100000_37;		LIZIZ	(LX/1CbI;LX/1YAJ;)V	im_feed_bottom_reply_bar|oAHC onRecordComplete, exists: 							
-dm_speech_record_model	message_voice	class	LX/1YAJ;											LIZ|LIZIZ|LIZJ
-dm_speech_record_state	message_voice	class	LX/1CbI;											RECORD_START|RECORD_COMPLETE|RECORD_CANCEL
-dm_speech_upload_enqueue	message_voice	method	LX/12ux;		LIZLLL	(Lcom/bytedance/im/core/model/Message;Lcom/ss/android/ugc/aweme/im/sdk/chat/model/BaseContent;JLcom/ss/android/ugc/aweme/im/service/model/ImageUploadLogParams;)V								
+dm_speech_record_event	message_voice	method	LY/ArS3247S0100000_31;		LIZJ	(LX/16TE;LX/1eUj;)V	im_feed_bottom_reply_bar|oAHC onRecordComplete, exists: 							
+dm_speech_record_model	message_voice	class	LX/1eUj;											LIZ|LIZIZ|LIZJ
+dm_speech_record_state	message_voice	class	LX/16TE;											RECORD_START|RECORD_COMPLETE|RECORD_CANCEL
+dm_speech_upload_enqueue	message_voice	method	LX/0vRV;		LIZLLL	(Lcom/bytedance/im/core/model/Message;Lcom/ss/android/ugc/aweme/im/sdk/chat/model/BaseContent;JLcom/ss/android/ugc/aweme/im/service/model/ImageUploadLogParams;)V								
 dm_speech_message_local_ext	message_voice	method	Lcom/bytedance/im/core/model/Message;		getLocalExt	()Ljava/util/concurrent/ConcurrentHashMap;								
 dm_speech_message_conversation	message_voice	method	Lcom/bytedance/im/core/model/Message;		getConversationId	()Ljava/lang/String;								
 adv_im_message_recalled	message	method	Lcom/bytedance/im/core/model/Message;		isRecalled	()Z								
 adv_im_message_ext	message	method	Lcom/bytedance/im/core/model/Message;		getExt	()Ljava/util/concurrent/ConcurrentHashMap;								
-adv_im_local_recall	message	method	LX/1Qb7;		w3	(Lcom/bytedance/im/core/model/Message;)Ljava/lang/Boolean;								
+adv_im_local_recall	message	method	LX/1Z7m;		z3	(Lcom/bytedance/im/core/model/Message;)Ljava/lang/Boolean;								
 adv_im_conversation_core	message	method	Lcom/bytedance/im/core/model/Conversation;		getCoreInfo	()Lcom/bytedance/im/core/model/ConversationCoreInfo;								
 adv_im_conversation_name	message	method	Lcom/bytedance/im/core/model/ConversationCoreInfo;		getName	()Ljava/lang/String;								
 relation_following_list	method_scan	method			queryFollowingList	(Ljava/util/Map;)Lio/reactivex/Observable;								
 relation_follower_list	method_scan	method			queryFollowerList	(Ljava/util/Map;)Lio/reactivex/Observable;								
 relation_retrofit_service	method_scan	method	Lcom/ss/android/ugc/aweme/services/RetrofitService;		LIZIZ	()Lcom/ss/android/ugc/aweme/framework/services/IRetrofitService;								
-relation_im_user_cache	method_scan	method	Lcom/ss/android/ugc/aweme/im/sdk/core/IMUserRepository;		LJIILL	()Lcom/bytedance/im/core/model/cache/IMMemoryCache;								
-dm_auto_audio_type	message_voice	method	LX/12ve;		LJ	()I								
+relation_im_user_cache	method_scan	method	Lcom/ss/android/ugc/aweme/im/sdk/core/IMUserRepository;		LJIILLIIL	()Lcom/bytedance/im/core/model/cache/IMMemoryCache;								
+dm_auto_audio_type	message_voice	method	LX/0vSz;		LJ	()I								
 dm_auto_audio_content	message_voice	class	Lcom/ss/android/ugc/aweme/im/sdk/chat/model/AudioContent;											duration|waveList|md5
 dm_auto_audio_encrypted_content	message_voice	class	Lcom/ss/android/ugc/aweme/im/business/mediaselectpage/sender/audio/model/EncryptAudioNewContent;											
 dm_auto_audio_content_type	message_voice	method	Lcom/ss/android/ugc/aweme/im/sdk/chat/model/BaseContent;		LJJIZ	(I)V								
 dm_auto_audio_attachment	message_voice	class	Lcom/bytedance/im/core/model/Attachment;											
 dm_auto_audio_message_status	message_voice	method	Lcom/bytedance/im/core/model/Message;		setMsgStatus	(I)V								
 dm_auto_audio_message_server_id	message_voice	method	Lcom/bytedance/im/core/model/Message;		setMsgId	(J)V								
-dm_auto_audio_local_path	message_voice	method	LX/12yj;		LJFF	(Lcom/bytedance/im/core/model/Message;Ljava/lang/String;)V								
-dm_auto_audio_insert	message_voice	method	LX/12uT;		LIZ	(Lcom/bytedance/im/core/model/Message;Ljava/lang/Runnable;Lcom/bytedance/im/core/client/callback/IRequestListener;LX/0r5Z;)V								
-dm_auto_audio_uploader	message_voice	method	LX/12vM;		LIZIZ	()Ljava/lang/Object;								
+dm_auto_audio_local_path	message_voice	method	LX/0vLb;		LJFF	(Lcom/bytedance/im/core/model/Message;Ljava/lang/String;)V								
+dm_auto_audio_insert	message_voice	method	LX/0vGv;		LIZ	(Lcom/bytedance/im/core/model/Message;Ljava/lang/Runnable;Lcom/bytedance/im/core/client/callback/IRequestListener;LX/0vTP;)V								
+dm_auto_audio_uploader	message_voice	method	LX/0vRu;		LIZIZ	()Ljava/lang/Object;		LX/0vRu;	LX/0vRu;		3	1	Ljava/lang/Object;	LIZ
 
-comment_reply_notice_fetch	comment_reply	method	LX/0dPQ;		fetchNotice	(JJIILjava/lang/Integer;ILjava/lang/Integer;Ljava/lang/Integer;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;ILjava/lang/String;IILjava/lang/String;IILjava/lang/Integer;I)Lcom/google/common/util/concurrent/ListenableFuture;								
-comment_reply_notice_provider	comment_reply	class	LX/0dU1;											b
+comment_reply_notice_fetch	comment_reply	method	LX/14PE;		fetchNotice	(JJIILjava/lang/Integer;ILjava/lang/Integer;Ljava/lang/Integer;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;ILjava/lang/String;IILjava/lang/String;IILjava/lang/Integer;I)Lcom/google/common/util/concurrent/ListenableFuture;								
+comment_reply_notice_provider	comment_reply	class	LX/14jX;											b
 comment_reply_notice_response	comment_reply	class	Lcom/ss/android/ugc/aweme/socialnotice/bean/NoticeResponse;											items|hasMore|maxTime|minTime
 comment_reply_base_notice	comment_reply	class	Lcom/ss/android/ugc/aweme/socialnotice/bean/BaseNotice;											commentNotice|nid|createTime|noticeDisable|itemDisable|interactiveGeneralNoticeStruct
 comment_reply_comment_notice	comment_reply	class	Lcom/ss/android/ugc/aweme/socialnotice/bean/CommentNotice;											comment|replyComment|level1Comment|aweme|commentUnvisible
@@ -211,26 +213,26 @@ comment_reply_comment_model	comment_reply	class	Lcom/ss/android/ugc/aweme/commen
 comment_reply_user_model	comment_reply	class	Lcom/ss/android/ugc/aweme/profile/model/User;											uid|nickname
 comment_reply_work_model	comment_reply	class	Lcom/ss/android/ugc/aweme/feed/model/Aweme;											aid
 comment_reply_push_receive	comment_reply	method	Lcom/ss/android/ugc/aweme/socialnotice/innerpush/SocialInteractionInnerPushHandler;		receiveInnerPush	(Lcom/ss/android/ugc/aweme/innerpush/api/model/InnerPushMessage;Z)V								
-comment_reply_push_parse	comment_reply	method	LX/12bE;		LIZ	(Lcom/ss/android/ugc/aweme/innerpush/api/model/InnerPushMessage;)Lcom/ss/android/ugc/aweme/socialnotice/innerpush/SocialInnerPushMessage;								
+comment_reply_push_parse	comment_reply	method	LX/1V4p;		LIZ	(Lcom/ss/android/ugc/aweme/innerpush/api/model/InnerPushMessage;)Lcom/ss/android/ugc/aweme/socialnotice/innerpush/SocialInnerPushMessage;								
 comment_reply_push_model	comment_reply	class	Lcom/ss/android/ugc/aweme/socialnotice/innerpush/SocialInnerPushMessage;											aggrNoticeType
-comment_reply_received_group	comment_reply	method	LX/0dFd;		LJIIIIZZ	()I								
-comment_reply_notice_comment_model	comment_reply	method	LX/0dKM;		LIZLLL	(Lcom/ss/android/ugc/aweme/socialnotice/bean/BaseNotice;)Lcom/ss/android/ugc/aweme/socialnotice/bean/CommentNotice;								
-comment_reply_notice_incoming	comment_reply	method	LX/0dKM;		LIZJ	(Lcom/ss/android/ugc/aweme/socialnotice/bean/BaseNotice;)Lcom/ss/android/ugc/aweme/comment/model/Comment;								
-comment_reply_notice_reply_detail	comment_reply	method	LX/0dKM;		LIZ	(Lcom/ss/android/ugc/aweme/socialnotice/bean/BaseNotice;)LX/0dKN;								
-comment_reply_reply_detail_model	comment_reply	class	LX/0dKN;											a|b|d|e|f
+comment_reply_received_group	comment_reply	method	LX/14LK;		LJIIIIZZ	()I								
+comment_reply_notice_comment_model	comment_reply	method	LX/14Ec;		LIZLLL	(Lcom/ss/android/ugc/aweme/socialnotice/bean/BaseNotice;)Lcom/ss/android/ugc/aweme/socialnotice/bean/CommentNotice;								
+comment_reply_notice_incoming	comment_reply	method	LX/14Ec;		LIZJ	(Lcom/ss/android/ugc/aweme/socialnotice/bean/BaseNotice;)Lcom/ss/android/ugc/aweme/comment/model/Comment;								
+comment_reply_notice_reply_detail	comment_reply	method	LX/14Ec;		LIZ	(Lcom/ss/android/ugc/aweme/socialnotice/bean/BaseNotice;)LX/14Ea;								
+comment_reply_reply_detail_model	comment_reply	class	LX/14Ea;											a|b|d|e|f
 comment_reply_comment_clone	comment_reply	method	Lcom/ss/android/ugc/aweme/comment/model/Comment;		clone	()Ljava/lang/Object;								
 comment_reply_comment_user	comment_reply	method	Lcom/ss/android/ugc/aweme/comment/model/Comment;		LLLLZLL	()Lcom/ss/android/ugc/aweme/profile/model/User;								
-comment_reply_own_fetch	comment_reply	method	LX/0dPP;		getMineComment	(JI)Lio/reactivex/Observable;								
-comment_reply_own_provider	comment_reply	class	LX/0dHa;											b
+comment_reply_own_fetch	comment_reply	method	LX/14PD;		getMineComment	(JI)Lio/reactivex/Observable;								
+comment_reply_own_provider	comment_reply	class	LX/14Jz;											b
 comment_reply_own_response	comment_reply	class	Lcom/ss/android/ugc/aweme/socialnotice/bean/MineCommentResponse;											items|hasMore|minTime
-comment_reply_thread_fetch	comment_reply	method	LX/0yTH;		LJIJJ	(LX/0y6l;)Lbolts/Task;								
-comment_reply_thread_builder	comment_reply	class	LX/0y6o;											LIZ|LJII|LJIIIZ|LJIIJJI|LJIIJ|LJJII|LJJIII
-comment_reply_thread_request	comment_reply	class	LX/0y6l;											
+comment_reply_thread_fetch	comment_reply	method	LX/13wP;		LJIJJ	(LX/13ao;)Lbolts/Task;								
+comment_reply_thread_builder	comment_reply	class	LX/13ar;											LIZ|LJII|LJIIIZ|LJIIJJI|LJIIJ|LJJII|LJJIII
+comment_reply_thread_request	comment_reply	class	LX/13ao;											
 comment_reply_thread_response	comment_reply	class	Lcom/ss/android/ugc/aweme/comment/model/CommentItemList;											items|cursor|hasMore|mergeCursor
 comment_reply_task_wait	comment_reply	method	Lbolts/Task;		LJIJJ	(JLjava/util/concurrent/TimeUnit;)Z								
 comment_reply_task_result	comment_reply	method	Lbolts/Task;		getResult	()Ljava/lang/Object;								
 comment_reply_task_faulted	comment_reply	method	Lbolts/Task;		isFaulted	()Z								
 comment_reply_task_error	comment_reply	method	Lbolts/Task;		LJIIL	()Ljava/lang/Exception;								
 comment_reply_task_cancelled	comment_reply	method	Lbolts/Task;		isCancelled	()Z								
-comment_reply_publish_root	comment_reply	method	LX/0y6L;		LJ	(Lcom/ss/android/ugc/aweme/comment/model/Comment;LX/0yFs;)Ljava/lang/String;								
-comment_reply_publish_direct	comment_reply	method	LX/0y6L;		LJFF	(Lcom/ss/android/ugc/aweme/comment/model/Comment;LX/0yFs;)Ljava/lang/String;								
+comment_reply_publish_root	comment_reply	method	LX/13a7;		LJ	(Lcom/ss/android/ugc/aweme/comment/model/Comment;LX/13hi;)Ljava/lang/String;								
+comment_reply_publish_direct	comment_reply	method	LX/13a7;		LJFF	(Lcom/ss/android/ugc/aweme/comment/model/Comment;LX/13hi;)Ljava/lang/String;								

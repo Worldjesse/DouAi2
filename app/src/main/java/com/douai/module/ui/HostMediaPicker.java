@@ -2,10 +2,12 @@ package com.douai.module.ui;
 
 import android.app.Activity;
 import android.content.Intent;
-import android.content.pm.PackageInfo;
 import android.net.Uri;
 import android.text.TextUtils;
 import android.util.Log;
+
+import com.douai.module.scan.HostAdaptation;
+import com.douai.module.scan.HostResourceProfile;
 
 import java.io.Serializable;
 import java.lang.reflect.Field;
@@ -56,6 +58,7 @@ final class HostMediaPicker implements AutoCloseable {
     }
 
     private final Activity activity;
+    private final HostAdaptation.Profile profile;
     private final boolean videoOnly;
     private final Consumer<List<Selection>> selected;
     private final ClassLoader loader;
@@ -65,8 +68,9 @@ final class HostMediaPicker implements AutoCloseable {
     private Class<?> modelType;
     private boolean closed;
 
-    private HostMediaPicker(Activity activity, boolean videoOnly, Consumer<List<Selection>> selected) {
+    private HostMediaPicker(Activity activity, boolean videoOnly, Consumer<List<Selection>> selected, HostAdaptation.Profile profile) {
         this.activity = activity;
+        this.profile = profile;
         this.videoOnly = videoOnly;
         this.selected = selected;
         loader = activity.getClass().getClassLoader();
@@ -75,13 +79,14 @@ final class HostMediaPicker implements AutoCloseable {
     /** Null means unavailable; a null callback result means cancellation or an unusable result. */
     static HostMediaPicker launch(Activity activity, boolean videoOnly, Consumer<List<Selection>> selected) {
         if (activity == null || selected == null || activity.isFinishing() || activity.isDestroyed()) return null;
-        HostMediaPicker picker = new HostMediaPicker(activity, videoOnly, selected);
+        HostAdaptation.Profile profile;
+        try { profile = HostNativeChatViews.profileFor(activity); }
+        catch (ReflectiveOperationException unavailable) {
+            Log.w("DouAi.HostAlbum", "Host album version is unavailable", unavailable);
+            return null;
+        }
+        HostMediaPicker picker = new HostMediaPicker(activity, videoOnly, selected, profile);
         try {
-            PackageInfo info = activity.getPackageManager().getPackageInfo(HOST_PACKAGE, 0);
-            if (!HOST_PACKAGE.equals(activity.getPackageName()) || !"40.6.0".equals(info.versionName)
-                    || info.getLongVersionCode() != 400601L) {
-                throw new ReflectiveOperationException("Unsupported host album version");
-            }
             Intent intent = picker.albumIntent();
             Class<?> contract = picker.hostClass("androidx.activity.result.contract.ActivityResultContract");
             Class<?> callback = picker.hostClass("androidx.activity.result.ActivityResultCallback");
@@ -117,10 +122,6 @@ final class HostMediaPicker implements AutoCloseable {
             picker.close();
             Log.w("DouAi.HostAlbum", "Host album is unavailable", unavailable);
             return null;
-        } catch (android.content.pm.PackageManager.NameNotFoundException unavailable) {
-            picker.close();
-            Log.w("DouAi.HostAlbum", "Host album package is unavailable", unavailable);
-            return null;
         }
     }
 
@@ -129,7 +130,7 @@ final class HostMediaPicker implements AutoCloseable {
     private Intent albumIntent() throws ReflectiveOperationException {
         Class<?> nativeActivity = hostClass(ACTIVITY);
         if (!Activity.class.isAssignableFrom(nativeActivity)) throw new ReflectiveOperationException("Host album activity type");
-        Class<?> parametersClass = hostClass("X.131D");
+        Class<?> parametersClass = hostClass("X.1UOy");
         if (!Serializable.class.isAssignableFrom(parametersClass)) throw new ReflectiveOperationException("Host album parameters type");
         Object parameters = parametersClass.getConstructor(int.class).newInstance(videoOnly ? 0x10 : 0x1);
         set(parameters, "b", boolean.class, true); // Native multiple-selection controls.
@@ -224,7 +225,7 @@ final class HostMediaPicker implements AutoCloseable {
         field.set(target, value);
     }
 
-    private Class<?> hostClass(String name) throws ClassNotFoundException { return Class.forName(name, false, loader); }
+    private Class<?> hostClass(String name) throws ClassNotFoundException { return Class.forName(HostResourceProfile.className(profile, name), false, loader); }
 
     @Override public void close() {
         if (closed) return;

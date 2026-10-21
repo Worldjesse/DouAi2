@@ -30,6 +30,10 @@ public final class ConfigurationChanges {
         return new ConfigurationChanges(changed);
     }
 
+    public boolean affects(ConfigurationCatalog.Feature feature) {
+        return ConfigurationCatalog.affects(feature, this);
+    }
+
     public boolean isEmpty() { return keys.isEmpty(); }
 
     public int changedKeyCount() { return keys.size(); }

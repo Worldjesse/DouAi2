@@ -22,10 +22,13 @@ SMALI_FILES = (
 )
 MAPPING_FILES = ("mapping.txt", "configuration.txt", "seeds.txt", "usage.txt")
 REQUIRED_HOST_SUITES = {
-    "com.douai.module.scan.Douyin406AnchorTest",
+    "com.douai.module.scan.DouyinHostAnchorTest",
     "com.douai.module.scan.NativeChatHostContractTest",
     "com.douai.module.scan.CommentReplyHostContractTest",
     "com.douai.module.scan.BackgroundMessageHostContractTest",
+    "com.douai.module.scan.HiddenVideoHostContractTest",
+    "com.douai.module.scan.HostResourceTableContractTest",
+    "com.douai.module.scan.AutoMessageHostContractTest",
     "com.douai.module.feature.OfficialLivePhotoDownloadTest",
     "com.douai.module.feature.LivePhotoRecognitionRegressionTest",
 }
@@ -266,7 +269,7 @@ def test_inventory(root, require_contracts=True):
                 str(sorted(REQUIRED_HOST_SUITES - set(hosts))))
         require(APK_SUITE in suites and len(suites[APK_SUITE]) >= 3, "Required final APK contracts missing from source")
         require("verifiedFeedAnchorsAreUniqueAcrossTheLocalHostDexSet" in
-                suites["com.douai.module.scan.Douyin406AnchorTest"], "Required host rule uniqueness contract missing")
+                suites["com.douai.module.scan.DouyinHostAnchorTest"], "Required host rule uniqueness contract missing")
     return {"suites": suites, "hostContracts": hosts}
 
 
@@ -392,6 +395,18 @@ def prepare(root, host_apk, run_dir):
     write_json(run_dir / "inputs.json", inputs)
 
 
+def verified_host_identities(host_source):
+    package = re.search(r'TARGET_PACKAGE = "([^"]+)"', host_source)
+    name = re.search(r'VERIFIED_VERSION_NAME = "([^"]+)"', host_source)
+    code = re.search(r"VERIFIED_VERSION_CODE = (\d+)L", host_source)
+    require(package and name and code, "Missing verified host identity in source")
+    versions = {(name.group(1), int(code.group(1)))}
+    versions.update((version, int(number)) for version, number in re.findall(
+        r'public static final Profile [A-Z0-9_]+ = new Profile\("([^"]+)",\s*(\d+)L', host_source))
+    return [{"packageName": package.group(1), "versionName": version, "versionCode": number}
+            for version, number in sorted(versions)]
+
+
 def seal(root, run_dir, apk, build_apk):
     inputs = read_json(run_dir / "inputs.json")
     validate_apk(apk)
@@ -407,12 +422,8 @@ def seal(root, run_dir, apk, build_apk):
             elements[0].get("versionName") == identity["versionName"], "Gradle APK metadata identity mismatch")
     host_identity = parse_badging((run_dir / "host-badging.txt").read_text(encoding="utf-8-sig"))
     host_source = (root / "app/src/main/java/com/douai/module/scan/HostAdaptation.java").read_text(encoding="utf-8")
-    host_name = re.search(r'VERIFIED_VERSION_NAME = "([^"]+)"', host_source)
-    host_code = re.search(r"VERIFIED_VERSION_CODE = (\d+)L", host_source)
-    host_package = re.search(r'TARGET_PACKAGE = "([^"]+)"', host_source)
-    require(host_name and host_code and host_package, "Missing verified host identity in source")
-    require(host_identity == {"packageName": host_package.group(1), "versionName": host_name.group(1),
-                              "versionCode": int(host_code.group(1))}, "Host APK is not the verified source profile")
+    require(host_identity in verified_host_identities(host_source),
+            "Host APK is not a verified source profile")
     signature = parse_signature((run_dir / "apk-signature.txt").read_text(encoding="utf-8-sig"))
     write_json(run_dir / "output-metadata.json", metadata)
     write_json(run_dir / "artifact-seal.json", {**identity, **signature, "fileName": apk.name,

@@ -184,7 +184,7 @@ class MiuixHostSettingsTest {
 
     @Test
     @Config(sdk = [28])
-    fun featureSearchUsesTheSameAiSpeechAndDownloadPathsWithoutChangingSettings() {
+    fun featureSearchUsesTheSameMajorFeaturePagesWithoutChangingSettings() {
         lateinit var saved: Map<String, *>
         compose.runOnIdle { saved = store.snapshot() }
         val cases = listOf(
@@ -192,18 +192,46 @@ class MiuixHostSettingsTest {
             listOf("minimax", "speech", "扩展功能 > 文本转语音设置", "settings.option.语音来源"),
             listOf("保存目录", "download-directory", "下载相关 > 保存位置", "settings.option.保存位置"),
             listOf("去水印", "download-watermark", "下载相关 > 无水印下载图集或者视频", "settings.toggle.无水印下载图集或者视频"),
+            listOf("自动评论", "auto-comment", "自动评论 > 评论内容与作品范围", "settings.toggle.开启自动评论"),
+            listOf("私信自动回复", "auto-reply", "自动回复 > 私聊与群聊", "settings.toggle.开启自动回复"),
+            listOf("评论回复", "comment-reply", "自动回复 > 接收评论回复", "settings.toggle.接收评论回复"),
+            listOf("导入配置", "backup", "扩展功能 > 配置备份", "config.backup.import"),
+            listOf("PDF", "analytics", "扩展功能 > 本地数据分析", "analytics.root"),
         )
         cases.forEach { (query, id, path, option) ->
             compose.onNodeWithTag("settings.search").performTextReplacement(query)
             compose.onNodeWithText(path).assertIsDisplayed()
             compose.onNodeWithTag("settings.search.result.$id").performScrollTo().performClick()
-            compose.onNodeWithTag(option).assertExists()
-            compose.runOnIdle { assertEquals(saved, store.snapshot()) }
+            compose.runOnIdle {
+                assertNotNull(ShadowDialog.getLatestDialog().window!!.decorView.findViewWithTag<View>(option))
+                assertEquals(saved, store.snapshot())
+            }
             compose.runOnUiThread { screen.dismissChildPages() }
         }
         compose.onNodeWithTag("settings.search").performTextReplacement("")
         compose.onNodeWithTag("settings.search.result.ai").assertDoesNotExist()
         compose.runOnIdle { assertEquals(saved, store.snapshot()) }
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun downloadSearchFocusesTheComposeRowAndDismissalClearsItsHighlight() {
+        compose.onNodeWithTag("settings.search").performTextReplacement("去水印")
+        compose.onNodeWithTag("settings.search.result.download-watermark").performScrollTo().performClick()
+        compose.runOnIdle {
+            val dialog = ShadowDialog.getLatestDialog()
+            val decor = dialog.window!!.decorView
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val row = decor.findViewWithTag<View>("settings.toggle.无水印下载图集或者视频")
+            assertEquals("settings.target.download-watermark", row.getTag(com.douai.module.R.id.settings_search_target))
+            assertTrue(row.isActivated)
+            assertNotNull(row.foreground)
+            assertTrue(findNativeScroll(decor)!!.scrollY > 0)
+            screen.dismissChildPages()
+            assertFalse(row.isActivated)
+            assertNull(row.foreground)
+            assertFalse(dialog.isShowing)
+        }
     }
 
     @Test
@@ -455,7 +483,7 @@ class MiuixHostSettingsTest {
         assertEquals("#aid#.#ext#", store.getString("download_name_template", ""))
         compose.runOnUiThread { ShadowDialog.getLatestDialog().dismiss() }
         compose.onNodeWithTag("settings.search").performTextReplacement("组件")
-        compose.onNodeWithText("组件隐藏").performClick()
+        compose.onNodeWithTag("settings.category.9").performClick()
         compose.onNodeWithText("隐藏总开关").assertIsDisplayed().performClick()
         assertTrue(store.getBoolean("component_hide_enabled", false))
         saveDialogPreview("host-components")

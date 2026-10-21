@@ -119,7 +119,7 @@ public final class NativeAutoReplyIntegrationTest {
             field.setAccessible(true); field.set(fixture.hook, full);
             fixture.receive(200, "thread"); fixture.flush();
             assertEquals(0, fixture.database.imSdkContext.sends);
-            assertEquals(AutomationHistoryStore.Reason.LEDGER_WRITE_FAILED, fixture.history().get(0).reason);
+            assertEquals(AutomationHistoryStore.Reason.LEDGER_FULL, fixture.history().get(0).reason);
             assertTrue(new AutomationRateLimiter(fixture.activity).canSend("reply", 100, "200", new LocalOptions(fixture.values)));
         }
     }

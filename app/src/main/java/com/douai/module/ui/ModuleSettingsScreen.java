@@ -6,6 +6,8 @@ import android.app.Dialog;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.graphics.Color;
+import android.graphics.Rect;
+import android.graphics.drawable.Drawable;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.text.Editable;
@@ -28,6 +30,7 @@ import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.AiProviderPresets;
 import com.douai.module.config.FeatureSettings;
+import com.douai.module.config.ConfigurationCatalog;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.ThirdPartyDownloadSettings;
@@ -79,14 +82,37 @@ public final class ModuleSettingsScreen {
     private MiuixComponentHidePage miuixComponentHidePage;
     private Context miuixRowContext;
     private LinearLayout featureSearchResults;
+    private boolean closed;
+    private ScrollView categoryScroll;
+    private ScrollView searchFocusHost;
+    private View focusedSearchTarget;
+    private Drawable focusedSearchForeground;
+    private boolean focusedSearchActivated;
+    private Runnable searchFocusAction, searchFocusClear;
+    private View.OnLayoutChangeListener searchFocusLayout;
+    private long searchFocusGeneration;
     private static final SearchEntry[] FEATURE_SEARCH = {
-            new SearchEntry("ai", "AI 模型与接口", "扩展功能 > AI 模型设置", "模型 API Key 密钥 提示词 OpenAI Claude Gemini DeepSeek 流式 推理", 0),
-            new SearchEntry("speech", "文本转语音与 MiniMax", "扩展功能 > 文本转语音设置", "TTS MiniMax 语音 音色 合成 语速 音量 音调 发音字典", 1),
-            new SearchEntry("download-mode", "下载方式", "下载相关 > 下载方式", "下载 官方 第三方 解析 API", 2),
-            new SearchEntry("download-directory", "保存位置", "下载相关 > 保存位置", "下载 保存目录 保存路径 文件夹 SAF", 2),
-            new SearchEntry("download-tasks", "下载任务", "下载相关 > 下载任务", "下载 进度 失败 任务", 2),
-            new SearchEntry("download-name", "文件名模板", "下载相关 > 文件名模板", "下载 文件名 命名 模板", 2),
-            new SearchEntry("download-watermark", "无水印下载", "下载相关 > 无水印下载图集或者视频", "下载 去水印 无水印 视频 图集", 2)
+            new SearchEntry("ai", "AI 模型与接口", "扩展功能 > AI 模型设置", "模型 API Key 密钥 提示词 OpenAI Claude Gemini DeepSeek 流式 推理", SearchDestination.AI),
+            new SearchEntry("speech", "文本转语音与 MiniMax", "扩展功能 > 文本转语音设置", "TTS MiniMax 语音 音色 合成 语速 音量 音调 发音字典", SearchDestination.SPEECH),
+            new SearchEntry("download-mode", "下载方式", "下载相关 > 下载方式", "下载 官方 第三方 解析 API", SearchDestination.DOWNLOAD, "settings.option.下载方式"),
+            new SearchEntry("download-directory", "保存位置", "下载相关 > 保存位置", "下载 保存目录 保存路径 文件夹 SAF", SearchDestination.DOWNLOAD, "settings.option.保存位置"),
+            new SearchEntry("download-tasks", "下载任务", "下载相关 > 下载任务", "下载 进度 失败 任务", SearchDestination.DOWNLOAD, "settings.option.下载任务"),
+            new SearchEntry("download-name", "文件名模板", "下载相关 > 文件名模板", "下载 文件名 命名 模板", SearchDestination.DOWNLOAD, "settings.option.文件名模板"),
+            new SearchEntry("download-watermark", "无水印下载", "下载相关 > 无水印下载图集或者视频", "下载 去水印 无水印 视频 图集", SearchDestination.DOWNLOAD, "settings.toggle.无水印下载图集或者视频"),
+            new SearchEntry("auto-comment", "自动评论", "自动评论 > 评论内容与作品范围", "AI 自动评论 生成 评论提示词 作品范围 每日限制", SearchDestination.AUTO_COMMENT),
+            new SearchEntry("auto-reply", "私信自动回复", "自动回复 > 私聊与群聊", "私信 私聊 群聊 自动回复 回复提示词 接收范围 每日限制", SearchDestination.AUTO_REPLY),
+            new SearchEntry("comment-reply", "评论回复", "自动回复 > 接收评论回复", "评论回复 楼中楼 回复评论 接收评论", SearchDestination.AUTO_REPLY),
+            new SearchEntry("backup", "配置备份与恢复", "扩展功能 > 配置备份", "数据备份 导出配置 导入配置 恢复 迁移 密钥", SearchDestination.BACKUP),
+            new SearchEntry("analytics", "本地数据分析与报告", "扩展功能 > 本地数据分析", "本地分析 统计 图表 浏览历史 AI分析 报告 导出 长图 PNG PDF 分享", SearchDestination.ANALYTICS),
+            new SearchEntry("speed", "自动倍速与自动播放", "自动播放 > 倍速数值", "倍速 播放速度 自动滑动 智能滑动 暂停评论", SearchDestination.AUTOPLAY),
+            new SearchEntry("interaction", "互动自动化", "自动播放 > 互动自动化", "自动点赞 自动关注 停止自动化", SearchDestination.INTERACTION),
+            new SearchEntry("feed-filter", "视频筛选", "视频筛选 > 过滤总开关", "过滤 广告 直播 图集 关键词 时长 低赞 推荐商家", SearchDestination.FILTER),
+            new SearchEntry("component-hide", "组件隐藏", "组件隐藏 > 隐藏与透明度", "界面 隐藏 透明度 自定义控件 暂停显示", SearchDestination.COMPONENT_HIDE),
+            new SearchEntry("streak", "自动续火花", "自动续火花 > 选择用户", "续火花 好友 定时 结果未知 重试", SearchDestination.STREAK),
+            new SearchEntry("message-recall", "消息防撤回", "消息管理 > 消息防撤回", "私信 防撤回 撤回背景 消息记录", SearchDestination.MESSAGE),
+            new SearchEntry("gestures", "长按与双击手势", "界面相关 > 长按事件与双击事件", "手势 长按 双击 悬浮条 工具栏", SearchDestination.GESTURES),
+            new SearchEntry("comment-tools", "评论工具", "评论相关 > 长按操作", "复制评论 评论图片 彩色评论 后缀 替换语音", SearchDestination.COMMENT),
+            new SearchEntry("ai-chat", "AI 测试对话", "扩展功能 > AI 模型设置 > 测试对话", "AI 聊天 测试模型 对话 图片", SearchDestination.AI_CHAT)
     };
 
     public ModuleSettingsScreen(Context context, SettingsStore repository) {
@@ -127,7 +153,7 @@ public final class ModuleSettingsScreen {
         scroll.addView(content, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        addTitle("DouAi", "抖音 40.6.0");
+        addTitle("DouAi", "抖音 40.6.0 / 40.8.0");
         addScanStatus(ScanStatus.pending());
         if (repository.isInHost()) {
             addHostSettingsNotice();
@@ -233,12 +259,87 @@ public final class ModuleSettingsScreen {
     }
 
     private void openFeatureSearch(int index) {
-        if (index < 0 || index >= FEATURE_SEARCH.length) return;
-        switch (FEATURE_SEARCH[index].destination) {
-            case 0: showAiModelSettings(); break;
-            case 1: showSpeechSettings(); break;
-            default: openCategory(Category.DOWNLOAD); break;
+        if (closed || index < 0 || index >= FEATURE_SEARCH.length) return;
+        SearchEntry entry = FEATURE_SEARCH[index];
+        dismissChildPages();
+        switch (entry.destination) {
+            case AI: showAiModelSettings(); break;
+            case SPEECH: showSpeechSettings(); break;
+            case BACKUP: showConfigBackup(); break;
+            case ANALYTICS: showLocalAnalytics(); break;
+            case INTERACTION: showAutomationSettings(); break;
+            case AI_CHAT: showAiChat(); break;
+            default:
+                openCategory(entry.destination.category);
+                if (entry.targetTag != null) focusSearchTarget(entry);
+                break;
         }
+    }
+
+    /** Focus is owned by the current category dialog; it never changes the selected download source. */
+    private void focusSearchTarget(SearchEntry entry) {
+        clearSearchFocus();
+        final Dialog dialog = categoryDialog;
+        final ScrollView scroll = categoryScroll;
+        if (dialog == null || scroll == null || !dialog.isShowing()) return;
+        View target = scroll.findViewWithTag(entry.targetTag);
+        String targetId = entry.id;
+        if (target == null && entry.destination == SearchDestination.DOWNLOAD) {
+            target = scroll.findViewWithTag("settings.option.下载方式");
+            targetId = "download-mode";
+            toast("此设置属于官方下载；当前使用第三方下载，可在下载方式中切换。");
+        }
+        if (target == null) return;
+        // Native switches tag their inner control; Compose rows tag the outer view.
+        if (target instanceof Switch && target.getParent() instanceof View) target = (View) target.getParent();
+        final View selected = target;
+        final long generation = searchFocusGeneration;
+        selected.setTag(com.douai.module.R.id.settings_search_target, "settings.target." + targetId);
+        searchFocusHost = scroll;
+        searchFocusClear = () -> { if (generation == searchFocusGeneration) clearSearchFocus(); };
+        searchFocusAction = () -> {
+            if (closed || generation != searchFocusGeneration || categoryDialog != dialog
+                    || !dialog.isShowing() || !selected.isAttachedToWindow()) return;
+            if (scroll.getHeight() == 0 || selected.getHeight() == 0) return;
+            if (searchFocusLayout != null) scroll.removeOnLayoutChangeListener(searchFocusLayout);
+            searchFocusLayout = null;
+            scroll.removeCallbacks(searchFocusAction);
+            Rect bounds = new Rect();
+            selected.getDrawingRect(bounds);
+            scroll.offsetDescendantRectToMyCoords(selected, bounds);
+            scroll.scrollTo(0, Math.max(0, bounds.top - dp(12)));
+            focusedSearchTarget = selected;
+            focusedSearchForeground = selected.getForeground();
+            focusedSearchActivated = selected.isActivated();
+            selected.setActivated(true);
+            selected.setForeground(makeRounded(Color.TRANSPARENT, ACCENT, dp(8)));
+            selected.announceForAccessibility(entry.title);
+            scroll.postDelayed(searchFocusClear, 1800L);
+        };
+        searchFocusLayout = (view, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
+            if (searchFocusAction != null) scroll.post(searchFocusAction);
+        };
+        scroll.addOnLayoutChangeListener(searchFocusLayout);
+        scroll.post(searchFocusAction);
+    }
+
+    private void clearSearchFocus() {
+        searchFocusGeneration++;
+        if (searchFocusHost != null) {
+            if (searchFocusAction != null) searchFocusHost.removeCallbacks(searchFocusAction);
+            if (searchFocusClear != null) searchFocusHost.removeCallbacks(searchFocusClear);
+            if (searchFocusLayout != null) searchFocusHost.removeOnLayoutChangeListener(searchFocusLayout);
+        }
+        if (focusedSearchTarget != null) {
+            focusedSearchTarget.setForeground(focusedSearchForeground);
+            focusedSearchTarget.setActivated(focusedSearchActivated);
+        }
+        searchFocusHost = null;
+        focusedSearchTarget = null;
+        focusedSearchForeground = null;
+        searchFocusAction = null;
+        searchFocusClear = null;
+        searchFocusLayout = null;
     }
 
     private void addCategoryList() {
@@ -284,6 +385,7 @@ public final class ModuleSettingsScreen {
     }
 
     private void openCategory(Category category) {
+        if (closed || category == null) return;
         settings = repository.load();
         if (category == Category.ABOUT) {
             showOptionDialog(AboutDialog.create(context, miuixHome != null, this::showOptionDialog));
@@ -314,6 +416,8 @@ public final class ModuleSettingsScreen {
             if (categoryDialog == dialog) closeAutomationMessagePage();
             if (session != null) session.close();
             if (categoryDialog == dialog) {
+                clearSearchFocus();
+                categoryScroll = null;
                 dismissOptionDialogs();
                 closeDownloadDirectoryPicker();
                 categoryDialog = null;
@@ -362,6 +466,7 @@ public final class ModuleSettingsScreen {
             dialog.setContentView(panel);
         }
         categoryDialog = dialog;
+        categoryScroll = scroll;
         try {
             dialog.show();
             if (session != null) session.bindBackNavigation(dialog);
@@ -374,6 +479,7 @@ public final class ModuleSettingsScreen {
             closeAutomationMessagePage();
             if (session != null) session.close();
             categoryDialog = null;
+            categoryScroll = null;
         }
     }
 
@@ -438,8 +544,8 @@ public final class ModuleSettingsScreen {
                         value -> repository.putBoolean("auto_play", value));
                 addLocalSwitch("自动倍速播放", "", "auto_speed");
                 addEditableOption("倍速数值", "", effectivePlaybackSpeed(
-                                repository.getString("playback_speed", "2")), true, true, false,
-                        value -> repository.putString("playback_speed", validatePlaybackSpeed(value)));
+                                repository.getString(ConfigurationCatalog.PLAYBACK_SPEED, ConfigurationCatalog.PLAYBACK_SPEED_DEFAULT)), true, true, false,
+                        value -> repository.putString(ConfigurationCatalog.PLAYBACK_SPEED, ConfigurationCatalog.validatePlaybackSpeed(value)));
                 addLocalSwitch("打开评论时,不滑动视频", "", "pause_auto_on_comments");
                 addSwitch("滑动智能判断上下", "",
                         repository.getBoolean("smart_swipe", true), true,
@@ -545,7 +651,7 @@ public final class ModuleSettingsScreen {
             selectedControls.removeAllViews();
             try {
                 if (ThirdPartyDownloadSettings.THIRD_PARTY.equals(repository.getString(
-                        ThirdPartyDownloadSettings.METHOD, "official"))) {
+                        ThirdPartyDownloadSettings.METHOD, ConfigurationCatalog.DOWNLOAD_METHOD_DEFAULT))) {
                     buildThirdPartyDownloadControls(master);
                 } else {
                     buildOfficialDownloadControls(master);
@@ -608,7 +714,7 @@ public final class ModuleSettingsScreen {
                     repository.putBoolean("download_custom_name", value);
                 });
         addEditableOption("文件名模板", "",
-                repository.getString("download_name_template", "#author#_#aid#_#index#.#ext#"),
+                repository.getString("download_name_template", ConfigurationCatalog.DOWNLOAD_NAME_DEFAULT),
                 false, true, false, value -> repository.putString("download_name_template", value));
         addSwitch("去除下载限制", "",
                 repository.getBoolean("remove_download_limits", false), true, value -> {
@@ -1371,6 +1477,7 @@ public final class ModuleSettingsScreen {
     }
 
     private void showOptionDialog(Dialog dialog, Runnable onDismiss) {
+        if (closed) { if (onDismiss != null) onDismiss.run(); return; }
         discardDismissedOptionDialogs();
         optionDialogs.add(dialog);
         if (onDismiss != null) optionDismissActions.put(dialog, onDismiss);
@@ -1423,6 +1530,7 @@ public final class ModuleSettingsScreen {
     }
 
     public void dismissChildPages() {
+        clearSearchFocus();
         closeAutomationMessagePage();
         closeDownloadDirectoryPicker();
         dismissOptionDialogs();
@@ -1435,6 +1543,7 @@ public final class ModuleSettingsScreen {
     }
 
     public void close() {
+        closed = true;
         dismissChildPages();
         if (miuixHome != null) miuixHome.close();
     }
@@ -1721,22 +1830,8 @@ public final class ModuleSettingsScreen {
         return Math.round(value * context.getResources().getDisplayMetrics().density);
     }
 
-    private static String validatePlaybackSpeed(String value) {
-        final float speed;
-        try { speed = Float.parseFloat(value.trim()); }
-        catch (NumberFormatException failure) { throw new IllegalArgumentException("请输入 0.25 至 4 的数字"); }
-        if (!Float.isFinite(speed) || speed < 0.25f || speed > 4f) {
-            throw new IllegalArgumentException("倍速应为 0.25 至 4");
-        }
-        return value.trim();
-    }
-
     private static String effectivePlaybackSpeed(String value) {
-        try {
-            float speed = Float.parseFloat(value == null ? "" : value.trim());
-            if (Float.isFinite(speed) && speed >= 0.25f && speed <= 4f) return value.trim();
-        } catch (NumberFormatException ignored) { }
-        return "2";
+        return ConfigurationCatalog.normalizedPlaybackSpeed(value);
     }
 
     private static int parseNonNegative(String value) {
@@ -1871,12 +1966,25 @@ public final class ModuleSettingsScreen {
         }
     }
 
-    /** Small navigation index: entries never read or mutate the user's saved values. */
+    private enum SearchDestination {
+        AI(null), SPEECH(null), BACKUP(null), ANALYTICS(null), INTERACTION(null), AI_CHAT(null),
+        DOWNLOAD(Category.DOWNLOAD), AUTO_COMMENT(Category.AUTO_COMMENT), AUTO_REPLY(Category.AUTO_REPLY),
+        AUTOPLAY(Category.AUTOPLAY), FILTER(Category.FILTER), COMPONENT_HIDE(Category.COMPONENT_HIDE),
+        STREAK(Category.STREAK), MESSAGE(Category.MESSAGE), GESTURES(Category.INTERFACE), COMMENT(Category.COMMENT);
+        final Category category;
+        SearchDestination(Category category) { this.category = category; }
+    }
+
+    /** Shared navigation index for native and Miuix homes; IDs do not depend on translated labels. */
     private static final class SearchEntry {
-        final String id, title, path, terms;
-        final int destination;
-        SearchEntry(String id, String title, String path, String terms, int destination) {
-            this.id = id; this.title = title; this.path = path; this.terms = terms; this.destination = destination;
+        final String id, title, path, terms, targetTag;
+        final SearchDestination destination;
+        SearchEntry(String id, String title, String path, String terms, SearchDestination destination) {
+            this(id, title, path, terms, destination, null);
+        }
+        SearchEntry(String id, String title, String path, String terms, SearchDestination destination, String targetTag) {
+            this.id = id; this.title = title; this.path = path; this.terms = terms;
+            this.destination = destination; this.targetTag = targetTag;
         }
         String searchText() { return title + " " + path + " " + terms; }
     }

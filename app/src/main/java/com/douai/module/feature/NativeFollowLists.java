@@ -85,6 +85,14 @@ public final class NativeFollowLists implements AutoCloseable {
 
     public static boolean isAvailable() { return active != null && !active.closed; }
 
+    public static String currentAccountUid() {
+        NativeFollowLists service = active;
+        if (service == null || service.closed) return "";
+        Account account = service.accounts.current();
+        service.syncAccount(account);
+        return account == null ? "" : account.uid;
+    }
+
     /** Check at each automation entry and again before sending, including during a long fetch. */
     public static boolean ensureAccount(String uid) {
         NativeFollowLists service = active;

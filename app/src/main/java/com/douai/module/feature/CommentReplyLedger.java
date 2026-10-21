@@ -127,7 +127,12 @@ final class CommentReplyLedger {
 
     /** Writes a pending reservation synchronously; false means generation/sending must not begin. */
     boolean claim(long account, String incomingId, String rootId, int threadLimit) {
+        return claim(account, incomingId, rootId, threadLimit, "");
+    }
+
+    boolean claim(long account, String incomingId, String rootId, int threadLimit, String attempt) {
         if (account <= 0 || !validId(incomingId) || !validId(rootId)) return false;
+        if (attempt == null || !attempt.matches("[A-Za-z0-9_-]{0,100}")) return false;
         synchronized (LOCK) {
             if (persistenceFailed) return false;
             Map<String, ?> all = preferences.getAll();
@@ -151,47 +156,71 @@ final class CommentReplyLedger {
             if ((!all.containsKey(key) && count >= MAX_ENTRIES)
                     || (threadLimit > 0 && threadCount >= threadLimit)) return false;
             Record next = new Record(rootId, "pending", previous == null ? 1
-                    : deferred ? previous.attempts : previous.attempts + 1, now);
+                    : deferred ? previous.attempts : previous.attempts + 1, now, attempt);
             return save(key, next);
         }
     }
 
     /** Call BEFORE invoking the native sender. False means the native request must not be made. */
     boolean submitted(long account, String incomingId) {
+        return submitted(account, incomingId, null);
+    }
+
+    boolean submitted(long account, String incomingId, String attempt) {
         synchronized (LOCK) {
             if (persistenceFailed) return false;
             String key = key(account, incomingId);
             Record previous = record(preferences.getAll().get(key));
-            if (previous == null || !"pending".equals(previous.status)) return false;
-            return save(key, new Record(previous.rootId, "submitted", previous.attempts, clock.millis()));
+            if (!matches(previous, attempt) || !"pending".equals(previous.status)) return false;
+            return save(key, new Record(previous.rootId, "submitted", previous.attempts, clock.millis(), previous.attempt));
         }
     }
 
     /** Pauses a claim before submission without spending an attempt on foreground/queue/limit changes. */
     void defer(long account, String incomingId) {
+        defer(account, incomingId, null);
+    }
+
+    void defer(long account, String incomingId, String attempt) {
         if (account <= 0 || !validId(incomingId)) return;
         synchronized (LOCK) {
             String key = key(account, incomingId);
             Record previous = record(preferences.getAll().get(key));
-            if (previous == null || !"pending".equals(previous.status)) return;
-            save(key, new Record(previous.rootId, "deferred", previous.attempts, clock.millis()));
+            if (!matches(previous, attempt) || !"pending".equals(previous.status)) return;
+            save(key, new Record(previous.rootId, "deferred", previous.attempts, clock.millis(), previous.attempt));
+        }
+    }
+
+    /** Only the owner that proves its native boundary was never crossed may return a durable pre-send reservation. */
+    boolean deferBeforeInvocation(long account, String incomingId, String attempt) {
+        if (account <= 0 || !validId(incomingId) || attempt == null || attempt.isEmpty()) return false;
+        synchronized (LOCK) {
+            if (persistenceFailed) return false;
+            String key = key(account, incomingId);
+            Record previous = record(preferences.getAll().get(key));
+            if (!matches(previous, attempt) || !("submitted".equals(previous.status) || "pending".equals(previous.status))) return false;
+            return save(key, new Record(previous.rootId, "deferred", previous.attempts, clock.millis(), previous.attempt));
         }
     }
 
     /** Definite failure permits a bounded retry. Cancellation is terminal. Unknown results stay claimed. */
     void finish(long account, String incomingId, String status) {
+        finish(account, incomingId, status, null);
+    }
+
+    void finish(long account, String incomingId, String status, String attempt) {
         if (!"sent".equals(status) && !"failed".equals(status) && !"cancelled".equals(status)
                 && !"unknown".equals(status) && !"sending".equals(status)) return;
         synchronized (LOCK) {
             String key = key(account, incomingId);
             Record previous = record(preferences.getAll().get(key));
-            if (previous == null || "sent".equals(previous.status) || "cancelled".equals(previous.status)
+            if (!matches(previous, attempt) || "sent".equals(previous.status) || "cancelled".equals(previous.status)
                     || "ignored".equals(previous.status)
                     || retryable(previous.status)) return;
             // A timeout may later resolve to success, but cannot become a definite failure accidentally.
             if ("unknown".equals(previous.status) && !"sent".equals(status)) return;
             save(key, new Record(previous.rootId, "sending".equals(status) ? "unknown" : status,
-                    previous.attempts, clock.millis()));
+                    previous.attempts, clock.millis(), previous.attempt));
         }
     }
 
@@ -226,6 +255,42 @@ final class CommentReplyLedger {
         }
     }
 
+    /** Retains every claim: schema replays and durable thread quotas make age-only eviction unsafe. */
+    Health health() {
+        synchronized (LOCK) {
+            int total = 0, submitted = 0, unknown = 0, corrupt = 0, confirmed = 0, pending = 0, retryable = 0;
+            for (Map.Entry<String, ?> entry : preferences.getAll().entrySet()) {
+                if (!entry.getKey().startsWith(PREFIX)) continue;
+                total++;
+                Record stored = record(entry.getValue());
+                if (stored == null || stored.rootId.isEmpty() && !"ignored".equals(stored.status)) corrupt++;
+                else if ("submitted".equals(stored.status)) submitted++;
+                else if ("unknown".equals(stored.status)) unknown++;
+                else if ("pending".equals(stored.status)) pending++;
+                else if (retryable(stored.status) && stored.attempts < MAX_ATTEMPTS || "deferred".equals(stored.status)) retryable++;
+                else confirmed++;
+            }
+            return new Health(total, submitted, unknown, corrupt, confirmed, pending, retryable, persistenceFailed);
+        }
+    }
+
+    static final class Health {
+        final int total, submitted, unknown, corrupt, confirmed, pending, retryable;
+        final boolean persistenceFailed;
+        Health(int total, int submitted, int unknown, int corrupt, int confirmed, int pending, int retryable, boolean persistenceFailed) {
+            this.total = total; this.submitted = submitted; this.unknown = unknown; this.corrupt = corrupt;
+            this.confirmed = confirmed; this.pending = pending; this.retryable = retryable; this.persistenceFailed = persistenceFailed;
+        }
+        boolean blocked() { return persistenceFailed || corrupt > 0 || total >= MAX_ENTRIES; }
+        String diagnostic() {
+            String reason = persistenceFailed ? "写入失败，已暂停新发送" : corrupt > 0 ? "记录损坏，已暂停新发送"
+                    : total >= MAX_ENTRIES ? "容量已满，已暂停新回复" : "账本正常";
+            return "评论回复账本：" + reason + "；占用 " + total + "/" + MAX_ENTRIES
+                    + "；已提交 " + submitted + "；结果未知 " + unknown + "；损坏 " + corrupt
+                    + "。保留防重与线程额度记录，清空发送历史不会释放账本。";
+        }
+    }
+
     private boolean save(String key, Record record) {
         return commit(preferences.edit().putString(key, encode(record)));
     }
@@ -233,7 +298,7 @@ final class CommentReplyLedger {
     private static String encode(Record record) {
         try {
             return new JSONObject().put("root", record.rootId).put("status", record.status)
-                    .put("attempts", record.attempts).put("at", record.timestamp).toString();
+                    .put("attempts", record.attempts).put("at", record.timestamp).put("attempt", record.attempt).toString();
         } catch (JSONException impossible) { throw new IllegalStateException(impossible); }
     }
 
@@ -247,7 +312,7 @@ final class CommentReplyLedger {
                 Record previous = record(entry.getValue());
                 if (previous == null || !"pending".equals(previous.status)) continue;
                 editor.putString(entry.getKey(), encode(new Record(previous.rootId, "deferred", previous.attempts,
-                        clock.millis())));
+                        clock.millis(), previous.attempt)));
                 changed = true;
             }
             if (changed) commit(editor);
@@ -264,6 +329,9 @@ final class CommentReplyLedger {
     }
 
     private static boolean validId(String id) { return id != null && !id.trim().isEmpty() && id.length() <= 512; }
+    private static boolean matches(Record record, String attempt) {
+        return record != null && (attempt == null || attempt.equals(record.attempt));
+    }
     private static boolean retryable(String status) { return "failed".equals(status) || "deferred".equals(status); }
     private static boolean consumesThread(String status) {
         return "pending".equals(status) || "submitted".equals(status) || "unknown".equals(status)
@@ -280,11 +348,13 @@ final class CommentReplyLedger {
                 String root = json.getString("root");
                 int attempts = json.getInt("attempts");
                 long at = json.getLong("at");
+                String attempt = json.optString("attempt", "");
                 if ((validId(root) || (root.isEmpty() && "ignored".equals(status))) && attempts > 0 && at >= 0
+                        && attempt.matches("[A-Za-z0-9_-]{0,100}")
                         && ("pending".equals(status) || "submitted".equals(status) || "sent".equals(status)
                         || "unknown".equals(status) || "cancelled".equals(status) || "ignored".equals(status)
                         || retryable(status))) {
-                    return new Record(root, status, attempts, at);
+                    return new Record(root, status, attempts, at, attempt);
                 }
             } catch (JSONException ignored) { }
         }
@@ -296,12 +366,18 @@ final class CommentReplyLedger {
         final String status;
         final int attempts;
         final long timestamp;
+        final String attempt;
 
         Record(String rootId, String status, int attempts, long timestamp) {
+            this(rootId, status, attempts, timestamp, "");
+        }
+
+        Record(String rootId, String status, int attempts, long timestamp, String attempt) {
             this.rootId = rootId;
             this.status = status;
             this.attempts = attempts;
             this.timestamp = timestamp;
+            this.attempt = attempt;
         }
     }
 }

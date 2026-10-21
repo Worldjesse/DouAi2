@@ -35,6 +35,7 @@ public final class AutomationDiagnostics {
             case PERSISTENCE_FAILED: return "提交记录保存失败";
             case ALLOWANCE_EXHAUSTED: return "发送额度已用完";
             case DUPLICATE: return "重复任务";
+            case LEDGER_FULL: return "发送记录已满，请在历史记录中核对发送状态";
             case AI_HTTP_ERROR: return "AI 接口请求失败";
             case AI_RATE_LIMITED: return "AI 接口限流";
             case AI_AUTH_FAILED: return "AI 接口认证失败";

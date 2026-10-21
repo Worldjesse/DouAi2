@@ -1,0 +1,44 @@
+package com.douai.module.scan;
+
+import org.junit.Test;
+
+import java.io.FileInputStream;
+import java.util.HashSet;
+import java.util.Set;
+
+import static org.junit.Assert.*;
+
+/** The new host profile must preserve the previously shipped host rules as a separate contract. */
+public final class HostRuleAssetProfilesTest {
+    @Test public void supportedProfilesHaveSeparateAssetsWithTheCompleteFeatureRuleCoverage() throws Exception {
+        assertNotEquals(HostAdaptation.PROFILE_406.rulesAsset, HostAdaptation.PROFILE_408.rulesAsset);
+        HostRuleSet older = rules(HostAdaptation.PROFILE_406);
+        HostRuleSet newer = rules(HostAdaptation.PROFILE_408);
+        assertEquals("ed977e2ee39436476e4242f1db148d412377e50b256afc5408918a311a1b4e9b",
+                older.getFingerprint());
+        assertEquals(HostAdaptation.PROFILE_406.fingerprint, older.getFingerprint());
+        assertEquals(HostAdaptation.PROFILE_408.fingerprint, newer.getFingerprint());
+        assertNotEquals(older.getFingerprint(), newer.getFingerprint());
+        assertEquals(229, older.getRules().size());
+        Set<String> olderIds = ids(older), newerIds = ids(newer);
+        assertEquals(olderIds, newerIds);
+        for (HostFeatureCatalog.Feature feature : HostFeatureCatalog.getFeatures()) {
+            for (String id : feature.rules) {
+                assertTrue("40.6.0 " + feature.id + " references missing rule " + id, olderIds.contains(id));
+                assertTrue("40.8.0 " + feature.id + " references missing rule " + id, newerIds.contains(id));
+            }
+        }
+    }
+
+    private static HostRuleSet rules(HostAdaptation.Profile profile) throws Exception {
+        try (FileInputStream input = new FileInputStream(HostApkTestProfile.assetFile(profile.rulesAsset))) {
+            return HostRuleSet.parse(input);
+        }
+    }
+
+    private static Set<String> ids(HostRuleSet rules) {
+        Set<String> ids = new HashSet<>();
+        for (HostRule rule : rules.getRules()) ids.add(rule.getId());
+        return ids;
+    }
+}

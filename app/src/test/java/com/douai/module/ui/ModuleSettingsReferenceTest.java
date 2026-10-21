@@ -113,13 +113,18 @@ public final class ModuleSettingsReferenceTest {
         }
     }
 
-    @Test public void searchFindsAiSpeechAndDownloadPathsAndOnlyNavigates() {
+    @Test public void searchFindsMajorFeaturePagesAndOnlyNavigates() {
         Map<String, Object> saved = new HashMap<>(store.values);
         EditText search = home.findViewWithTag("settings.search");
         String[][] cases = {{"API Key", "ai", "扩展功能 > AI 模型设置", "settings.option.添加模型配置"},
                 {"minimax", "speech", "扩展功能 > 文本转语音设置", "settings.option.语音来源"},
                 {"保存目录", "download-directory", "下载相关 > 保存位置", "settings.option.保存位置"},
-                {"去水印", "download-watermark", "下载相关 > 无水印下载图集或者视频", "settings.toggle.无水印下载图集或者视频"}};
+                {"去水印", "download-watermark", "下载相关 > 无水印下载图集或者视频", "settings.toggle.无水印下载图集或者视频"},
+                {"自动评论", "auto-comment", "自动评论 > 评论内容与作品范围", "settings.toggle.开启自动评论"},
+                {"私信自动回复", "auto-reply", "自动回复 > 私聊与群聊", "settings.toggle.开启自动回复"},
+                {"评论回复", "comment-reply", "自动回复 > 接收评论回复", "settings.toggle.接收评论回复"},
+                {"导入配置", "backup", "扩展功能 > 配置备份", "config.backup.import"},
+                {"PDF", "analytics", "扩展功能 > 本地数据分析", "analytics.root"}};
         for (String[] item : cases) {
             search.setText(item[0]);
             View result = home.findViewWithTag("settings.search.result." + item[1]);
@@ -136,6 +141,70 @@ public final class ModuleSettingsReferenceTest {
         search.setText("");
         assertEquals(View.GONE, home.findViewWithTag("settings.search.results").getVisibility());
         assertEquals(saved, store.values);
+    }
+
+    @Test public void downloadSearchScrollsToEachSpecificRowAndRestoresItsHighlight() {
+        EditText search = home.findViewWithTag("settings.search");
+        String[][] targets = {{"download-mode", "settings.option.下载方式"},
+                {"download-directory", "settings.option.保存位置"},
+                {"download-tasks", "settings.option.下载任务"},
+                {"download-name", "settings.option.文件名模板"},
+                {"download-watermark", "settings.toggle.无水印下载图集或者视频"}};
+        Map<String, Object> saved = new HashMap<>(store.values);
+        for (String[] target : targets) {
+            search.setText("下载");
+            home.findViewWithTag("settings.search.result." + target[0]).performClick();
+            Dialog dialog = ShadowDialog.getLatestDialog();
+            View decor = dialog.getWindow().getDecorView();
+            decor.measure(View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(260, View.MeasureSpec.EXACTLY));
+            decor.layout(0, 0, 360, 260);
+            ShadowLooper.idleMainLooper();
+            View row = decor.findViewWithTag(target[1]);
+            if (row instanceof Switch) row = (View) row.getParent();
+            assertEquals("settings.target." + target[0], row.getTag(com.douai.module.R.id.settings_search_target));
+            assertTrue(target[0], row.isActivated());
+            assertNotNull(row.getForeground());
+            if ("download-watermark".equals(target[0])) {
+                assertTrue(collect(decor, android.widget.ScrollView.class).get(0).getScrollY() > 0);
+            }
+            ShadowLooper.idleMainLooper(2, TimeUnit.SECONDS);
+            assertFalse(row.isActivated());
+            assertNull(row.getForeground());
+            assertEquals(saved, store.values);
+            screen.dismissChildPages();
+        }
+    }
+
+    @Test public void unavailableOfficialSearchTargetsExplainTheSelectedModeWithoutChangingIt() {
+        store.putString(ThirdPartyDownloadSettings.METHOD, ThirdPartyDownloadSettings.THIRD_PARTY);
+        Map<String, Object> saved = new HashMap<>(store.values);
+        EditText search = home.findViewWithTag("settings.search");
+        search.setText("去水印");
+        home.findViewWithTag("settings.search.result.download-watermark").performClick();
+        View decor = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        View mode = decor.findViewWithTag("settings.option.下载方式");
+        assertEquals("settings.target.download-mode", mode.getTag(com.douai.module.R.id.settings_search_target));
+        assertNull(decor.findViewWithTag("settings.toggle.无水印下载图集或者视频"));
+        assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("当前使用第三方下载"));
+        assertEquals(saved, store.values);
+    }
+
+    @Test public void closingTheScreenCancelsDeferredSearchFocusAndRejectsStaleNavigation() {
+        EditText search = home.findViewWithTag("settings.search");
+        search.setText("保存目录");
+        View result = home.findViewWithTag("settings.search.result.download-directory");
+        result.performClick();
+        Dialog dialog = ShadowDialog.getLatestDialog();
+        View row = dialog.getWindow().getDecorView().findViewWithTag("settings.option.保存位置");
+        screen.close();
+        ShadowLooper.idleMainLooper(3, TimeUnit.SECONDS);
+        assertFalse(dialog.isShowing());
+        assertFalse(row.isActivated());
+        assertNull(row.getForeground());
+        result.performClick();
+        assertSame(dialog, ShadowDialog.getLatestDialog());
+        assertFalse(dialog.isShowing());
     }
 
     @Test public void settingsSwitchRowsKeepCompactLabelsAndVoiceCommentExplainsItsContentPolicy() {

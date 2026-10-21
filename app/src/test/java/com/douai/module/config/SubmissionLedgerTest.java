@@ -8,6 +8,8 @@ import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
+import java.util.Collections;
+import org.json.JSONObject;
 import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class)
@@ -94,5 +96,89 @@ public final class SubmissionLedgerTest {
         assertFalse(ledger.complete(first, "one", "cancelled", 20));
         assertFalse(ledger.complete(first, "one", "sent", -1));
         assertFalse(preferences.getAll().toString().contains("comment:1:work"));
+    }
+
+    @Test public void reservationDistinguishesDuplicatesFullStorageAndInvalidInput() {
+        String scope = SubmissionLedger.accountScope("1");
+        assertEquals(SubmissionLedger.ReserveResult.INVALID, ledger.reserve("raw", "one", 10, scope));
+        assertEquals(SubmissionLedger.ReserveResult.RESERVED, ledger.reserve(first, "one", 10, scope));
+        assertEquals(SubmissionLedger.ReserveResult.DUPLICATE, ledger.reserve(first, "two", 20, scope));
+        assertTrue(ledger.reserve(second, "two", 20));
+        assertEquals(SubmissionLedger.ReserveResult.FULL, ledger.reserve(SubmissionLedger.identity("third"), "three", 30, scope));
+        SubmissionLedger broken = new SubmissionLedger(preferences, 2, editor -> false);
+        assertFalse(broken.complete(first, "one", "sent", 40));
+        assertEquals(SubmissionLedger.ReserveResult.STORAGE_FAILED, ledger.reserve(first, "again", 50, scope));
+    }
+
+    @Test public void currentProcessCannotReleaseUnknownReservations() {
+        String scope = SubmissionLedger.accountScope("1");
+        assertEquals(SubmissionLedger.ReserveResult.RESERVED, ledger.reserve(first, "one", 10, scope));
+        assertTrue(ledger.complete(first, "one", "unknown", 20));
+        SubmissionLedger.Entry entry = ledger.inspect(scope, Collections.emptySet(), 300_000).entries.get(0);
+        assertFalse(entry.recoverable);
+        assertFalse(ledger.reconcile(entry, scope, false, 300_000));
+        assertTrue(ledger.contains(first));
+    }
+
+    @Test public void explicitRecoveryIsAccountScopedAndCannotUseOtherLedger() throws Exception {
+        String scope = SubmissionLedger.accountScope("1"), other = SubmissionLedger.accountScope("2");
+        ledger.reserve(first, "one", 10, scope); previousProcess(first);
+        assertTrue(ledger.inspect(other, Collections.singleton(first), 300_000).entries.isEmpty());
+        SubmissionLedger.Entry entry = ledger.inspect(scope, Collections.emptySet(), 300_000).entries.get(0);
+        assertTrue(entry.recoverable);
+        assertFalse(ledger.reconcile(entry, other, false, 300_000));
+        SharedPreferences copy = RuntimeEnvironment.getApplication().getSharedPreferences("other-ledger", 0);
+        copy.edit().putString("send." + first, preferences.getString("send." + first, "")).commit();
+        assertFalse(new SubmissionLedger(copy, 2).reconcile(entry, scope, false, 300_000));
+        assertTrue(ledger.reconcile(entry, scope, false, 300_000));
+        assertFalse(ledger.contains(first));
+        assertTrue(ledger.reserve(first, "new", 300_001));
+        assertFalse(ledger.complete(first, "one", "sent", 300_002));
+    }
+
+    @Test public void changedRecordOrRecentReservationCannotBeReconciled() throws Exception {
+        String scope = SubmissionLedger.accountScope("1");
+        ledger.reserve(first, "one", 10, scope); previousProcess(first);
+        assertFalse(ledger.inspect(scope, Collections.emptySet(), 100).entries.get(0).recoverable);
+        SubmissionLedger.Entry old = ledger.inspect(scope, Collections.emptySet(), 300_000).entries.get(0);
+        assertTrue(ledger.complete(first, "one", "sent", 300_000));
+        assertFalse(ledger.reconcile(old, scope, false, 300_001));
+        assertTrue(ledger.contains(first));
+    }
+
+    @Test public void confirmSuccessRetainsDedupeAndLegacyNeedsAccountCheckedHistory() throws Exception {
+        String scope = SubmissionLedger.accountScope("1");
+        preferences.edit().putString("send." + first, new JSONObject().put("version", 1)
+                .put("attempt", "old").put("status", "unknown").put("timestamp", 10).toString())
+                .putString("send." + second, "corrupt").commit();
+        SubmissionLedger.Snapshot unassigned = ledger.inspect(scope, Collections.emptySet(), 300_000);
+        assertEquals(1, unassigned.unassigned); assertEquals(1, unassigned.corrupt); assertEquals(2, unassigned.total);
+        assertTrue(unassigned.entries.isEmpty());
+        SubmissionLedger.Entry entry = ledger.inspect(scope, Collections.singleton(first), 300_000).entries.get(0);
+        assertTrue(ledger.reconcile(entry, scope, true, 300_000));
+        assertTrue(ledger.contains(first));
+        assertEquals("sent", ledger.inspect(scope, Collections.emptySet(), 300_001).entries.get(0).status);
+        assertFalse(preferences.getAll().toString().contains("account:1"));
+    }
+
+    @Test public void malformedKeysAreCountedAsCorruptAndCannotCrashTheRecordList() throws Exception {
+        String scope = SubmissionLedger.accountScope("1");
+        ledger.reserve(first, "one", 10, scope);
+        preferences.edit().putString("send.x", preferences.getString("send." + first, "")).commit();
+        SubmissionLedger.Snapshot snapshot = ledger.inspect(scope, Collections.emptySet(), 300_000);
+        assertEquals(2, snapshot.total); assertEquals(1, snapshot.corrupt); assertEquals(1, snapshot.entries.size());
+    }
+
+    @Test public void failedLegacyGuardReleaseKeepsTheDurableClaim() throws Exception {
+        String scope = SubmissionLedger.accountScope("1");
+        ledger.reserve(first, "one", 10, scope); previousProcess(first);
+        SubmissionLedger.Entry entry = ledger.inspect(scope, Collections.emptySet(), 300_000).entries.get(0);
+        assertFalse(ledger.reconcile(entry, scope, false, 300_000, () -> false));
+        assertTrue(ledger.contains(first));
+    }
+
+    private void previousProcess(String identity) throws Exception {
+        JSONObject record = new JSONObject(preferences.getString("send." + identity, ""));
+        preferences.edit().putString("send." + identity, record.put("session", "previous-process").toString()).commit();
     }
 }

@@ -73,22 +73,7 @@ public final class ChatImageLoader {
         Bitmap opaque = null;
         try {
             ChatMediaLoader.checkCancelled(cancellation);
-            Matrix orientation = new Matrix();
-            try {
-                ExifInterface exif = new ExifInterface(new ByteArrayInputStream(source));
-                switch (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
-                    case ExifInterface.ORIENTATION_FLIP_HORIZONTAL: orientation.setScale(-1, 1); break;
-                    case ExifInterface.ORIENTATION_ROTATE_180: orientation.setRotate(180); break;
-                    case ExifInterface.ORIENTATION_FLIP_VERTICAL: orientation.setScale(1, -1); break;
-                    case ExifInterface.ORIENTATION_TRANSPOSE:
-                        orientation.setRotate(90); orientation.postScale(-1, 1); break;
-                    case ExifInterface.ORIENTATION_ROTATE_90: orientation.setRotate(90); break;
-                    case ExifInterface.ORIENTATION_TRANSVERSE:
-                        orientation.setRotate(270); orientation.postScale(-1, 1); break;
-                    case ExifInterface.ORIENTATION_ROTATE_270: orientation.setRotate(270); break;
-                    default: break;
-                }
-            } catch (java.io.IOException ignored) { }
+            Matrix orientation = orientation(source);
             ChatMediaLoader.checkCancelled(cancellation);
             rotated = Bitmap.createBitmap(decoded, 0, 0, decoded.getWidth(), decoded.getHeight(), orientation, true);
             opaque = Bitmap.createBitmap(rotated.getWidth(), rotated.getHeight(), Bitmap.Config.ARGB_8888);
@@ -106,6 +91,27 @@ public final class ChatImageLoader {
             if (rotated != null && rotated != decoded) rotated.recycle();
             decoded.recycle();
         }
+    }
+
+    /** Share EXIF orientation without routing thumbnails through AI media encoding. */
+    static Matrix orientation(byte[] source) {
+        Matrix orientation = new Matrix();
+        try {
+            ExifInterface exif = new ExifInterface(new ByteArrayInputStream(source));
+            switch (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+                case ExifInterface.ORIENTATION_FLIP_HORIZONTAL: orientation.setScale(-1, 1); break;
+                case ExifInterface.ORIENTATION_ROTATE_180: orientation.setRotate(180); break;
+                case ExifInterface.ORIENTATION_FLIP_VERTICAL: orientation.setScale(1, -1); break;
+                case ExifInterface.ORIENTATION_TRANSPOSE:
+                    orientation.setRotate(90); orientation.postScale(-1, 1); break;
+                case ExifInterface.ORIENTATION_ROTATE_90: orientation.setRotate(90); break;
+                case ExifInterface.ORIENTATION_TRANSVERSE:
+                    orientation.setRotate(270); orientation.postScale(-1, 1); break;
+                case ExifInterface.ORIENTATION_ROTATE_270: orientation.setRotate(270); break;
+                default: break;
+            }
+        } catch (java.io.IOException ignored) { }
+        return orientation;
     }
 
     public static Bitmap thumbnail(ChatImage image) {

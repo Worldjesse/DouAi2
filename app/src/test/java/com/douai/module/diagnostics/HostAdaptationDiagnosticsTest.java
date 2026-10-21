@@ -24,6 +24,37 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class HostAdaptationDiagnosticsTest {
+    @Test public void hiddenSkipSeparatesTheRequestedSwitchFromCompleteInstallationAndRuntimeCounts() {
+        Bundle snapshot = new Bundle();
+        snapshot.putBoolean("hidden_skip_enabled", true);
+        snapshot.putBoolean("hidden_skip_installed", false);
+        String unavailable = HostAdaptationDiagnostics.describe(snapshot);
+        assertTrue(unavailable.contains("开关开启，Hook 未完整安装"));
+        snapshot.putBoolean("hidden_skip_installed", true);
+        snapshot.putLong("hidden_skip_current_hits", 3);
+        snapshot.putLong("hidden_skip_current_blocked", 2);
+        snapshot.putLong("hidden_skip_background_hits", 4);
+        snapshot.putLong("hidden_skip_background_blocked", 1);
+        String installed = HostAdaptationDiagnostics.describe(snapshot);
+        assertTrue(installed.contains("开关开启，四处 Hook 完整安装"));
+        assertTrue(installed.contains("当前安全召回：命中 3，拦截 2"));
+        assertTrue(installed.contains("后台自动移除：命中 4，拦截 1"));
+        assertTrue(installed.contains("实际行为仍需真机确认"));
+    }
+
+    @Test public void hiddenSkipCountersAreBoundedAndLegacySnapshotsStayUnchanged() {
+        Bundle snapshot = new Bundle();
+        assertFalse(HostAdaptationDiagnostics.describe(snapshot).contains("视频跳过保护"));
+        snapshot.putBoolean("hidden_skip_enabled", false);
+        snapshot.putBoolean("hidden_skip_installed", true);
+        snapshot.putLong("hidden_skip_current_hits", -4);
+        snapshot.putLong("hidden_skip_background_blocked", Long.MAX_VALUE);
+        String detail = HostAdaptationDiagnostics.describe(snapshot);
+        assertTrue(detail.contains("开关关闭，四处 Hook 完整安装"));
+        assertTrue(detail.contains("当前安全召回：命中 0"));
+        assertTrue(detail.contains("后台自动移除：命中 0，拦截 1000000000"));
+    }
+
     @Test public void unknownVersionRemainsUnverifiedEvenWithUniqueRulesAndInstalledHooks() {
         Bundle snapshot = new Bundle();
         snapshot.putBoolean("auto_follow_hook_installed", true);
@@ -38,15 +69,31 @@ public final class HostAdaptationDiagnosticsTest {
 
     @Test public void versionMatchDoesNotVerifyAChangedRuleset() {
         Bundle snapshot = new Bundle();
-        HostAdaptationDiagnostics.append(snapshot, version("40.6.0", 400601L), "changed", report(""));
+        HostAdaptationDiagnostics.append(snapshot, version("40.8.0", 400801L), "changed", report(""));
         assertTrue(snapshot.getBoolean("host_version_profile_matched"));
         assertFalse(snapshot.getBoolean("host_adaptation_static_verified"));
         assertTrue(HostAdaptationDiagnostics.describe(snapshot).contains("规则配置未绑定已验证证据"));
     }
 
-    @Test public void diagnosesAmbiguousRuleAndSeparatesInstallationFromRuleMatch() {
+    @Test public void legacyVersionUsesItsOwnRulesAndRejectsTheNewVersionFingerprint() {
         Bundle snapshot = new Bundle();
         HostAdaptationDiagnostics.append(snapshot, version("40.6.0", 400601L),
+                HostAdaptation.PROFILE_406.fingerprint, report(""));
+        assertTrue(snapshot.getBoolean("host_adaptation_static_verified"));
+        assertEquals(HostAdaptation.PROFILE_406.rulesAsset,
+                snapshot.getString("host_adaptation_rules_asset"));
+        assertTrue(HostAdaptationDiagnostics.describe(snapshot).contains("匹配 40.6.0"));
+        HostAdaptationDiagnostics.append(snapshot, version("40.6.0", 400601L),
+                HostAdaptation.PROFILE_408.fingerprint, report(""));
+        assertFalse(snapshot.getBoolean("host_adaptation_static_verified"));
+        HostAdaptationDiagnostics.append(snapshot, version("40.8.0", 400801L),
+                HostAdaptation.PROFILE_406.fingerprint, report(""));
+        assertFalse(snapshot.getBoolean("host_adaptation_static_verified"));
+    }
+
+    @Test public void diagnosesAmbiguousRuleAndSeparatesInstallationFromRuleMatch() {
+        Bundle snapshot = new Bundle();
+        HostAdaptationDiagnostics.append(snapshot, version("40.8.0", 400801L),
                 HostAdaptation.VERIFIED_RULES_FINGERPRINT, report("feed_holder_quick_root"));
         assertTrue(snapshot.getBoolean("host_adaptation_static_verified"));
         assertFalse(snapshot.getBoolean("capability.auto_follow.rules_unique"));
@@ -87,7 +134,7 @@ public final class HostAdaptationDiagnosticsTest {
         snapshot.putBoolean("feature.local_analytics.installed", true);
         snapshot.putBoolean("feature.media_model.installed", true);
         snapshot.putString("feature.native_auto_reply.failure", "NoSuchMethodException: fixture.Sender.send()");
-        HostAdaptationDiagnostics.append(snapshot, version("40.6.0", 400601L),
+        HostAdaptationDiagnostics.append(snapshot, version("40.8.0", 400801L),
                 HostAdaptation.VERIFIED_RULES_FINGERPRINT, report("adv_im_global_received"));
         assertFalse(snapshot.getBoolean("capability.native_auto_reply.rules_unique"));
         assertTrue(snapshot.getString("capability.native_auto_reply.rule_gaps").contains("adv_im_global_received=AMBIGUOUS"));
@@ -102,7 +149,7 @@ public final class HostAdaptationDiagnosticsTest {
         Bundle snapshot = new Bundle();
         snapshot.putBoolean("feature.comment_tts.installed", true);
         snapshot.putBoolean("auto_like_hook_installed", true);
-        HostAdaptationDiagnostics.append(snapshot, version("40.6.0", 400601L),
+        HostAdaptationDiagnostics.append(snapshot, version("40.8.0", 400801L),
                 HostAdaptation.VERIFIED_RULES_FINGERPRINT, report("dm_speech_record_state"));
 
         assertFalse(snapshot.getBoolean("capability.dm_speech.rules_unique"));
@@ -122,7 +169,7 @@ public final class HostAdaptationDiagnosticsTest {
         String constructorFailure = "NoSuchMethodException: fixture.Audio(java.io.File,java.util.List,java.lang.Long)";
         snapshot.putString("feature.dm_speech.failure", fieldFailure);
         snapshot.putString("feature.comment_tts.failure", constructorFailure);
-        HostAdaptationDiagnostics.append(snapshot, version("40.6.0", 400601L),
+        HostAdaptationDiagnostics.append(snapshot, version("40.8.0", 400801L),
                 HostAdaptation.VERIFIED_RULES_FINGERPRINT, report(""));
 
         assertTrue(snapshot.getBoolean("capability.dm_speech.rules_unique"));
@@ -139,7 +186,7 @@ public final class HostAdaptationDiagnosticsTest {
         snapshot.putBoolean("feature.dm_speech.installed", true);
         snapshot.putBoolean("feature.comment_tts.installed", true);
         snapshot.putString("feature.dm_speech.failure", "obsolete field failure");
-        HostAdaptationDiagnostics.append(snapshot, version("40.6.0", 400601L),
+        HostAdaptationDiagnostics.append(snapshot, version("40.8.0", 400801L),
                 HostAdaptation.VERIFIED_RULES_FINGERPRINT, report(""));
 
         assertTrue(snapshot.getBoolean("capability.dm_speech.installed"));

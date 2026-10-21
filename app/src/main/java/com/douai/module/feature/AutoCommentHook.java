@@ -83,7 +83,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         this.publisher = publisher;
         rateLimiter = new AutomationRateLimiter(this.context);
         submissions = new SubmissionLedger(this.context.getSharedPreferences(
-                "douai_comment_submissions", Context.MODE_PRIVATE), 1000);
+                SubmissionLedger.COMMENT_FILE, Context.MODE_PRIVATE), SubmissionLedger.DEFAULT_CAPACITY);
         this.log = log;
         this.mediaReads = mediaReads;
         queue = new AutoCommentQueue<>(new AutoCommentQueue.Scheduler() {
@@ -435,8 +435,13 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         String identity = SubmissionLedger.identity(task.identity);
         String attempt = java.util.UUID.randomUUID().toString();
         if (!valid(task)) { result.accept("cancelled"); return; }
-        if (!submissions.reserve(identity, attempt, System.currentTimeMillis())) {
-            task.reason = AutomationHistoryStore.Reason.PERSISTENCE_FAILED;
+        SubmissionLedger.ReserveResult reserved = submissions.reserve(identity, attempt, System.currentTimeMillis(),
+                SubmissionLedger.accountScope(Long.toString(task.account)));
+        if (reserved != SubmissionLedger.ReserveResult.RESERVED) {
+            task.reason = reserved == SubmissionLedger.ReserveResult.FULL ? AutomationHistoryStore.Reason.LEDGER_FULL
+                    : reserved == SubmissionLedger.ReserveResult.DUPLICATE ? AutomationHistoryStore.Reason.DUPLICATE
+                    : AutomationHistoryStore.Reason.PERSISTENCE_FAILED;
+            safeLog("Automatic comment reservation rejected: " + reserved.name());
             result.accept("cancelled");
             return;
         }

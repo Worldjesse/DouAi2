@@ -138,7 +138,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
         this.dispatcher.setOptions(options);
         state = context.getSharedPreferences("douai_message_state", Context.MODE_PRIVATE);
         streakLedger = new StreakSendLedger(state);
-        replyLedger = new SubmissionLedger(context.getSharedPreferences("douai_reply_submissions", Context.MODE_PRIVATE), 1000);
+        replyLedger = new SubmissionLedger(context.getSharedPreferences(SubmissionLedger.REPLY_FILE, Context.MODE_PRIVATE), SubmissionLedger.DEFAULT_CAPACITY);
         rateLimiter = new AutomationRateLimiter(context);
         resetToken = state.getString("streak.reset_token", "");
         recall = new BehaviorHookGroup("prevent_message_recall", this.log);
@@ -624,10 +624,14 @@ public final class NativeMessagingHooks implements AutoCloseable {
                                 reservation.set(rateLimiter.tryReserve(AutomationHistoryStore.REPLY,
                                         account, recipient, options));
                                 if (reservation.get() == null) { operation.reason = Reason.ALLOWANCE_EXHAUSTED; return false; }
-                                if (!replyLedger.reserve(operation.ledgerIdentity, operation.attempt, System.currentTimeMillis())) {
+                                SubmissionLedger.ReserveResult reserved = replyLedger.reserve(operation.ledgerIdentity,
+                                        operation.attempt, System.currentTimeMillis(), SubmissionLedger.accountScope(Long.toString(account)));
+                                if (reserved != SubmissionLedger.ReserveResult.RESERVED) {
                                     rateLimiter.release(reservation.get());
                                     reservation.set(null);
-                                    operation.reason = Reason.LEDGER_WRITE_FAILED;
+                                    operation.reason = reserved == SubmissionLedger.ReserveResult.FULL ? Reason.LEDGER_FULL
+                                            : reserved == SubmissionLedger.ReserveResult.DUPLICATE ? Reason.DUPLICATE : Reason.LEDGER_WRITE_FAILED;
+                                    safeLog("Automatic reply reservation rejected: " + reserved.name());
                                     return false;
                                 }
                                 operation.reserved = true;
