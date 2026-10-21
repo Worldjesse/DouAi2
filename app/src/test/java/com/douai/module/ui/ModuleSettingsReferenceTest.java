@@ -95,7 +95,7 @@ public final class ModuleSettingsReferenceTest {
                 {"AUTO_COMMENT", "开启自动评论", "评论模式", "评论内容", "语音评论", "作品范围", "素材识别",
                         "每日最大评论数", "同一作者评论间隔（分钟）", "发送与记录"},
                 {"COMMENT", "评论自动添加后缀", "后缀内容", "替换语音文件",
-                        "评论自动文本转语音", "长按操作", "彩色评论", "彩色评论类型"},
+                        "评论转语音", "#长按发送转语音（全局）", "长按操作", "彩色评论", "彩色评论类型"},
                 {"STREAK", "自动续火花", "选择用户", "续火花内容", "续火花成功弹出Tip",
                         "重试结果未知的续火花", "清空续火花记录", "续火花限制时间", "内容Api"},
                 {"MESSAGE", "消息防撤回", "自己撤回的消息", "对方撤回的消息", "撤回的背景色", "替换私聊语音",
@@ -124,7 +124,9 @@ public final class ModuleSettingsReferenceTest {
                 {"私信自动回复", "auto-reply", "自动回复 > 私聊与群聊", "settings.toggle.开启自动回复"},
                 {"评论回复", "comment-reply", "自动回复 > 接收评论回复", "settings.toggle.接收评论回复"},
                 {"导入配置", "backup", "扩展功能 > 配置备份", "config.backup.import"},
-                {"PDF", "analytics", "扩展功能 > 本地数据分析", "analytics.root"}};
+                {"PDF", "analytics", "扩展功能 > 本地数据分析", "analytics.root"},
+                {"调试", "debug-logs", "关于 > 调试与日志", "debug.logs.enabled"},
+                {"#长按", "hash-long-press-voice", "评论相关 > #长按发送转语音（全局）", "settings.toggle.#长按发送转语音（全局）"}};
         for (String[] item : cases) {
             search.setText(item[0]);
             View result = home.findViewWithTag("settings.search.result." + item[1]);
@@ -176,6 +178,25 @@ public final class ModuleSettingsReferenceTest {
         }
     }
 
+    @Test public void commentMainPageKeepsGlobalLongPressBesideTheExistingSpeechPage() {
+        store.putBoolean("comment_tts", true);
+        store.putBoolean("dm_tts", true);
+        View comment = openCategory("COMMENT");
+        assertNull(comment.findViewWithTag("settings.toggle.评论自动文本转语音"));
+        Switch global = toggle(comment, "#长按发送转语音（全局）");
+        assertFalse(global.isChecked());
+        assertTrue(containsText(comment, "适用于私信、群聊和评论"));
+        assertTrue(containsText(comment, "只发送语音，不发送文字"));
+        global.setChecked(true);
+        option(comment, "评论转语音").performClick();
+        View page = ShadowDialog.getLatestDialog().getWindow().getDecorView();
+        assertTrue(toggle(page, "评论自动文本转语音").isChecked());
+        assertNull(page.findViewWithTag("settings.toggle.#长按发送转语音（全局）"));
+        assertTrue(store.getBoolean("hash_long_press_voice", false));
+        assertTrue(store.getBoolean("comment_tts", false));
+        assertTrue(store.getBoolean("dm_tts", false));
+    }
+
     @Test public void unavailableOfficialSearchTargetsExplainTheSelectedModeWithoutChangingIt() {
         store.putString(ThirdPartyDownloadSettings.METHOD, ThirdPartyDownloadSettings.THIRD_PARTY);
         Map<String, Object> saved = new HashMap<>(store.values);
@@ -220,7 +241,12 @@ public final class ModuleSettingsReferenceTest {
                     if (labels.getChildAt(index).getVisibility() == View.VISIBLE) visibleLabels++;
                 }
                 boolean voiceComment = "语音评论".contentEquals(control.getContentDescription());
-                assertEquals(category + ": " + control.getContentDescription(), voiceComment ? 2 : 1, visibleLabels);
+                boolean globalHashVoice = "#长按发送转语音（全局）".contentEquals(control.getContentDescription());
+                assertEquals(category + ": " + control.getContentDescription(), voiceComment || globalHashVoice ? 2 : 1, visibleLabels);
+                if (globalHashVoice) {
+                    assertTrue(containsText(labels, "适用于私信、群聊和评论"));
+                    assertTrue(containsText(labels, "只发送语音，不发送文字"));
+                }
                 if (voiceComment) {
                     assertTrue(containsText(labels, "最终使用完整正文，不截断音频"));
                     assertTrue(containsText(labels, "实际上传失败仍遵循原回退与防重"));

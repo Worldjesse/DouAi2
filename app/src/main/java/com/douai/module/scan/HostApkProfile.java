@@ -22,7 +22,11 @@ public final class HostApkProfile {
     /** Unknown valid host identities return null; malformed or unreadable Manifests fail explicitly. */
     public static HostAdaptation.Profile read(File apk) throws IOException {
         Identity identity = readIdentity(apk);
-        return HostAdaptation.forVersion(identity.packageName, identity.versionName, identity.versionCode);
+        HostAdaptation.Profile profile = HostAdaptation.forVersion(
+                identity.packageName, identity.versionName, identity.versionCode);
+        if (profile == HostAdaptation.PROFILE_408
+                && identity.updateVersionCode != HostAdaptation.VERIFIED_UPDATE_VERSION_CODE) return null;
+        return profile;
     }
 
     public static Identity readIdentity(File apk) throws IOException {
@@ -53,6 +57,9 @@ public final class HostApkProfile {
         if (rootHeader < 8 || limit < rootHeader || limit > xml.length)
             throw new IOException("Invalid Manifest size");
         String[] strings = null;
+        Identity identity = null;
+        long updateVersionCode = -1;
+        int depth = 0, applicationDepth = -1;
         for (int offset = rootHeader; offset + 8 <= limit; ) {
             int type = u16(data, offset), header = u16(data, offset + 2), size = data.getInt(offset + 4);
             if (header < 8 || size < header || size > limit - offset)
@@ -61,11 +68,51 @@ public final class HostApkProfile {
             if (type == 0x0102) {
                 if (header < 16 || size < 36 || strings == null) throw new IOException("Invalid Manifest element");
                 String tag = string(strings, data.getInt(offset + 20));
-                if ("manifest".equals(tag)) return identity(data, strings, offset, size);
+                if ("manifest".equals(tag) && depth == 0) identity = identity(data, strings, offset, size);
+                if ("application".equals(tag) && depth == 1) applicationDepth = depth;
+                if ("meta-data".equals(tag) && applicationDepth >= 0 && depth == applicationDepth + 1) {
+                    Long value = updateVersion(data, strings, offset, size);
+                    if (value != null) {
+                        if (updateVersionCode >= 0) throw new IOException("Duplicate APK update version code");
+                        updateVersionCode = value;
+                    }
+                }
+                depth++;
+            } else if (type == 0x0103) {
+                depth--;
+                if (depth == applicationDepth) applicationDepth = -1;
             }
             offset += size;
         }
-        throw new IOException("Missing Manifest root element");
+        if (identity == null) throw new IOException("Missing Manifest root element");
+        return new Identity(identity.packageName, identity.versionName, identity.versionCode, updateVersionCode);
+    }
+
+    private static Long updateVersion(ByteBuffer data, String[] strings, int offset, int size) throws IOException {
+        String name = null;
+        Long value = null;
+        int start = offset + 16 + u16(data, offset + 24);
+        int stride = u16(data, offset + 26), count = u16(data, offset + 28);
+        if (start < offset + 36 || stride < 20 || (long) start + (long) count * stride > offset + size)
+            throw new IOException("Invalid APK metadata attributes");
+        for (int i = 0; i < count; i++) {
+            int at = start + i * stride;
+            int namespace = data.getInt(at);
+            if (namespace < 0 || !ANDROID_NAMESPACE.equals(string(strings, namespace))) continue;
+            String attribute = string(strings, data.getInt(at + 4));
+            int kind = data.get(at + 15) & 255, compiled = data.getInt(at + 16);
+            if ("name".equals(attribute) && kind == 3) name = string(strings, compiled);
+            if ("value".equals(attribute)) {
+                if (kind == 0x10 || kind == 0x11) value = Integer.toUnsignedLong(compiled);
+                else if (kind == 3) {
+                    try { value = Long.decode(string(strings, compiled)); }
+                    catch (NumberFormatException ignored) { }
+                }
+            }
+        }
+        if (!"UPDATE_VERSION_CODE".equals(name)) return null;
+        if (value == null || value < 0 || value > 0xffffffffL) throw new IOException("Invalid APK update version code");
+        return value;
     }
 
     private static Identity identity(ByteBuffer data, String[] strings, int offset, int size) throws IOException {
@@ -167,10 +214,15 @@ public final class HostApkProfile {
         public final String packageName;
         public final String versionName;
         public final long versionCode;
+        public final long updateVersionCode;
         private Identity(String packageName, String versionName, long versionCode) {
+            this(packageName, versionName, versionCode, -1);
+        }
+        private Identity(String packageName, String versionName, long versionCode, long updateVersionCode) {
             this.packageName = packageName;
             this.versionName = versionName;
             this.versionCode = versionCode;
+            this.updateVersionCode = updateVersionCode;
         }
     }
 }

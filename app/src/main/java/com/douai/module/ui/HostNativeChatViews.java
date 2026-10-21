@@ -2,7 +2,6 @@ package com.douai.module.ui;
 
 import android.app.Activity;
 import android.content.Context;
-import android.content.pm.PackageInfo;
 import android.graphics.Color;
 import android.graphics.Outline;
 import android.graphics.Rect;
@@ -436,12 +435,11 @@ final class HostNativeChatViews {
         HostAdaptation.Profile installed = HostAdaptation.currentProfile();
         if (installed != null) return installed;
         try {
-            PackageInfo info = context.getPackageManager().getPackageInfo(HOST_PACKAGE, 0);
-            HostAdaptation.Profile profile = HostAdaptation.forVersion(context.getPackageName(),
-                    info.versionName, info.getLongVersionCode());
-            if (profile == null) throw incompatible("当前官方聊天适配支持抖音 40.6.0 / 40.8.0");
+            android.content.pm.ApplicationInfo info = context.getPackageManager().getApplicationInfo(HOST_PACKAGE, 0);
+            HostAdaptation.Profile profile = com.douai.module.scan.HostApkProfile.read(new java.io.File(info.sourceDir));
+            if (profile == null) throw incompatible("当前官方聊天适配支持抖音 40.6.0 / 40.8.0（40809900）");
             return profile;
-        } catch (android.content.pm.PackageManager.NameNotFoundException failure) {
+        } catch (android.content.pm.PackageManager.NameNotFoundException | java.io.IOException failure) {
             throw new ReflectiveOperationException("无法读取抖音版本", failure);
         }
     }

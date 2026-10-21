@@ -4,14 +4,24 @@ import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.graphics.Typeface;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import com.douai.module.config.ExtendedSettings;
 import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
+import com.douai.module.ui.ModuleTheme;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+import org.json.JSONTokener;
 
 import io.github.libxposed.api.XposedInterface;
 
@@ -22,6 +32,8 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Iterator;
+import java.util.Locale;
 import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.function.Consumer;
@@ -149,7 +161,10 @@ public final class CommentToolsHook implements AutoCloseable {
         ArrayList<Action> actions = new ArrayList<>();
         String text = readString(comment, "text");
         if (current.copyCommentText && text != null) actions.add(new Action("复制评论内容", text, null));
-        if (current.copySourceData) actions.add(new Action("复制评论源数据", null, comment));
+        if (current.copySourceData) {
+            actions.add(new Action("查看评论数据", comment));
+            actions.add(new Action("复制评论源数据", null, comment));
+        }
         if (current.commentMediaTools && nativeImageSaveAction != null && hasCommentImages(comment)) {
             actions.add(new Action("使用抖音保存评论图片", nativeImageSaveAction, true));
         }
@@ -158,11 +173,12 @@ public final class CommentToolsHook implements AutoCloseable {
         String[] labels = new String[actions.size()];
         for (int index = 0; index < actions.size(); index++) labels[index] = actions.get(index).title;
         try {
-            new AlertDialog.Builder(context)
+            AlertDialog dialog = new AlertDialog.Builder(context, ModuleTheme.alertTheme(context))
                     .setTitle("评论工具")
-                    .setItems(labels, (dialog, which) -> runAction(context, actions.get(which)))
+                    .setItems(labels, (ignoredDialog, which) -> runAction(context, actions.get(which)))
                     .setNegativeButton("取消", null)
                     .show();
+            ModuleTheme.bind(dialog.getWindow().getDecorView());
             return true;
         } catch (Throwable failure) {
             safeLog("Could not show comment tools: " + failure.getMessage());
@@ -173,6 +189,8 @@ public final class CommentToolsHook implements AutoCloseable {
     private void runAction(Context context, Action action) {
         if (action.nativeImageSaveAction != null) {
             invokeNativeImageSaveAction(context, action.nativeImageSaveAction);
+        } else if (action.viewData) {
+            showCommentData(context, action.source);
         } else if (action.text != null) {
             copyText(context, action.text, "评论");
         } else if (action.source != null) {
@@ -183,6 +201,176 @@ public final class CommentToolsHook implements AutoCloseable {
                 copyText(context, sourceJson, "评论源数据");
             }
         }
+    }
+
+    private void showCommentData(Context context, Object comment) {
+        String sourceJson = toJson(comment);
+        if (sourceJson == null || sourceJson.isEmpty()) {
+            showToast(context, "读取评论数据失败");
+            return;
+        }
+        try {
+            AlertDialog.Builder builder = new AlertDialog.Builder(context, ModuleTheme.alertTheme(context));
+            Context themed = builder.getContext();
+            LinearLayout content = new LinearLayout(themed);
+            content.setOrientation(LinearLayout.VERTICAL);
+            int padding = Math.round(20 * context.getResources().getDisplayMetrics().density);
+            content.setPadding(padding, padding / 2, padding, padding / 2);
+            TextView entry = new TextView(themed);
+            entry.setText("入口：长按评论，再长按弹出菜单中的一项。");
+            entry.setTextSize(12);
+            entry.setTextColor(0xFF69737A);
+            content.addView(entry);
+            TextView summary = new TextView(themed);
+            summary.setTag("comment_tools.data.summary");
+            summary.setText(sourceAudioSummary(sourceJson));
+            summary.setTextSize(14);
+            summary.setTextColor(0xFF1F272D);
+            summary.setPadding(0, padding / 2, 0, padding);
+            summary.setTextIsSelectable(true);
+            content.addView(summary);
+            TextView json = new TextView(themed);
+            json.setTag("comment_tools.data.json");
+            json.setText(prettySourceJson(sourceJson));
+            json.setTextSize(12);
+            json.setTextColor(0xFF1F272D);
+            json.setTypeface(Typeface.MONOSPACE);
+            json.setTextIsSelectable(true);
+            content.addView(json);
+            ScrollView scroll = new ScrollView(themed);
+            scroll.setTag("comment_tools.data.scroll");
+            scroll.addView(content, new ScrollView.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            AlertDialog dialog = builder.setTitle("评论数据").setView(scroll)
+                    .setPositiveButton("复制 JSON", null).setNegativeButton("关闭", null).create();
+            dialog.show();
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(
+                    ignored -> copyText(context, sourceJson, "评论源数据"));
+            ModuleTheme.bind(dialog.getWindow().getDecorView());
+        } catch (RuntimeException | LinkageError unavailable) {
+            safeLog("Could not show comment data: " + unavailable.getClass().getSimpleName());
+            showToast(context, "无法显示评论数据");
+        }
+    }
+
+    static String prettySourceJson(String sourceJson) {
+        try { return new JSONObject(sourceJson).toString(2); }
+        catch (JSONException | RuntimeException invalid) { return sourceJson; }
+    }
+
+    /** The summary and copied JSON describe the same host-Gson snapshot, never a changed DTO. */
+    static String sourceAudioSummary(String sourceJson) {
+        try {
+            JSONObject comment = new JSONObject(sourceJson);
+            StringBuilder result = new StringBuilder("评论类型 / 状态：")
+                    .append(valueLabel(first(comment, "content_type", "contentType")))
+                    .append(" / ").append(valueLabel(first(comment, "status")));
+            Object rawAudio = first(comment, "comment_audio", "commentAudio");
+            if (rawAudio == null) return result.append("\n音频：无").toString();
+            if (!(rawAudio instanceof JSONObject)) return result.append("\n音频：未知结构").toString();
+            JSONObject audio = (JSONObject) rawAudio;
+            result.append("\n音频：有  ·  VID：").append(present(first(audio, "vid", "a")) ? "有" : "无")
+                    .append("\n时长：").append(durationLabel(first(audio, "duration", "e")))
+                    .append("  ·  波形：").append(waveLabel(first(audio, "wave", "d")))
+                    .append("\n折叠：").append(booleanLabel(first(audio, "isFolded", "is_folded")))
+                    .append("  ·  本地：").append(booleanLabel(first(audio, "isLocal", "is_local")))
+                    .append("\nASR 状态：").append(valueLabel(first(audio, "asr_status", "asrStatus", "f")))
+                    .append("  ·  文字：").append(present(first(audio, "asr_text", "asrText", "g")) ? "有" : "无");
+            Object content = first(audio, "content", "b");
+            Object playback = content;
+            if (content instanceof String) {
+                String value = ((String) content).trim();
+                if (value.length() <= 262144 && (value.startsWith("{") || value.startsWith("["))) {
+                    try { playback = new JSONTokener(value).nextValue(); }
+                    catch (JSONException | RuntimeException invalid) { playback = null; }
+                } else playback = null;
+            }
+            if (playback instanceof JSONObject || playback instanceof JSONArray) {
+                // Playback status/message belong to the embedded resource response, not comment.status.
+                result.append("\n播放资源：")
+                        .append(metadata(playback, "container", "container_format", "format", "file_format", "vtype"))
+                        .append(" / ").append(metadata(playback, "codec", "codec_type", "code_type", "codec_name", "audio_codec"))
+                        .append(" / ").append(metadata(playback, "sample_rate", "samplerate", "audio_sample_rate", "sampling_rate"))
+                        .append(" Hz");
+            } else result.append("\n播放资源：").append(present(content) ? "非 JSON 或无法解析" : "无");
+            return result.toString();
+        } catch (JSONException | RuntimeException invalid) {
+            return "语音摘要暂不可用，原始 JSON 保留在下方。";
+        }
+    }
+
+    private static Object first(JSONObject object, String... names) {
+        for (String name : names) {
+            Object value = object.opt(name);
+            if (value != null && value != JSONObject.NULL) return value;
+        }
+        return null;
+    }
+
+    private static boolean present(Object value) {
+        return value != null && value != JSONObject.NULL
+                && (!(value instanceof String) || !((String) value).trim().isEmpty());
+    }
+
+    private static String valueLabel(Object value) {
+        return value instanceof String || value instanceof Number ? String.valueOf(value) : "未知";
+    }
+
+    private static String booleanLabel(Object value) {
+        return value instanceof Boolean ? ((Boolean) value ? "是" : "否") : "未知";
+    }
+
+    private static String durationLabel(Object value) {
+        return value instanceof Number ? value + " ms" : "未知";
+    }
+
+    private static String waveLabel(Object wave) {
+        if (wave == null || wave == JSONObject.NULL) return "空";
+        if (wave instanceof JSONArray) return ((JSONArray) wave).length() == 0 ? "空" : "非空";
+        if (wave instanceof String) {
+            String value = ((String) wave).trim();
+            return value.isEmpty() || "[]".equals(value) || "null".equals(value) ? "空" : "非空";
+        }
+        return "未知";
+    }
+
+    private static String metadata(Object playback, String... keys) {
+        for (String key : keys) {
+            Object value = metadataValue(playback, key.replace("_", ""), 0, new int[]{128});
+            if (value instanceof Number) return String.valueOf(value);
+            if (value instanceof String && !((String) value).trim().isEmpty()) {
+                String label = ((String) value).trim();
+                return label.length() <= 80 ? label : label.substring(0, 80) + "…";
+            }
+        }
+        return "未知";
+    }
+
+    private static Object metadataValue(Object node, String key, int depth, int[] remaining) {
+        if (depth > 8 || remaining[0]-- <= 0) return null;
+        if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            Iterator<String> names = object.keys();
+            while (names.hasNext()) {
+                String name = names.next();
+                Object value = object.opt(name);
+                if (key.equals(name.replace("_", "").replace("-", "").toLowerCase(Locale.ROOT))
+                        && (value instanceof Number
+                        || value instanceof String && !((String) value).trim().isEmpty())) return value;
+            }
+            names = object.keys();
+            while (names.hasNext() && remaining[0] > 0) {
+                Object value = metadataValue(object.opt(names.next()), key, depth + 1, remaining);
+                if (value != null) return value;
+            }
+        } else if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int index = 0; index < array.length() && remaining[0] > 0; index++) {
+                Object value = metadataValue(array.opt(index), key, depth + 1, remaining);
+                if (value != null) return value;
+            }
+        }
+        return null;
     }
 
     private boolean hasCommentImages(Object comment) {
@@ -336,7 +524,7 @@ public final class CommentToolsHook implements AutoCloseable {
             Object gson = gsonClass.getConstructor().newInstance();
             return (String) gsonClass.getMethod("toJson", Object.class).invoke(gson, source);
         } catch (Throwable failure) {
-            safeLog("Could not serialize comment source: " + failure.getMessage());
+            safeLog("Could not serialize comment source: " + failure.getClass().getSimpleName());
             return null;
         }
     }
@@ -348,7 +536,7 @@ public final class CommentToolsHook implements AutoCloseable {
             clipboard.setPrimaryClip(ClipData.newPlainText(label, value));
             showToast(context, "已复制" + label);
         } catch (Throwable failure) {
-            safeLog("Could not copy comment: " + failure.getMessage());
+            safeLog("Could not copy comment: " + failure.getClass().getSimpleName());
             showToast(context, "复制失败");
         }
     }
@@ -358,12 +546,22 @@ public final class CommentToolsHook implements AutoCloseable {
         final String text;
         final Object source;
         final Object nativeImageSaveAction;
+        final boolean viewData;
 
         Action(String title, String text, Object payload) {
+            this(title, text, payload, false);
+        }
+
+        Action(String title, Object source) {
+            this(title, null, source, true);
+        }
+
+        private Action(String title, String text, Object payload, boolean viewData) {
             this.title = title;
             this.text = text;
             this.source = text == null && payload != null && !(payload instanceof String) ? payload : null;
             this.nativeImageSaveAction = null;
+            this.viewData = viewData;
         }
 
         Action(String title, Object nativeImageSaveAction, boolean nativeSave) {
@@ -371,6 +569,7 @@ public final class CommentToolsHook implements AutoCloseable {
             this.text = null;
             this.source = null;
             this.nativeImageSaveAction = nativeSave ? nativeImageSaveAction : null;
+            this.viewData = false;
         }
 
     }

@@ -24,6 +24,21 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class HostAdaptationDiagnosticsTest {
+    @Test public void originalManifestBuildDistinguishes9900FromRetired9985InDiagnostics() throws Exception {
+        for (long build : new long[]{40809900L, 40809985L}) {
+            java.io.File apk = com.douai.module.scan.BinaryHostManifestFixture.apk(
+                    HostAdaptation.TARGET_PACKAGE, "40.8.0", 400801, build);
+            android.content.pm.ApplicationInfo application = new android.content.pm.ApplicationInfo();
+            application.sourceDir = apk.getAbsolutePath();
+            android.content.Context context = new android.content.ContextWrapper(org.robolectric.RuntimeEnvironment.getApplication()) {
+                @Override public android.content.pm.ApplicationInfo getApplicationInfo() { return application; }
+            };
+            Bundle version = HostAdaptationDiagnostics.readInstalledVersion(context);
+            assertEquals(build, version.getLong("host_update_version_code"));
+            assertEquals(build == 40809900L, version.getBoolean("host_version_profile_matched"));
+            assertTrue(HostAdaptationDiagnostics.describe(version).contains("构建 " + build));
+        }
+    }
     @Test public void hiddenSkipSeparatesTheRequestedSwitchFromCompleteInstallationAndRuntimeCounts() {
         Bundle snapshot = new Bundle();
         snapshot.putBoolean("hidden_skip_enabled", true);

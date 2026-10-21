@@ -209,7 +209,11 @@ public final class ConfigTransfer {
                 : key.startsWith("tts_minimax_") ? Reason.MINIMAX_OPTIONS : Reason.STRUCTURED_FIELDS;
         try {
             if (SpeechSettings.PROVIDER.equals(key) && value instanceof String) SpeechSettings.validateProvider((String) value);
-            if (key.startsWith("tts_minimax_") && value instanceof String) SpeechSettings.validateMiniMaxValue(key, (String) value);
+            if (key.startsWith("tts_minimax_") && value instanceof String) {
+                // Empty single-voice IDs are legal only when the merged settings contain a valid mix.
+                if (SpeechSettings.MINIMAX_VOICE_ID.equals(key)) SpeechSettings.validateMiniMaxVoiceId((String) value, false);
+                else SpeechSettings.validateMiniMaxValue(key, (String) value);
+            }
             if (!(value instanceof String) || ((String) value).isEmpty()) return;
             String text = (String) value;
             if (AiModelSettings.KEY.equals(key)) {

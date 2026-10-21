@@ -45,10 +45,10 @@ import static org.junit.Assert.*;
 public final class HiddenVideoHostContractTest {
     private static final String OBJECT = "Ljava/lang/Object;";
     private static final String STRING = "Ljava/lang/String;";
-    private static String RESPONSE_CALLBACK = "LX/1WF3;";
-    private static String CURRENT_TASK = "Lkotlin/jvm/internal/ALambdaS31S1500000_28;";
-    private static String BACKGROUND_TASK = "Lkotlin/jvm/internal/ALambdaS17S1600000_28;";
-    private static String RECALL = "LX/07OG;";
+    private static String RESPONSE_CALLBACK = "LX/12bV;";
+    private static String CURRENT_TASK = "Lkotlin/jvm/internal/ALambdaS38S1500000_35;";
+    private static String BACKGROUND_TASK = "LX/12bW;";
+    private static String RECALL = "LX/07Zg;";
     private static final String FEED_DATA = "Lcom/ss/android/ugc/aweme/feed/plato/core/IFeedDataContext;";
     private static final String DEFAULTS = "Lcom/ss/android/ugc/aweme/feed/plato/core/IFeedDataContext$DefaultImpls;";
     private static final String DELETE_RESULT = "Lcom/ss/android/ugc/aweme/feed/listener/DeleteResult;";
@@ -66,16 +66,16 @@ public final class HiddenVideoHostContractTest {
         File apk = new File(configured);
         assertTrue("DOUAI_TEST_APK must point to the original host APK", apk.isFile());
         legacy = HostApkTestProfile.is406(apk);
-        RESPONSE_CALLBACK = legacy ? "LX/06hv;" : "LX/1WF3;";
-        CURRENT_TASK = legacy ? "Lkotlin/jvm/internal/ALambdaS32S1500000_4;" : "Lkotlin/jvm/internal/ALambdaS31S1500000_28;";
-        BACKGROUND_TASK = legacy ? "LX/06ht;" : "Lkotlin/jvm/internal/ALambdaS17S1600000_28;";
-        RECALL = legacy ? "LX/06R8;" : "LX/07OG;";
-        recallBranch = legacy ? 0 : 1;
-        genericBranch = legacy ? 1 : 2;
+        RESPONSE_CALLBACK = legacy ? "LX/06hv;" : "LX/12bV;";
+        CURRENT_TASK = legacy ? "Lkotlin/jvm/internal/ALambdaS32S1500000_4;" : "Lkotlin/jvm/internal/ALambdaS38S1500000_35;";
+        BACKGROUND_TASK = legacy ? "LX/06ht;" : "LX/12bW;";
+        RECALL = legacy ? "LX/06R8;" : "LX/07Zg;";
+        recallBranch = 0;
+        genericBranch = 1;
         deleteMethod = legacy ? "LJIIIIZZ" : "LJIIIZ";
         Set<String> required = new HashSet<>(Arrays.asList(RESPONSE_CALLBACK, CURRENT_TASK, BACKGROUND_TASK, RECALL, DEFAULTS));
         try (ZipFile archive = new ZipFile(apk)) {
-            for (String dexName : legacy ? Arrays.asList("classes45.dex") : Arrays.asList("classes22.dex", "classes45.dex", "classes46.dex")) {
+            for (String dexName : legacy ? Arrays.asList("classes45.dex") : Arrays.asList("classes30.dex", "classes45.dex")) {
                 ZipEntry entry = archive.getEntry(dexName);
                 assertNotNull("The supported host must contain " + dexName, entry);
                 try (BufferedInputStream input = new BufferedInputStream(archive.getInputStream(entry))) {
@@ -92,12 +92,12 @@ public final class HiddenVideoHostContractTest {
     @AfterClass public static void releaseOriginalDexFacts() { classes.clear(); }
 
     @Test public void bothDestructiveTasksAreInstanceObjectInvocationsAndReturnHostUnit() {
-        for (String task : legacy ? Arrays.asList(CURRENT_TASK) : Arrays.asList(CURRENT_TASK, BACKGROUND_TASK)) {
+        for (String task : Arrays.asList(CURRENT_TASK)) {
             Field discriminator = field(task, "$t", "I");
             assertFalse(AccessFlags.STATIC.isSet(discriminator.getAccessFlags()));
             assertTrue(AccessFlags.FINAL.isSet(discriminator.getAccessFlags()));
         }
-        if (legacy) for (Field field : classes.get(BACKGROUND_TASK).getFields()) assertNotEquals("$t", field.getName());
+        for (Field field : classes.get(BACKGROUND_TASK).getFields()) assertNotEquals("$t", field.getName());
         Method current = method(CURRENT_TASK, "invoke", OBJECT);
         Method background = method(BACKGROUND_TASK, "invoke", OBJECT);
         for (Method task : Arrays.asList(current, background)) {
@@ -109,7 +109,7 @@ public final class HiddenVideoHostContractTest {
         assertUnitReturn(currentCode, reachable(currentCode, currentCode.switchBranch(recallBranch)));
         assertUnitReturn(currentCode, reachable(currentCode, currentCode.switchBranch(genericBranch)));
         Code backgroundCode = new Code(background);
-        assertUnitReturn(backgroundCode, reachable(backgroundCode, legacy ? 0 : backgroundCode.switchBranch(0)));
+        assertUnitReturn(backgroundCode, reachable(backgroundCode, 0));
     }
 
     @Test public void actualPackedSwitchRecallsOnlyTheProfileCaseAndRetainsTheSeparateDirectDeletePath() {
@@ -121,12 +121,6 @@ public final class HiddenVideoHostContractTest {
                 ((OneRegisterInstruction) code.at(dispatch)).getRegisterA());
         Set<Integer> one = reachable(code, code.switchBranch(recallBranch));
         Set<Integer> two = reachable(code, code.switchBranch(genericBranch));
-        if (!legacy) {
-            Set<Integer> zero = reachable(code, code.switchBranch(0));
-            assertFalse("40.8 discriminator zero belongs to the popup route", calls(code, zero, RECALL, "LJI"));
-            assertFalse(calls(code, zero, DEFAULTS, "LIZIZ"));
-            assertTrue(calls(code, zero, "LX/0q1x;", "LJIILL"));
-        }
         assertTrue("The profile's recall discriminator must reach the recall manager", calls(code, one, RECALL, "LJI"));
         assertFalse(calls(code, one, DEFAULTS, "LIZIZ"));
         assertTrue("The generic discriminator retains independent direct deletion", calls(code, two, DEFAULTS, "LIZIZ"));
@@ -148,21 +142,16 @@ public final class HiddenVideoHostContractTest {
         assertEquals("The reason argument must come from the original safety_check constant",
                 ((OneRegisterInstruction) code.at(reason)).getRegisterA(),
                 ((FiveRegisterInstruction) code.at(delete)).getRegisterE());
-        Set<Integer> body = reachable(code, legacy ? 0 : code.switchBranch(0));
+        Set<Integer> body = reachable(code, 0);
         assertTrue(body.contains(delete));
-        if (!legacy) {
-            Set<Integer> unrelated = reachable(code, code.switchBranch(1));
-            assertFalse("The task-submission retry remains outside safety deletion", calls(code, unrelated, FEED_DATA, deleteMethod));
-            assertTrue(calls(code, unrelated, "LX/0pqX;", "LIZIZ"));
-        }
         assertFalse(calls(code, body, RECALL, "LJI"));
         assertFalse(calls(code, body, "Lcom/ss/android/ugc/aweme/feed/panel/BaseListFragmentPanel;", "LJLJL"));
         assertFalse(calls(code, body, "Lcom/ss/android/ugc/aweme/feed/panel/FullFeedFragmentPanel;", "LJLJL"));
     }
 
     @Test public void responseCacheBookkeepingPrecedesBothAsynchronousTasksWithTheirActualDiscriminators() {
-        Code code = new Code(method(RESPONSE_CALLBACK, "LIZ", "V", "Ljava/util/ArrayList;", legacy ? "LX/06fP;" : "LX/07kY;"));
-        int cache = callIndex(code, legacy ? "LX/04Ov;" : "LX/1EWS;", "LIZJ", 0);
+        Code code = new Code(method(RESPONSE_CALLBACK, "LIZ", "V", "Ljava/util/ArrayList;", legacy ? "LX/06fP;" : "LX/07hG;"));
+        int cache = callIndex(code, legacy ? "LX/04Ov;" : "LX/0Bj9;", "LIZJ", 0);
         int currentConstructor = callIndex(code, CURRENT_TASK, "<init>", 0);
         int backgroundConstructor = callIndex(code, BACKGROUND_TASK, "<init>", 0);
         assertTrue("Cache bookkeeping must remain before the current-item destructive task", cache < currentConstructor);
@@ -173,9 +162,7 @@ public final class HiddenVideoHostContractTest {
         assertEquals("The callback schedules the profile recall case", recallBranch,
                 precedingLiteral(code, currentConstructor, discriminatorRegister));
         RegisterRangeInstruction background = (RegisterRangeInstruction) code.at(backgroundConstructor);
-        assertEquals(legacy ? 8 : 9, background.getRegisterCount());
-        if (!legacy) assertEquals("The background task uses safety deletion rather than task-submission retry", 0,
-                precedingLiteral(code, backgroundConstructor, background.getStartRegister() + background.getRegisterCount() - 1));
+        assertEquals(8, background.getRegisterCount());
         assertScheduledObject(code, currentConstructor);
         assertScheduledObject(code, backgroundConstructor);
         assertEquals(-1, callIndexOrMissing(code, CURRENT_TASK, "<init>", currentConstructor + 1));
@@ -188,7 +175,7 @@ public final class HiddenVideoHostContractTest {
     @Test public void recallAddsTheGlobalMarkerBeforeNotifyingPanelsAndTheGenericDeleteDefaultHasNoSafetyReason() {
         Code recall = new Code(method(RECALL, "LJI", "V", STRING));
         int add = callIndex(recall, "Ljava/util/Set;", "add", 0);
-        int notify = callIndex(recall, "Lcom/ss/android/ugc/aweme/feed/adapter/FeedRecallHelper$FeedRecallCallBack;", legacy ? "LLILLL" : "LLILLJJLI", 0);
+        int notify = callIndex(recall, "Lcom/ss/android/ugc/aweme/feed/adapter/FeedRecallHelper$FeedRecallCallBack;", legacy ? "LLILLL" : "LLIZ", 0);
         assertTrue("Blocking only the later event would leave the recall set mutated", add < notify);
         Code defaults = new Code(method(DEFAULTS, "LIZIZ", DELETE_RESULT, FEED_DATA, STRING));
         int none = stringIndex(defaults, "none");

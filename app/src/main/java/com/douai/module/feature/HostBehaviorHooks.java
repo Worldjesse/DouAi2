@@ -55,7 +55,7 @@ public final class HostBehaviorHooks implements AutoCloseable {
     }
 
     enum HiddenSafetyTaskContract {
-        HOST_406(0, null), HOST_408(1, 0);
+        HOST_406(0, null), HOST_408(0, null);
         final int currentBranch;
         final Integer backgroundBranch;
         HiddenSafetyTaskContract(int currentBranch, Integer backgroundBranch) {
@@ -64,8 +64,8 @@ public final class HostBehaviorHooks implements AutoCloseable {
         }
         static HiddenSafetyTaskContract resolve(String current, String background) {
             if ("Lkotlin/jvm/internal/ALambdaS32S1500000_4;".equals(current) && "LX/06ht;".equals(background)) return HOST_406;
-            if ("Lkotlin/jvm/internal/ALambdaS31S1500000_28;".equals(current)
-                    && "Lkotlin/jvm/internal/ALambdaS17S1600000_28;".equals(background)) return HOST_408;
+            if ("Lkotlin/jvm/internal/ALambdaS38S1500000_35;".equals(current)
+                    && "LX/12bW;".equals(background)) return HOST_408;
             throw new IllegalStateException("Hidden video safety task profile combination changed");
         }
     }

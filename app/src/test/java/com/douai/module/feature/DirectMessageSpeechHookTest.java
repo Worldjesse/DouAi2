@@ -37,4 +37,23 @@ public final class DirectMessageSpeechHookTest {
             } catch (IllegalArgumentException expected) { }
         }
     }
+
+    @Test public void longPressAndOldSingleClickOptionsAreIndependent() {
+        com.douai.module.config.LocalOptions longOnly = new com.douai.module.config.LocalOptions(
+                java.util.Collections.singletonMap("hash_long_press_voice", true));
+        assertTrue(DirectMessageSpeechHook.canStartLongPress(longOnly, "#voice"));
+        assertFalse(DirectMessageSpeechHook.canStart(longOnly, true, "#voice"));
+        com.douai.module.config.LocalOptions clickOnly = new com.douai.module.config.LocalOptions(
+                java.util.Collections.singletonMap("dm_tts", true));
+        assertFalse(DirectMessageSpeechHook.canStartLongPress(clickOnly, "#voice"));
+        assertTrue(DirectMessageSpeechHook.canStart(clickOnly, true, "#voice"));
+        assertFalse(DirectMessageSpeechHook.canStartLongPress(longOnly, "plain text"));
+        DirectMessageSpeechHook.Pending request = new DirectMessageSpeechHook.Pending(null, null, null, null,
+                "conversation", "#voice", new HashVoiceGesture("#voice", "conversation", "", "",
+                () -> true, () -> true, () -> { }));
+        assertTrue(request.enabled(longOnly));
+        assertFalse(request.enabled(clickOnly));
+        request.cancel();
+        assertFalse(request.gesture.canSend());
+    }
 }

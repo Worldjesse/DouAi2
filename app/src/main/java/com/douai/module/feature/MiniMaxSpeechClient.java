@@ -33,7 +33,8 @@ public final class MiniMaxSpeechClient {
             JSONObject body = new JSONObject().put("model", required(settings.minimaxModel, "模型"))
                     .put("text", text).put("stream", false).put("output_format", "url")
                     .put("voice_setting", new JSONObject()
-                            .put("voice_id", required(settings.minimaxVoiceId, "音色 ID"))
+                            .put("voice_id", settings.minimaxOptions.hasMixedVoices() ? ""
+                                    : required(settings.minimaxVoiceId, "音色 ID"))
                             .put("speed", settings.minimaxSpeed).put("vol", settings.minimaxVolume)
                             .put("pitch", settings.minimaxPitch))
                     .put("audio_setting", new JSONObject().put("sample_rate", 32000).put("bitrate", 128000)
@@ -57,6 +58,8 @@ public final class MiniMaxSpeechClient {
                 resource = new SpeechHttpClient.Resource(decodeHex(audio, request), "");
             }
             request.ensureActive();
+            resource = MiniMaxAudioFormat.normalize(resource, settings.minimaxOptions.audioFormat,
+                    settings.minimaxOptions.channel, request::ensureActive);
             if (!resource.isAudio()) throw new IllegalArgumentException("MiniMax 语音链接未返回音频文件");
             return resource;
         } catch (CancellationException cancelled) {

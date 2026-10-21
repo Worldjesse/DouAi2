@@ -66,7 +66,8 @@ final class SpeechSettingsDialog implements AutoCloseable {
     private final LinearLayout content;
     private final AlertDialog dialog;
     private LinearLayout advancedContent;
-    private LinearLayout minimaxAdvancedContent;
+    private final Map<String, LinearLayout> sectionContents = new LinkedHashMap<>();
+    private final Map<String, Dialog> sectionDialogs = new LinkedHashMap<>();
     private SpeechHttpClient.Request fetch;
     private Future<?> future;
     private SpeechSynthesis preview;
@@ -102,8 +103,6 @@ final class SpeechSettingsDialog implements AutoCloseable {
                     render();
                 }).setNegativeButton("取消", null).create(), null));
         if (speech.minimax) {
-            editable("API Key", SpeechSettings.MINIMAX_API_KEY, "", true);
-            editable("API 地址", SpeechSettings.MINIMAX_BASE_URL, SpeechSettings.DEFAULT_MINIMAX_BASE_URL, false);
             option("模型", speech.minimaxModel, this::selectMiniMaxModel);
             if (!MiniMaxSpeechModelCatalog.builtInModels().contains(speech.minimaxModel)) {
                 TextView capability = new TextView(context);
@@ -112,29 +111,93 @@ final class SpeechSettingsDialog implements AutoCloseable {
                 content.addView(capability, matchWrap());
             }
             option("音色", voiceLabel(), this::selectVoice);
-            editable("语速", SpeechSettings.MINIMAX_SPEED, "1", false);
-            editable("音量", SpeechSettings.MINIMAX_VOLUME, "1", false);
-            editable("音调", SpeechSettings.MINIMAX_PITCH, "0", false);
-            option("MiniMax 高级设置", null, this::miniMaxAdvanced);
+            option("接口设置", speech.minimaxApiKey.isEmpty() ? "待填写 API Key" : "API Key 已设置", () -> section("接口设置"));
+            option("朗读设置", readingSummary(speech), () -> section("朗读设置"));
+            option("MiniMax 高级设置", "音频、语言、混音与效果", () -> section("MiniMax 高级设置"));
         } else if (!third) {
-            editable("语音引擎", "tts_engine", "", false);
-            editable("语音语言", "tts_language", "zh-CN", false);
-            editable("语速", SpeechSettings.RATE, "", false);
-            editable("音调", SpeechSettings.PITCH, "", false);
+            option("接口设置", "系统引擎与语言", () -> section("接口设置"));
+            option("朗读设置", readingSummary(speech), () -> section("朗读设置"));
         } else {
             editable("合成 GET", SpeechSettings.GET_TEMPLATE, SpeechSettings.DEFAULT_GET_TEMPLATE, false);
             option("合成参数", parameterNames(settings().getTemplate), this::parameters);
-            editable("合成请求头", SpeechSettings.HEADERS, "{}", false);
-            option("合成响应样本", synthesisSampleLabel(), this::editSynthesisSample);
-            option("音频地址字段", settings().audioField.isEmpty() ? "自动识别" : settings().audioField, this::chooseAudioField);
+            option("接口设置", "请求头、响应与音频字段", () -> section("接口设置"));
             option("音色", voiceLabel(), this::selectVoice);
-            editable("音色列表 GET", SpeechSettings.VOICE_GET_TEMPLATE, SpeechSettings.DEFAULT_VOICE_GET_TEMPLATE, false);
-            option("刷新音色", null, this::refreshVoices);
-            option("音色高级设置", null, this::advanced);
+            option("音色高级设置", "列表接口、字段与样本", this::advanced);
         }
         option("试听", null, this::testSpeech);
         if (advancedContent != null) renderAdvanced(advancedContent);
-        if (minimaxAdvancedContent != null) renderMiniMaxAdvanced(minimaxAdvancedContent);
+        for (Map.Entry<String, LinearLayout> entry : new ArrayList<>(sectionContents.entrySet())) {
+            renderSection(entry.getKey(), entry.getValue());
+        }
+    }
+
+    private String readingSummary(SpeechSettings speech) {
+        return speech.minimax ? "语速 " + editableValue(SpeechSettings.MINIMAX_SPEED, "1")
+                + " · 音量 " + editableValue(SpeechSettings.MINIMAX_VOLUME, "1")
+                + " · 音调 " + editableValue(SpeechSettings.MINIMAX_PITCH, "0")
+                : "语速 " + editableValue(SpeechSettings.RATE, "")
+                + " · 音调 " + editableValue(SpeechSettings.PITCH, "");
+    }
+
+    private void section(String title) {
+        Dialog opened = sectionDialogs.get(title);
+        if (opened != null && opened.isShowing()) return;
+        LinearLayout form = form();
+        form.setTag("speech.section." + title);
+        sectionContents.put(title, form);
+        renderSection(title, form);
+        AlertDialog child = builder(title).setView(scroll(form)).setNegativeButton("返回", null).create();
+        sectionDialogs.put(title, child);
+        show(child, () -> {
+            if (sectionContents.get(title) == form) sectionContents.remove(title);
+            if (sectionDialogs.get(title) == child) sectionDialogs.remove(title);
+        });
+    }
+
+    private void renderSection(String title, LinearLayout form) {
+        form.removeAllViews();
+        SpeechSettings speech = settings();
+        if ("接口设置".equals(title)) {
+            if (speech.minimax) {
+                editable(form, "API Key", SpeechSettings.MINIMAX_API_KEY, "", true);
+                editable(form, "API 地址", SpeechSettings.MINIMAX_BASE_URL, SpeechSettings.DEFAULT_MINIMAX_BASE_URL, false);
+            } else if (speech.thirdParty) {
+                editable(form, "合成请求头", SpeechSettings.HEADERS, "{}", false);
+                option(form, "合成响应样本", synthesisSampleLabel(), this::editSynthesisSample);
+                option(form, "音频地址字段", speech.audioField.isEmpty() ? "自动识别" : speech.audioField, this::chooseAudioField);
+            } else {
+                editable(form, "语音引擎", "tts_engine", "", false);
+                editable(form, "语音语言", "tts_language", "zh-CN", false);
+            }
+            return;
+        }
+        if ("朗读设置".equals(title)) {
+            if (speech.minimax) {
+                editable(form, "语速", SpeechSettings.MINIMAX_SPEED, "1", false);
+                editable(form, "音量", SpeechSettings.MINIMAX_VOLUME, "1", false);
+                editable(form, "音调", SpeechSettings.MINIMAX_PITCH, "0", false);
+            } else if (!speech.thirdParty) {
+                editable(form, "语速", SpeechSettings.RATE, "", false);
+                editable(form, "音调", SpeechSettings.PITCH, "", false);
+            }
+            return;
+        }
+        if (!speech.minimax) {
+            hint(form, "speech.minimax.inactive", "切换至 MiniMax 后可设置。");
+            return;
+        }
+        if ("MiniMax 高级设置".equals(title)) renderMiniMaxAdvanced(form);
+        else if ("音频输出".equals(title)) renderMiniMaxAudio(form);
+        else if ("语言与发音".equals(title)) renderMiniMaxLanguage(form);
+        else if ("混音与声音效果".equals(title)) renderMiniMaxEffects(form);
+    }
+
+    private void hint(LinearLayout form, String tag, String text) {
+        TextView hint = new TextView(context);
+        hint.setTag(tag);
+        hint.setText(text);
+        hint.setPadding(dp(4), dp(6), dp(4), dp(10));
+        form.addView(hint, matchWrap());
     }
 
     private void selectMiniMaxModel() {
@@ -258,21 +321,41 @@ final class SpeechSettingsDialog implements AutoCloseable {
         });
     }
 
-    private void miniMaxAdvanced() {
-        LinearLayout form = form();
-        minimaxAdvancedContent = form;
-        renderMiniMaxAdvanced(form);
-        AlertDialog advanced = builder("MiniMax 高级设置").setView(scroll(form)).setNegativeButton("返回", null).create();
-        show(advanced, () -> {
-            if (minimaxAdvancedContent == form) minimaxAdvancedContent = null;
-        });
+    private void renderMiniMaxAdvanced(LinearLayout form) {
+        MiniMaxSpeechOptions current = settings().minimaxOptions;
+        option(form, "音频输出", audioFormatLabel(current.audioFormat) + " · " + current.effectiveSampleRate() + " Hz", () -> section("音频输出"));
+        option(form, "语言与发音", current.languageBoost.isEmpty() ? "自动语言与发音规则" : current.languageBoost, () -> section("语言与发音"));
+        option(form, "混音与声音效果", current.hasMixedVoices() ? "已启用混音" : current.hasVoiceModify() ? "已设置声音效果" : "单音色 · 原始效果", () -> section("混音与声音效果"));
     }
 
-    private void renderMiniMaxAdvanced(LinearLayout form) {
-        form.removeAllViews();
-        TextView explanation = new TextView(context);
-        explanation.setText("文本归一化可改善数字等内容的朗读。下方音色调整独立于主页面音调：音高负值更低沉、正值更明亮；音强负值更刚劲、正值更柔和；音色负值更浑厚、正值更清脆。发音字典每行一条，例如 处理/(chu3)(li3)。");
-        form.addView(explanation, matchWrap());
+    private static String audioFormatLabel(String format) {
+        if ("pcmu_wav".equals(format)) return "G.711 μ-law / WAV";
+        if ("opus".equals(format)) return "Ogg / Opus";
+        if ("aac".equals(format)) return "AAC（实验）";
+        return format.toUpperCase(java.util.Locale.ROOT);
+    }
+
+    private void renderMiniMaxEffects(LinearLayout form) {
+        MiniMaxSpeechOptions current = settings().minimaxOptions;
+        editable(form, "混合音色（每行 voice_id/weight）", MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "", false);
+        hint(form, "speech.minimax.mix.hint", current.hasMixedVoices()
+                ? "混音已启用：普通音色 ID 将被忽略，原单音色仍保留。最多 4 个音色，权重为 1 至 100，总和无需为 100；清空恢复单音色。"
+                : "最多 4 个音色，每行 voice_id/weight（权重 1 至 100，总和无需为 100）；留空使用主页面音色。");
+        boolean effectsSupported = MiniMaxSpeechOptions.supportsVoiceModify(current.audioFormat);
+        if (effectsSupported) {
+            editable(form, "音高调整（-100 至 100）", MiniMaxSpeechOptions.MODIFY_PITCH, "0", false);
+            editable(form, "音强调整（-100 至 100）", MiniMaxSpeechOptions.MODIFY_INTENSITY, "0", false);
+            editable(form, "音色调整（-100 至 100）", MiniMaxSpeechOptions.MODIFY_TIMBRE, "0", false);
+            miniMaxChoice(form, "声音效果", MiniMaxSpeechOptions.SOUND_EFFECT, MiniMaxSpeechOptions.SOUND_EFFECTS,
+                    new String[]{"不使用", "空旷回声", "礼堂回声", "电话音质", "机器人"});
+            hint(form, "speech.minimax.effects.hint", "以上调整独立于“朗读设置”的音调，支持 MP3 / WAV / FLAC。");
+        } else {
+            hint(form, "speech.minimax.effects.hint", "当前格式不支持声音效果器。已存参数保留，可重置后使用，或改选 MP3 / WAV / FLAC。");
+        }
+        option(form, "重置音色调整", "恢复原始效果，保留混音", this::resetMiniMaxVoiceModify);
+    }
+
+    private void renderMiniMaxLanguage(LinearLayout form) {
         miniMaxChoice(form, "情绪", MiniMaxSpeechOptions.EMOTION, MiniMaxSpeechOptions.EMOTIONS,
                 new String[]{"自动", "高兴", "悲伤", "愤怒", "恐惧", "厌恶", "惊讶", "平静", "流利（仅 2.6）", "低语（仅 2.6）"});
         String[] languages = MiniMaxSpeechOptions.LANGUAGES.clone();
@@ -285,26 +368,48 @@ final class SpeechSettingsDialog implements AutoCloseable {
         miniMaxChoice(form, "语言增强", MiniMaxSpeechOptions.LANGUAGE_BOOST, MiniMaxSpeechOptions.LANGUAGES, languages);
         miniMaxChoice(form, "文本归一化", MiniMaxSpeechOptions.TEXT_NORMALIZATION_MODE, MiniMaxSpeechOptions.NORMALIZATION_MODES,
                 new String[]{"不指定", "基础 · basic", "高质量 · quality（仅 2.8 / 2.6）"});
-        miniMaxChoice(form, "音频格式", MiniMaxSpeechOptions.AUDIO_FORMAT, MiniMaxSpeechOptions.FORMATS,
-                new String[]{"MP3", "WAV", "FLAC"});
-        miniMaxChoice(form, "采样率", MiniMaxSpeechOptions.SAMPLE_RATE, MiniMaxSpeechOptions.SAMPLE_RATES,
-                new String[]{"8000 Hz", "16000 Hz", "22050 Hz", "24000 Hz", "32000 Hz", "44100 Hz"});
-        if ("mp3".equals(settings().minimaxOptions.audioFormat)) {
+        editable(form, "发音字典（每行 原文/替换内容）", MiniMaxSpeechOptions.PRONUNCIATION_TONE, "", false);
+        hint(form, "speech.minimax.pronunciation.hint", "每行一条，例如 处理/(chu3)(li3)。归一化可改善数字等内容的朗读。");
+        miniMaxChoice(form, "LaTeX 朗读", MiniMaxSpeechOptions.LATEX_READ, MiniMaxSpeechOptions.OPTIONAL_BOOLEANS,
+                new String[]{"不指定", "开启（仅中文）", "关闭"});
+    }
+
+    private void renderMiniMaxAudio(LinearLayout form) {
+        MiniMaxSpeechOptions current = settings().minimaxOptions;
+        miniMaxChoice(form, "生成音频格式（API）", MiniMaxSpeechOptions.AUDIO_FORMAT, MiniMaxSpeechOptions.FORMATS,
+                new String[]{"MP3", "WAV", "FLAC", "Ogg / Opus", "G.711 μ-law / WAV", "AAC（实验，接口可能拒绝）"});
+        if ("aac".equals(current.audioFormat)) {
+            hint(form, "speech.minimax.aac.hint", "AAC 为实验请求，官方文档未列出，接口可能拒绝。生成的音频原样发送，不在本地转换。");
+        }
+        miniMaxChoice(form, "返回方式（传输）", MiniMaxSpeechOptions.OUTPUT_FORMAT, MiniMaxSpeechOptions.OUTPUT_FORMATS,
+                new String[]{"音频 URL · url", "十六进制音频 · hex"});
+        hint(form, "speech.minimax.transport.hint", "URL / Hex 只改变返回方式。Hex 受 2 MiB 文本上限约束，长音频请选择 URL（20 MiB）。");
+        if (MiniMaxSpeechOptions.isMuLawFormat(current.audioFormat)) {
+            hint(form, "speech.minimax.mulaw.hint", "μ-law WAV 固定 8000 Hz，保留原文件发送；切换格式后恢复原采样率。");
+        } else {
+            miniMaxChoice(form, "采样率", MiniMaxSpeechOptions.SAMPLE_RATE, MiniMaxSpeechOptions.SAMPLE_RATES,
+                    new String[]{"8000 Hz", "16000 Hz", "22050 Hz", "24000 Hz", "32000 Hz", "44100 Hz"});
+        }
+        if ("mp3".equals(current.audioFormat)) {
             miniMaxChoice(form, "MP3 码率", MiniMaxSpeechOptions.BITRATE, MiniMaxSpeechOptions.BITRATES,
                     new String[]{"32 kbps", "64 kbps", "128 kbps", "256 kbps"});
         }
         miniMaxChoice(form, "声道", MiniMaxSpeechOptions.CHANNEL, MiniMaxSpeechOptions.CHANNELS,
                 new String[]{"单声道", "双声道"});
-        editable(form, "音高调整（-100 至 100）", MiniMaxSpeechOptions.MODIFY_PITCH, "0", false);
-        editable(form, "音强调整（-100 至 100）", MiniMaxSpeechOptions.MODIFY_INTENSITY, "0", false);
-        editable(form, "音色调整（-100 至 100）", MiniMaxSpeechOptions.MODIFY_TIMBRE, "0", false);
-        miniMaxChoice(form, "声音效果", MiniMaxSpeechOptions.SOUND_EFFECT, MiniMaxSpeechOptions.SOUND_EFFECTS,
-                new String[]{"不使用", "空旷回声", "礼堂回声", "电话音质", "机器人"});
-        editable(form, "发音字典（每行 原文/替换内容）", MiniMaxSpeechOptions.PRONUNCIATION_TONE, "", false);
-        miniMaxChoice(form, "LaTeX 朗读", MiniMaxSpeechOptions.LATEX_READ, MiniMaxSpeechOptions.OPTIONAL_BOOLEANS,
-                new String[]{"不指定", "开启（仅中文）", "关闭"});
         miniMaxChoice(form, "AIGC 水印", MiniMaxSpeechOptions.AIGC_WATERMARK, MiniMaxSpeechOptions.OPTIONAL_BOOLEANS,
                 new String[]{"不指定", "开启", "关闭"});
+    }
+
+    private void resetMiniMaxVoiceModify() {
+        show(builder("重置音色调整").setMessage("将音高、音强、音色调整设为 0，并关闭声音效果；保留音频格式、单音色、混音及其它设置。")
+                .setNegativeButton("取消", null).setPositiveButton("重置", (dialog, which) -> {
+                    store.putString(MiniMaxSpeechOptions.MODIFY_PITCH, "0");
+                    store.putString(MiniMaxSpeechOptions.MODIFY_INTENSITY, "0");
+                    store.putString(MiniMaxSpeechOptions.MODIFY_TIMBRE, "0");
+                    store.putString(MiniMaxSpeechOptions.SOUND_EFFECT, "");
+                    settingChanged(MiniMaxSpeechOptions.MODIFY_PITCH);
+                    render();
+                }).create(), null);
     }
 
     private void miniMaxChoice(LinearLayout form, String title, String key, String[] choices, String[] labels) {
@@ -336,6 +441,12 @@ final class SpeechSettingsDialog implements AutoCloseable {
 
     private void renderAdvanced(LinearLayout form) {
         form.removeAllViews();
+        if (!settings().thirdParty) {
+            hint(form, "speech.third.inactive", "切换至第三方来源后可设置音色列表。");
+            return;
+        }
+        editable(form, "音色列表 GET", SpeechSettings.VOICE_GET_TEMPLATE, SpeechSettings.DEFAULT_VOICE_GET_TEMPLATE, false);
+        option(form, "刷新音色", null, this::refreshVoices);
         editable(form, "音色列表请求头", SpeechSettings.VOICE_HEADERS, "{}", false);
         editable(form, "列表字段", SpeechSettings.VOICE_LIST_PATH, "", false);
         editable(form, "音色编号字段", SpeechSettings.VOICE_ID_PATH, "", false);
@@ -457,7 +568,8 @@ final class SpeechSettingsDialog implements AutoCloseable {
                     .setPositiveButton("保存", null).create();
             show(editor, null);
             editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
-                String candidate = input.getText().toString().trim();
+                String candidate = input.getText().toString();
+                if (!MiniMaxSpeechOptions.TIMBRE_WEIGHTS.equals(key)) candidate = candidate.trim();
                 try {
                     if (SpeechSettings.RATE.equals(key) || SpeechSettings.PITCH.equals(key)) {
                         candidate = SpeechSettings.validateLocalRateOrPitch(candidate);
@@ -901,6 +1013,10 @@ final class SpeechSettingsDialog implements AutoCloseable {
         closed = true;
         cancelFetch();
         stopPreview();
+        for (Dialog child : new ArrayList<>(sectionDialogs.values())) child.dismiss();
+        sectionDialogs.clear();
+        sectionContents.clear();
+        advancedContent = null;
     }
     private static final class ParameterRow {
         LinearLayout container;

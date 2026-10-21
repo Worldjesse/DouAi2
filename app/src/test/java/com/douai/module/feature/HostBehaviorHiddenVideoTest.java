@@ -47,11 +47,12 @@ public final class HostBehaviorHiddenVideoTest {
         assertSame(HostBehaviorHooks.HiddenSafetyTaskContract.HOST_406,
                 HostBehaviorHooks.HiddenSafetyTaskContract.resolve("Lkotlin/jvm/internal/ALambdaS32S1500000_4;", "LX/06ht;"));
         assertSame(HostBehaviorHooks.HiddenSafetyTaskContract.HOST_408,
-                HostBehaviorHooks.HiddenSafetyTaskContract.resolve("Lkotlin/jvm/internal/ALambdaS31S1500000_28;",
-                        "Lkotlin/jvm/internal/ALambdaS17S1600000_28;"));
+                HostBehaviorHooks.HiddenSafetyTaskContract.resolve("Lkotlin/jvm/internal/ALambdaS38S1500000_35;",
+                        "LX/12bW;"));
         for (String[] pair : Arrays.asList(
-                new String[]{"Lkotlin/jvm/internal/ALambdaS32S1500000_4;", "Lkotlin/jvm/internal/ALambdaS17S1600000_28;"},
-                new String[]{"Lkotlin/jvm/internal/ALambdaS31S1500000_28;", "LX/06ht;"},
+                new String[]{"Lkotlin/jvm/internal/ALambdaS32S1500000_4;", "LX/12bW;"},
+                new String[]{"Lkotlin/jvm/internal/ALambdaS38S1500000_35;", "LX/06ht;"},
+                new String[]{"Lkotlin/jvm/internal/ALambdaS31S1500000_28;", "Lkotlin/jvm/internal/ALambdaS17S1600000_28;"},
                 new String[]{"Lunknown/Current;", "Lunknown/Background;"})) {
             assertThrows(IllegalStateException.class, () -> HostBehaviorHooks.HiddenSafetyTaskContract.resolve(pair[0], pair[1]));
         }
@@ -224,10 +225,10 @@ public final class HostBehaviorHiddenVideoTest {
         }
     }
 
-    @Test public void discriminatorTwoRetainsTheSeparateDirectDeletionBranchWhenProtectionIsEnabled() throws Throwable {
+    @Test public void discriminatorOneRetainsTheSeparateDirectDeletionBranchWhenProtectionIsEnabled() throws Throwable {
         try (SafetyFlow flow = new SafetyFlow(legacy, true)) {
-            // Original 40.8 DEX: $t=2 uses DefaultImpls.LIZIZ -> LJIIIZ(aid,"none").
-            Object result = flow.harness.invoke(CurrentSafetyTask.class.getMethod("invoke"), new CurrentSafetyTask(flow, "B", legacy ? 1 : 2));
+            // Both supported APKs use $t=1 for the separate generic deletion path.
+            Object result = flow.harness.invoke(CurrentSafetyTask.class.getMethod("invoke"), new CurrentSafetyTask(flow, "B", 1));
             assertSame(Unit.INSTANCE, result);
             assertEquals(Arrays.asList("A", "C"), flow.aids());
             assertEquals(List.of("none"), flow.directDeleteSources);
@@ -236,20 +237,14 @@ public final class HostBehaviorHiddenVideoTest {
         }
     }
 
-    @Test public void unrelatedPopupAndBackgroundRetryCasesStillRunWhenProtectionIsEnabled() throws Throwable {
-        if (legacy) {
-            assertThrows(NoSuchFieldException.class, () -> LegacyBackgroundSafetyTask.class.getDeclaredField("$t"));
-            return;
-        }
+    @Test public void dedicatedBackgroundTasksHaveNoDispatcherAndUnknownCurrentCasesStillProceed() throws Throwable {
+        assertThrows(NoSuchFieldException.class, () -> LegacyBackgroundSafetyTask.class.getDeclaredField("$t"));
+        assertThrows(NoSuchFieldException.class, () -> BackgroundSafetyTask.class.getDeclaredField("$t"));
         try (SafetyFlow flow = new SafetyFlow(legacy, true)) {
-            assertSame(Unit.INSTANCE, flow.harness.invoke(CurrentSafetyTask.class.getMethod("invoke"),
-                    new CurrentSafetyTask(flow, "B", 0)));
-            assertSame(Unit.INSTANCE, flow.harness.invoke(BackgroundSafetyTask.class.getMethod("invoke"),
-                    new BackgroundSafetyTask(flow, "C", 1)));
-            assertEquals(1, flow.popupCalls);
-            assertEquals(1, flow.retryCalls);
+            assertNull(flow.harness.invoke(CurrentSafetyTask.class.getMethod("invoke"),
+                    new CurrentSafetyTask(flow, "B", 2)));
             assertEquals(Arrays.asList("A", "B", "C"), flow.aids());
-            assertEquals(2, flow.harness.proceeded);
+            assertEquals(1, flow.harness.proceeded);
             Bundle diagnostic = new Bundle(); flow.hooks.appendHiddenSkipDiagnostics(diagnostic);
             assertEquals(0, diagnostic.getLong("hidden_skip_current_hits"));
             assertEquals(0, diagnostic.getLong("hidden_skip_background_hits"));
@@ -281,13 +276,14 @@ public final class HostBehaviorHiddenVideoTest {
     }
 
     @Test public void missingRulesOrChangedTaskShapesLeaveTheWholeFeatureUnavailableAndHostDeletionOpen() throws Throwable {
-        for (String fault : Arrays.asList("missing_current", "missing_background", "wrong_discriminator", "wrong_background_discriminator", "wrong_return")) {
+        for (String fault : Arrays.asList("missing_current", "missing_background", "wrong_discriminator", "wrong_background_discriminator", "shared_background_dispatcher", "wrong_return")) {
             Map<String, Method> methods = hiddenMethods(BasePanel.class.getMethod("deleteAweme", int.class, Object.class),
                     FullPanel.class.getMethod("deleteAweme", int.class, Object.class), legacy);
             if ("missing_current".equals(fault)) methods.remove("adv_ui_hidden_recall_task");
             if ("missing_background".equals(fault)) methods.remove("adv_ui_hidden_background_task");
             if ("wrong_discriminator".equals(fault)) methods.put("adv_ui_hidden_recall_task", WrongDiscriminatorTask.class.getMethod("invoke"));
             if ("wrong_background_discriminator".equals(fault)) methods.put("adv_ui_hidden_background_task", WrongDiscriminatorTask.class.getMethod("invoke"));
+            if ("shared_background_dispatcher".equals(fault)) methods.put("adv_ui_hidden_background_task", SharedBackgroundTask.class.getMethod("invoke"));
             if ("wrong_return".equals(fault)) methods.put("adv_ui_hidden_background_task", WrongReturnTask.class.getMethod("invoke"));
             Harness harness = new Harness();
             try (HostBehaviorHooks hooks = HostBehaviorHooks.installWithHiddenTaskContract(harness.framework, report(methods, legacy), getClass().getClassLoader(), null,
@@ -332,11 +328,11 @@ public final class HostBehaviorHiddenVideoTest {
         List<String> logs = new ArrayList<>();
         try (SafetyFlow flow = new SafetyFlow(legacy, true, logs::add)) {
             for (int repeat = 0; repeat < 2; repeat++) { flow.onNeedRecallAid("B", "C"); flow.drainMain(); }
-            flow.harness.invoke(CurrentSafetyTask.class.getMethod("invoke"), new CurrentSafetyTask(flow, "absent", legacy ? 1 : 2));
+            flow.harness.invoke(CurrentSafetyTask.class.getMethod("invoke"), new CurrentSafetyTask(flow, "absent", 1));
             Bundle active = new Bundle(); flow.hooks.appendHiddenSkipDiagnostics(active);
             assertTrue(active.getBoolean("hidden_skip_enabled"));
             assertTrue(active.getBoolean("hidden_skip_installed"));
-            assertEquals("The separate discriminator-two branch must not count as a safety recall", 2, active.getLong("hidden_skip_current_hits"));
+            assertEquals("The separate generic branch must not count as a safety recall", 2, active.getLong("hidden_skip_current_hits"));
             assertEquals(2, active.getLong("hidden_skip_current_blocked"));
             assertEquals(2, active.getLong("hidden_skip_background_hits"));
             assertEquals(2, active.getLong("hidden_skip_background_blocked"));
@@ -355,7 +351,7 @@ public final class HostBehaviorHiddenVideoTest {
             assertEquals(1L, logs.stream().filter("Hidden video auto-skip blocked: route=background"::equals).count());
 
             flow.hooks.close();
-            flow.harness.invoke(CurrentSafetyTask.class.getMethod("invoke"), new CurrentSafetyTask(flow, "A", legacy ? 0 : 1));
+            flow.harness.invoke(CurrentSafetyTask.class.getMethod("invoke"), new CurrentSafetyTask(flow, "A", 0));
             Bundle closed = new Bundle(); flow.hooks.appendHiddenSkipDiagnostics(closed);
             assertFalse(closed.getBoolean("hidden_skip_enabled"));
             assertFalse(closed.getBoolean("hidden_skip_installed"));
@@ -366,6 +362,11 @@ public final class HostBehaviorHiddenVideoTest {
 
     public static final class WrongDiscriminatorTask {
         public final String $t = "0";
+        public Object invoke() { return Unit.INSTANCE; }
+    }
+
+    public static final class SharedBackgroundTask {
+        public final int $t = 0;
         public Object invoke() { return Unit.INSTANCE; }
     }
 
@@ -390,16 +391,15 @@ public final class HostBehaviorHiddenVideoTest {
         }
     }
 
-    /** Original 40.8 ALambdaS31S1500000_28 maps one to recall and two to generic deletion. */
+    /** Original 40.6 and 40809900 tasks map zero to recall and one to generic deletion. */
     public static final class CurrentSafetyTask {
         public final int $t;
         private final SafetyFlow flow;
         private final String aid;
         CurrentSafetyTask(SafetyFlow flow, String aid, int discriminator) { this.flow = flow; this.aid = aid; $t = discriminator; }
         public Object invoke() {
-            if ($t == (flow.legacy ? 0 : 1)) flow.recall(aid);
-            else if ($t == (flow.legacy ? 1 : 2)) flow.directDelete(aid, "none");
-            else if (!flow.legacy && $t == 0) flow.popupCalls++;
+            if ($t == 0) flow.recall(aid);
+            else if ($t == 1) flow.directDelete(aid, "none");
             else return null;
             return Unit.INSTANCE;
         }
@@ -412,23 +412,16 @@ public final class HostBehaviorHiddenVideoTest {
         public Object invoke() { flow.directDelete(aid, "safety_check"); return Unit.INSTANCE; }
     }
 
-    /** Original 40.8 ALambdaS17S1600000_28 maps zero to safety deletion and one to task retries. */
+    /** Original 40809900 LX/12bW is dedicated to background safety deletion. */
     public static final class BackgroundSafetyTask {
-        public final int $t;
         private final SafetyFlow flow;
         private final String aid;
-        BackgroundSafetyTask(SafetyFlow flow, String aid) { this(flow, aid, 0); }
-        BackgroundSafetyTask(SafetyFlow flow, String aid, int discriminator) { this.flow = flow; this.aid = aid; $t = discriminator; }
-        public Object invoke() {
-            if ($t == 0) flow.directDelete(aid, "safety_check");
-            else if ($t == 1) flow.retryCalls++;
-            else return null;
-            return Unit.INSTANCE;
-        }
+        BackgroundSafetyTask(SafetyFlow flow, String aid) { this.flow = flow; this.aid = aid; }
+        public Object invoke() { flow.directDelete(aid, "safety_check"); return Unit.INSTANCE; }
     }
 
     /**
-     * Behavioral replay, not an invented delete-method assertion: 1WF3 caches then queues one of two tasks;
+     * Behavioral replay: the original safety callback caches then queues one of two tasks;
      * current recall mutates the global set, notifies the panel, emits an event and reaches model.remove;
      * background removal reaches the model through feedDataContext. Neither route enters legacy LJLJL.
      * HiddenVideoHostContractTest independently pins these edges against the original APK DEX.
@@ -446,7 +439,7 @@ public final class HostBehaviorHiddenVideoTest {
         final List<List<String>> cachedRejectedAids = new ArrayList<>();
         final List<String> directDeleteSources = new ArrayList<>();
         final List<Integer> adapterDeletedIndexes = new ArrayList<>();
-        int currentIndex = 1, cacheCalls, recallEvents, modelDeletes, popupCalls, retryCalls;
+        int currentIndex = 1, cacheCalls, recallEvents, modelDeletes;
 
         SafetyFlow(boolean legacy, boolean enabled) throws Exception {
             this(legacy, enabled, ignored -> { });
@@ -462,10 +455,10 @@ public final class HostBehaviorHiddenVideoTest {
         void onNeedRecallAid(String... rejectedAids) {
             cacheCalls++;
             cachedRejectedAids.add(Arrays.asList(rejectedAids.clone()));
-            // 1WF3 records the rejection list before scheduling its current/background branches.
+            // 06hv / 12bV record the rejection list before scheduling current/background work.
             for (String aid : rejectedAids) {
                 if (find(aid) == null) continue;
-                mainTasks.add(aid.equals(currentAid()) ? new CurrentSafetyTask(this, aid, legacy ? 0 : 1)
+                mainTasks.add(aid.equals(currentAid()) ? new CurrentSafetyTask(this, aid, 0)
                         : legacy ? new LegacyBackgroundSafetyTask(this, aid) : new BackgroundSafetyTask(this, aid));
             }
         }

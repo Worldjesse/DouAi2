@@ -9,6 +9,9 @@ import android.widget.FrameLayout;
 import android.widget.TextView;
 
 import org.junit.Test;
+import org.junit.Before;
+import org.junit.After;
+import com.douai.module.scan.HostAdaptation;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
@@ -33,6 +36,8 @@ import static org.junit.Assert.fail;
 
 @RunWith(RobolectricTestRunner.class)
 public final class DownloadActionHookTest {
+    @Before public void installedLegacyProfile() { HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_406); }
+    @After public void resetHostProfile() { HostAdaptation.setCurrentProfile(null); }
     public static final class DownloadModuleFixture {
         Context context;
         View nativeRow;
@@ -51,6 +56,8 @@ public final class DownloadActionHookTest {
             nativeRow = row;
             return row;
         }
+
+        public View LJJI(Context context, ViewGroup parent) { return LJJIFFI(context, parent); }
 
         public void LJJIJIL(View view) {
             nativeClickCalls++;
@@ -191,6 +198,69 @@ public final class DownloadActionHookTest {
         }
     }
 
+    @Test public void new9900FactoryUsesTheVerifiedProfileAndRejectsLegacyName() throws Exception {
+        HostAdaptation.setCurrentProfile(HostAdaptation.PROFILE_408);
+        AtomicReference<XposedInterface.Hooker> installed = new AtomicReference<>();
+        try (DownloadActionHook ignored = DownloadActionHook.install(createFramework(installed, new AtomicBoolean()),
+                method("moduleName"), method("LJJI", Context.class, ViewGroup.class), method("LJJIJIL", View.class), true, value -> { })) {
+            assertNotNull(installed.get());
+        }
+        AtomicBoolean registered = new AtomicBoolean();
+        try {
+            DownloadActionHook.install(createFramework(new AtomicReference<>(), registered), method("moduleName"),
+                    method("LJJIFFI", Context.class, ViewGroup.class), method("LJJIJIL", View.class), true, ignored -> { });
+            fail("The 406 factory must not be accepted for the 9900 profile");
+        } catch (IllegalArgumentException expected) { assertFalse(registered.get()); }
+    }
+
+    @Test public void unverifiedProfileCannotInstallNativeDownloadFactory() throws Exception {
+        HostAdaptation.setCurrentProfile(null); AtomicBoolean registered = new AtomicBoolean();
+        try {
+            DownloadActionHook.install(createFramework(new AtomicReference<>(), registered), method("moduleName"),
+                    method("LJJIFFI", Context.class, ViewGroup.class), method("LJJIJIL", View.class), true, ignored -> { });
+            fail("Original host profile is required");
+        } catch (IllegalArgumentException expected) { assertFalse(registered.get()); }
+    }
+
+    @Test public void nativeMenuMethodsMatchTheSelectedOriginalHostDex() throws Exception {
+        String configured = System.getenv("DOUAI_TEST_APK");
+        org.junit.Assume.assumeTrue("DOUAI_TEST_APK is not configured", configured != null);
+        java.io.File apk = new java.io.File(configured);
+        assertTrue(apk.isFile());
+        boolean legacy = com.douai.module.scan.HostApkTestProfile.is406(apk);
+        java.util.Set<String> required = new java.util.HashSet<>(Arrays.asList("moduleName()Ljava/lang/String;",
+                (legacy ? "LJJIFFI" : "LJJI") + "(Landroid/content/Context;Landroid/view/ViewGroup;)Landroid/view/View;",
+                "LJJIJIL(Landroid/view/View;)V"));
+        String owner = "Lcom/ss/android/ugc/aweme/feed/long_press_panel/modules/business/homepage/LppDownloadModule;";
+        boolean found = false;
+        try (java.util.zip.ZipFile archive = new java.util.zip.ZipFile(apk)) {
+            java.util.Enumeration<? extends java.util.zip.ZipEntry> entries = archive.entries();
+            while (entries.hasMoreElements() && !found) {
+                java.util.zip.ZipEntry entry = entries.nextElement();
+                if (!entry.getName().matches("classes[0-9]*\\.dex")) continue;
+                try (java.io.BufferedInputStream input = new java.io.BufferedInputStream(archive.getInputStream(entry))) {
+                    com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile dex = com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile.fromInputStream(com.android.tools.smali.dexlib2.Opcodes.getDefault(), input);
+                    for (com.android.tools.smali.dexlib2.iface.ClassDef type : dex.getClasses()) {
+                        if (!owner.equals(type.getType())) continue;
+                        found = true;
+                        for (com.android.tools.smali.dexlib2.iface.Method method : type.getMethods()) {
+                            StringBuilder signature = new StringBuilder(method.getName()).append('(');
+                            for (CharSequence parameter : method.getParameterTypes()) signature.append(parameter);
+                            signature.append(')').append(method.getReturnType());
+                            if (!required.contains(signature.toString())) continue;
+                            assertTrue(com.android.tools.smali.dexlib2.AccessFlags.PUBLIC.isSet(method.getAccessFlags()));
+                            assertFalse(com.android.tools.smali.dexlib2.AccessFlags.STATIC.isSet(method.getAccessFlags()));
+                            required.remove(signature.toString());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        assertTrue("Missing original download module", found);
+        assertTrue("Missing original download methods: " + required, required.isEmpty());
+    }
+
     @Test public void thirdPartyModeExposesOnlyItsDownloadActionAndDoesNotFallbackToOfficial() throws Throwable {
         ActivityController<Activity> activity = Robolectric.buildActivity(Activity.class).setup();
         AtomicReference<XposedInterface.Hooker> installed = new AtomicReference<>();
@@ -242,7 +312,7 @@ public final class DownloadActionHookTest {
                 (proxy, method, args) -> {
                     if ("intercept".equals(method.getName())) {
                         registered.set(true);
-                        if ("LJJIFFI".equals(target.get().getName())) installed.set((XposedInterface.Hooker) args[0]);
+                        if ("LJJIFFI".equals(target.get().getName()) || "LJJI".equals(target.get().getName())) installed.set((XposedInterface.Hooker) args[0]);
                         return handle;
                     }
                     return builder.get();

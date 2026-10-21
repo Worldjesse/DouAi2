@@ -11,6 +11,24 @@ import static com.douai.module.config.ConfigurationCatalog.Feature.*;
 import static org.junit.Assert.*;
 
 public final class ConfigurationCatalogTest {
+    @Test public void globalHashLongPressRefreshesOnlyTheTwoManualSpeechAdapters() {
+        assertEquals("boolean", ConfigKeys.TYPES.get(LocalOptions.HASH_LONG_PRESS_VOICE));
+        assertEquals(false, ConfigurationCatalog.settings().get(LocalOptions.HASH_LONG_PRESS_VOICE).defaultValue);
+        assertConsumers(LocalOptions.HASH_LONG_PRESS_VOICE, EnumSet.of(DIRECT_MESSAGE_SPEECH, NATIVE_COMMENT_SPEECH));
+    }
+    @Test public void debugModeTransfersWithFalseDefaultAndDoesNotRestartAutomation() {
+        assertEquals("boolean", ConfigKeys.TYPES.get(LocalOptions.DEBUG_LOGGING));
+        assertEquals(false, ConfigurationCatalog.settings().get(LocalOptions.DEBUG_LOGGING).defaultValue);
+        assertConsumers(LocalOptions.DEBUG_LOGGING, EnumSet.of(DIAGNOSTICS));
+    }
+    @Test public void miniMaxTransportAndMixKeysParticipateInBackupAndSharedSpeechRefresh() {
+        for (String key : new String[]{MiniMaxSpeechOptions.OUTPUT_FORMAT, MiniMaxSpeechOptions.TIMBRE_WEIGHTS}) {
+            assertEquals("string", ConfigKeys.TYPES.get(key));
+            assertConsumers(key, EnumSet.of(REPLY, COMMENT_AUTOMATION, COMMENT_REPLY,
+                    AUTOMATION_DISPATCH, DIRECT_MESSAGE_SPEECH, NATIVE_COMMENT_SPEECH));
+        }
+    }
+
     @Test public void transferSchemaKeepsLegacySettingsButExcludesCommandsAndRuntimeData() {
         assertEquals("boolean", ConfigKeys.TYPES.get(LocalOptions.COMMENT_REPLY_ENABLED));
         assertEquals("string", ConfigKeys.TYPES.get("comment_reply_prompt"));

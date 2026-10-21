@@ -43,11 +43,12 @@ final class NativeCommentPublisher implements AutoCloseable {
     private final Method resolveAweme;
     private final Field modelText;
     private final Field modelContext;
-    private final Map<Object, Pending> requests = new IdentityHashMap<>();
+    private final Map<Object, Pending> requests = java.util.Collections.synchronizedMap(new IdentityHashMap<>());
     private final ThreadLocal<Pending> submitting = new ThreadLocal<>();
     private final Map<Object, String> ownedModels = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
     private final List<XposedInterface.HookHandle> handles = new ArrayList<>();
     private final Consumer<String> log;
+    private final CommentAudioDiagnostics diagnostics;
     private final Field attachment;
     private final Constructor<?> attachmentConstructor;
     private final Constructor<?> audioConstructor;
@@ -56,7 +57,8 @@ final class NativeCommentPublisher implements AutoCloseable {
     private ReplyBinding replyBinding;
     private volatile boolean closed;
 
-    private NativeCommentPublisher(HostScanReport report, ClassLoader loader, Consumer<String> log) throws Exception {
+    private NativeCommentPublisher(HostScanReport report, ClassLoader loader, Consumer<String> log,
+                                   String namespace) throws Exception {
         this.report = report;
         this.loader = loader;
         submit = HostTargets.method(report, "auto_comment_checked_request", loader);
@@ -72,6 +74,7 @@ final class NativeCommentPublisher implements AutoCloseable {
                 ? HostTargets.type(report, "comment_audio_model", loader).getConstructor(java.io.File.class, List.class, Long.class)
                 : null;
         this.log = log;
+        diagnostics = new CommentAudioDiagnostics(log, namespace);
         if (submit.getReturnType() != boolean.class || contextFactory.getReturnType() != modelContext.getType()
                 || resolveAweme.getParameterTypes()[0] != modelContext.getType()) {
             throw new IllegalStateException("Automatic comment publisher contract changed");
@@ -86,8 +89,9 @@ final class NativeCommentPublisher implements AutoCloseable {
     static NativeCommentPublisher install(XposedInterface framework, HostScanReport report,
                                          ClassLoader loader, Consumer<String> log, String namespace) throws Exception {
         if (namespace == null || namespace.trim().isEmpty()) throw new IllegalArgumentException("Hook namespace is required");
-        NativeCommentPublisher publisher = new NativeCommentPublisher(report, loader, log);
+        NativeCommentPublisher publisher = new NativeCommentPublisher(report, loader, log, namespace);
         try {
+            publisher.diagnostics.install(framework, loader);
             Method upload = HostTargets.method(report, "auto_comment_audio_upload", loader);
             XposedInterface.HookHandle uploadHandle = framework.hook(upload).setId(namespace + ".AudioUpload")
                     .setExceptionMode(XposedInterface.ExceptionMode.PASSTHROUGH).intercept(chain -> {
@@ -99,12 +103,39 @@ final class NativeCommentPublisher implements AutoCloseable {
                                 && pending.audioPath.equals(chain.getArg(1))) {
                             // The checked host method returns false after starting asynchronous audio upload.
                             pending.uploadStarted = true;
+                            publisher.diagnostics.model(pending.sample, "upload_before", pending.model);
                             publisher.safeLog("Automatic comment native audio upload started for owned request");
                         }
                         return chain.proceed();
                     });
             if (uploadHandle == null) throw new IllegalStateException("Empty comment audio upload hook");
             publisher.handles.add(uploadHandle);
+            // This is the already-scanned native method called after the uploader sets VID.
+            // A missing diagnostic hook must never block the original publishing workflow.
+            try {
+                Method publish = HostTargets.method(report, "comment_publish_submit", loader);
+                if (publish.getDeclaringClass() != publisher.submit.getDeclaringClass()
+                        || publish.getReturnType() != void.class || Modifier.isStatic(publish.getModifiers())
+                        || publish.getParameterTypes().length != 1
+                        || publish.getParameterTypes()[0] != publisher.modelConstructor.getDeclaringClass()) {
+                    throw new IllegalStateException("Comment audio publish diagnostic contract unavailable");
+                }
+                XposedInterface.HookHandle publishHandle = framework.hook(publish)
+                        .setId(namespace + ".AudioPublishModel")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PASSTHROUGH).intercept(chain -> {
+                            Pending owned = publisher.requests.get(chain.getThisObject());
+                            Object model = chain.getArg(0);
+                            if (owned != null && owned.audioPath != null && owned.model == model) {
+                                publisher.diagnostics.model(owned.sample, "publish_before", model);
+                            }
+                            return chain.proceed();
+                        });
+                if (publishHandle != null) publisher.handles.add(publishHandle);
+                else publisher.safeLog("Comment audio publish diagnostic hook unavailable");
+            } catch (Exception | LinkageError unavailable) {
+                publisher.safeLog("Comment audio publish diagnostic hook unavailable: "
+                        + unavailable.getClass().getSimpleName());
+            }
             for (String rule : new String[]{"auto_comment_publish_success", "auto_comment_publish_failure"}) {
                 Method target = HostTargets.method(report, rule, loader);
                 boolean success = rule.endsWith("success");
@@ -114,8 +145,23 @@ final class NativeCommentPublisher implements AutoCloseable {
                             Object response = chain.getArg(0);
                             Pending pending = publisher.submitting.get();
                             if (pending != null && pending.owner == owner) pending.callbackSeen = true;
-                            try { return chain.proceed(); }
+                            Pending owned = publisher.requests.get(owner);
+                            if (owned != null && owned.audioPath != null) {
+                                publisher.diagnostics.response(owned.sample,
+                                        success ? "success_before" : "failure_before", response);
+                            }
+                            boolean returned = false;
+                            try {
+                                Object value = chain.proceed();
+                                returned = true;
+                                return value;
+                            }
                             finally {
+                                if (owned != null && owned.audioPath != null) {
+                                    publisher.diagnostics.response(owned.sample,
+                                            success ? (returned ? "success_after" : "success_threw")
+                                                    : (returned ? "failure_after" : "failure_threw"), response);
+                                }
                                 publisher.main.post(() -> {
                                     Pending tracked = publisher.requests.get(owner);
                                     String status = !success ? "failed" : tracked == null ? "submitted"
@@ -196,7 +242,7 @@ final class NativeCommentPublisher implements AutoCloseable {
                     }
                     Object media = attachmentConstructor.newInstance();
                     HostTargets.field(media.getClass(), "audio").set(media,
-                            audioConstructor.newInstance(audio.file, java.util.Collections.emptyList(), Long.valueOf(audio.duration)));
+                            audioConstructor.newInstance(audio.file, CommentAudioWaveform.nativeFallback(), Long.valueOf(audio.duration)));
                     HostTargets.field(media.getClass(), "text").set(media, new android.text.SpannableStringBuilder());
                     attachment.set(model, media);
                     HostTargets.field(model.getClass(), "d").set(model, java.util.Collections.emptyList());
@@ -206,10 +252,12 @@ final class NativeCommentPublisher implements AutoCloseable {
                     throw new IllegalStateException("Comment reply native target does not match");
                 }
                 ownedModels.put(model, outputText);
+                CommentAudioDiagnostics.Sample sample = audio == null ? null
+                        : diagnostics.begin(model, aid, reply != null);
                 request = requestConstructor.newInstance();
                 pending = new Pending(aid, request, model, audio == null ? null : audio.file.getAbsolutePath(),
                         reply == null ? null : reply.rootId, reply == null ? null : reply.incomingId,
-                        audio == null ? "" : audioWorkDiagnostic(origin), result);
+                        audio == null ? "" : audioWorkDiagnostic(origin), sample, result);
                 requests.put(request, pending);
                 if (!valid.getAsBoolean() || !beforeNativeSend.getAsBoolean()) {
                     received(request, "cancelled");
@@ -305,7 +353,9 @@ final class NativeCommentPublisher implements AutoCloseable {
     private void received(Object request, String status, String detail) {
         Pending pending = requests.remove(request);
         if (pending == null || closed) return;
-        safeLog("Automatic comment native callback: " + status + detail + audioPhase(pending));
+        safeLog("Automatic comment native callback: " + status + detail + audioPhase(pending)
+                + "; kind=" + (pending.rootId == null ? "root" : "reply")
+                + "; media=" + (pending.audioPath == null ? "text" : "voice"));
         pending.result.accept(status);
     }
 
@@ -469,6 +519,10 @@ final class NativeCommentPublisher implements AutoCloseable {
 
     @Override public void close() {
         closed = true;
+        try { diagnostics.close(); }
+        catch (RuntimeException | LinkageError unavailable) {
+            safeLog("Comment audio diagnostics close unavailable: " + unavailable.getClass().getSimpleName());
+        }
         main.post(requests::clear);
         ownedModels.clear();
         for (XposedInterface.HookHandle handle : handles) {
@@ -485,15 +539,17 @@ final class NativeCommentPublisher implements AutoCloseable {
         final String rootId;
         final String incomingId;
         final String audioWorkDiagnostic;
+        final CommentAudioDiagnostics.Sample sample;
         final Consumer<String> result;
         final AtomicBoolean timedOut = new AtomicBoolean();
         boolean uploadStarted;
         boolean callbackSeen;
         Pending(String aid, Object owner, Object model, String audioPath, String rootId, String incomingId,
-                String audioWorkDiagnostic, Consumer<String> result) {
+                String audioWorkDiagnostic, CommentAudioDiagnostics.Sample sample, Consumer<String> result) {
             this.aid = aid; this.owner = owner; this.model = model; this.audioPath = audioPath; this.result = result;
             this.rootId = rootId; this.incomingId = incomingId;
             this.audioWorkDiagnostic = audioWorkDiagnostic;
+            this.sample = sample;
         }
     }
 }

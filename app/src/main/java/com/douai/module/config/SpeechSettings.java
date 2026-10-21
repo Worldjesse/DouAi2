@@ -107,7 +107,7 @@ public final class SpeechSettings {
         if (minimaxApiKey.isEmpty() || containsControl(minimaxApiKey)) throw new IllegalArgumentException("请设置有效的 MiniMax API Key");
         validateMiniMaxValue(MINIMAX_BASE_URL, minimaxBaseUrl);
         validateMiniMaxValue(MINIMAX_MODEL, minimaxModel);
-        validateMiniMaxValue(MINIMAX_VOICE_ID, minimaxVoiceId);
+        if (!minimaxOptions.hasMixedVoices()) validateMiniMaxValue(MINIMAX_VOICE_ID, minimaxVoiceId);
         validateMiniMaxValue(MINIMAX_SPEED, options.text(MINIMAX_SPEED, minimaxSpeedText()));
         validateMiniMaxValue(MINIMAX_VOLUME, options.text(MINIMAX_VOLUME, minimaxVolumeText()));
         validateMiniMaxValue(MINIMAX_PITCH, options.text(MINIMAX_PITCH, minimaxPitchText()));
@@ -135,7 +135,8 @@ public final class SpeechSettings {
                 return text;
             } catch (RuntimeException failure) { throw new IllegalArgumentException("请输入有效的 MiniMax API 地址，不含认证、查询参数或片段"); }
         }
-        if (MINIMAX_MODEL.equals(key) || MINIMAX_VOICE_ID.equals(key)) {
+        if (MINIMAX_VOICE_ID.equals(key)) return validateMiniMaxVoiceId(text, true);
+        if (MINIMAX_MODEL.equals(key)) {
             if (text.isEmpty() || text.length() > 256 || containsControl(text)) {
                 throw new IllegalArgumentException(MINIMAX_MODEL.equals(key) ? "请输入有效的 MiniMax 模型" : "请输入有效的 MiniMax 音色 ID");
             }
@@ -166,6 +167,15 @@ public final class SpeechSettings {
             throw new IllegalArgumentException(speed ? "请输入 0.5 至 2 的语速" : "请输入大于 0 且不超过 10 的音量");
         }
         return text;
+    }
+
+    /** Mixed-voice requests keep the provider's required voice_id key empty without erasing the saved single voice. */
+    public static String validateMiniMaxVoiceId(String value, boolean required) {
+        String voice = value == null ? "" : value.trim();
+        if (required && voice.isEmpty() || voice.length() > 256 || containsControl(value == null ? "" : value)) {
+            throw new IllegalArgumentException("请输入有效的 MiniMax 音色 ID");
+        }
+        return voice;
     }
 
     private static boolean containsControl(String value) {

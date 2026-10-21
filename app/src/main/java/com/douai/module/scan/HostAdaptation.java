@@ -10,8 +10,9 @@ public final class HostAdaptation {
     public static final String RULES_ASSET = "douyin-host-rules.tsv";
     public static final String VERIFIED_VERSION_NAME = "40.8.0";
     public static final long VERIFIED_VERSION_CODE = 400801L;
+    public static final long VERIFIED_UPDATE_VERSION_CODE = 40809900L;
     public static final String VERIFIED_RULES_FINGERPRINT =
-            "87cb5a631b5ae34a9da87dac781bf496b06e477f4607bfdae611073d48835ce1";
+            "ab5215b527416778cf4a773880af43d9d073ce0512935ee99dfbd6e89c55a6f1";
     private static final Map<Integer, String> FEED_RESOURCES = feedResources();
 
     private HostAdaptation() { }

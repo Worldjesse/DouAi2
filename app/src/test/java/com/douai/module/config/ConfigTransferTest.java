@@ -18,6 +18,46 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class ConfigTransferTest {
+    @Test public void miniMaxMixedTransportSettingsRoundTripAndMergedValidationRejectsBrokenCombinations() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+        source.values.put(SpeechSettings.MINIMAX_VOICE_ID, "");
+        source.values.put(MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "first/20\nsecond/30");
+        source.values.put(MiniMaxSpeechOptions.OUTPUT_FORMAT, "hex");
+        source.values.put(MiniMaxSpeechOptions.AUDIO_FORMAT, "opus");
+        String encoded = ConfigTransfer.export(source, false);
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, encoded));
+        assertEquals(source.values, target.values);
+        assertTrue(new SpeechSettings(new LocalOptions(target.snapshot())).minimaxOptions.hasMixedVoices());
+        String[][] changes = {{MiniMaxSpeechOptions.TIMBRE_WEIGHTS, ""},
+                {MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "first/20\nfirst/30"},
+                {MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "first/0"},
+                {MiniMaxSpeechOptions.OUTPUT_FORMAT, "base64"},
+                {MiniMaxSpeechOptions.MODIFY_PITCH, "1"}};
+        for (String[] change : changes) {
+            JSONObject invalid = new JSONObject(encoded);
+            invalid.getJSONObject("values").put(change[0], new JSONObject().put("type", "string").put("value", change[1]));
+            assertThrows(change[0], IllegalArgumentException.class, () -> ConfigTransfer.inspect(target, invalid.toString()));
+            assertEquals(source.values, target.values);
+        }
+    }
+
+    @Test public void experimentalApiAacCanBeBackedUpButRawMuLawRemainsUnsupported() throws Exception {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put(MiniMaxSpeechOptions.AUDIO_FORMAT, "aac");
+        source.values.put(MiniMaxSpeechOptions.OUTPUT_FORMAT, "hex");
+        String encoded = ConfigTransfer.export(source, false);
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, encoded));
+        assertEquals(source.values, target.values);
+        JSONObject request = new JSONObject();
+        new SpeechSettings(new LocalOptions(target.snapshot())).minimaxOptions.applyTo(request);
+        assertEquals("aac", request.getJSONObject("audio_setting").getString("format"));
+        JSONObject raw = new JSONObject(encoded);
+        raw.getJSONObject("values").getJSONObject(MiniMaxSpeechOptions.AUDIO_FORMAT).put("value", "pcmu_raw");
+        assertThrows(IllegalArgumentException.class, () -> ConfigTransfer.inspect(target, raw.toString()));
+        assertEquals(source.values, target.values);
+    }
+
     @Test public void miniMaxSettingsRoundTripAndSecretFreeBackupsBindKeysToTheirOwnEndpoint() {
         MemoryStore source = new MemoryStore(), target = new MemoryStore();
         source.values.put(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);

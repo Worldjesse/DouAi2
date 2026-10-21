@@ -12,7 +12,7 @@ public final class HostApkTestProfile {
         if (profile == null) {
             HostApkProfile.Identity identity = HostApkProfile.readIdentity(apk);
             throw new AssertionError("No verified profile for original APK " + identity.packageName
-                    + " " + identity.versionName + " (" + identity.versionCode + ")");
+                    + " " + identity.versionName + " (" + identity.versionCode + "; build=" + identity.updateVersionCode + ")");
         }
         return profile;
     }

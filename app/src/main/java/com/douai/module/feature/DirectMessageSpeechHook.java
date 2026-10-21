@@ -163,7 +163,7 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
     public synchronized void setOptions(LocalOptions options) {
         boolean speechChanged = !this.options.samePrefix(options, "tts_");
         this.options = options;
-        if ((!options.enabled("dm_tts") || speechChanged) && pending != null) {
+        if (pending != null && (!pending.enabled(options) || speechChanged)) {
             pending.cancel();
             pending = null;
         }
@@ -205,10 +205,35 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
     }
 
     private boolean startSpeech(Object logic, LocalOptions current) throws ReflectiveOperationException {
+        return startSpeech(logic, current, null);
+    }
+
+    /** Bypasses the native text click, including its confirmation path, for a verified send view. */
+    void startLongPress(Object drawer, HashVoiceGesture gesture) throws ReflectiveOperationException {
+        if (closed || !options.enabled(HashLongPressVoiceHook.OPTION) || !gesture.canSend()) return;
+        if (drawer == null) throw new IllegalStateException("Missing native input drawer");
+        Method provider = null;
+        for (Class<?> current = drawer.getClass(); current != null && provider == null; current = current.getSuperclass()) {
+            try { provider = current.getDeclaredMethod("LJJJJJ"); }
+            catch (NoSuchMethodException ignored) { }
+        }
+        if (provider == null || !"com.ss.android.ugc.aweme.rips.BasicRipsLogic".equals(provider.getReturnType().getName())) {
+            throw new IllegalStateException("Native input logic provider changed");
+        }
+        provider.setAccessible(true);
+        Object logic = provider.invoke(drawer);
+        if (logic == null || !inputApi.getDeclaringClass().isInstance(logic) || inputApi.invoke(logic) != drawer) {
+            throw new IllegalStateException("Native input logic does not own the send drawer");
+        }
+        startSpeech(logic, options, gesture);
+    }
+
+    private boolean startSpeech(Object logic, LocalOptions current, HashVoiceGesture gesture) throws ReflectiveOperationException {
         Object ui = inputApi.invoke(logic);
         if (ui == null) { toast("私聊输入框不可用，草稿已保留"); return true; }
         String draft = String.valueOf(content.invoke(ui));
-        if (!canStart(current, Boolean.TRUE.equals(userAction.get()), draft)) return false;
+        if (gesture == null ? !canStart(current, Boolean.TRUE.equals(userAction.get()), draft)
+                : !canStartLongPress(current, draft) || !gesture.draft.equals(draft) || !gesture.canSend()) return false;
         String text = speechText(draft);
         if (text == null) return false;
         if (text.isEmpty()) { toast("语音内容为空，草稿已保留"); return true; }
@@ -225,7 +250,7 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
                     && android.os.SystemClock.elapsedRealtime() - submittedAt < 30_000) {
                 toast("此草稿已交给原生语音发送，请检查消息结果"); return true;
             }
-            Pending request = new Pending(logic, ui, editor, audioLogic, conversation, draft);
+            Pending request = new Pending(logic, ui, editor, audioLogic, conversation, draft, gesture);
             pending = request;
             toast("正在生成私聊语音");
             request.speech = SpeechSynthesis.synthesize(context, text, current, (result, failure) -> {
@@ -256,7 +281,8 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
             Object logic = request.logic.get();
             EditText editor = request.editor.get();
             Object target = request.audioLogic.get();
-            if (closed || request.cancelled || !options.enabled("dm_tts") || ui == null || logic == null
+            if (closed || request.cancelled || !request.enabled(options)
+                    || request.gesture != null && !request.gesture.canSend() || ui == null || logic == null
                     || target == null || editor == null || !editor.isShown() || !editor.hasWindowFocus()
                     || !request.draft.equals(String.valueOf(content.invoke(ui)))
                     || !request.conversation.equals(conversationId.invoke(HostTargets.read(logic, "g")))) {
@@ -348,6 +374,10 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
 
     static boolean canStart(LocalOptions options, boolean fromUser, String draft) {
         return options.enabled("dm_tts") && fromUser && speechText(draft) != null;
+    }
+
+    static boolean canStartLongPress(LocalOptions options, String draft) {
+        return options.enabled(HashLongPressVoiceHook.OPTION) && speechText(draft) != null;
     }
 
     private synchronized void finish(Pending request, String message) {
@@ -565,6 +595,7 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
         final WeakReference<Object> audioLogic;
         final String conversation;
         final String draft;
+        final HashVoiceGesture gesture;
         volatile boolean cancelled;
         SpeechSynthesis speech;
         private boolean stopped;
@@ -573,9 +604,18 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
         private File nativeFile;
         private FutureTask<Void> encoding;
         Pending(Object logic, Object ui, EditText editor, Object audioLogic, String conversation, String draft) {
+            this(logic, ui, editor, audioLogic, conversation, draft, null);
+        }
+        Pending(Object logic, Object ui, EditText editor, Object audioLogic, String conversation, String draft,
+                HashVoiceGesture gesture) {
             this.logic = new WeakReference<>(logic); this.ui = new WeakReference<>(ui);
             this.editor = new WeakReference<>(editor); this.audioLogic = new WeakReference<>(audioLogic);
             this.conversation = conversation; this.draft = draft;
+            this.gesture = gesture;
+        }
+
+        boolean enabled(LocalOptions options) {
+            return options.enabled(gesture == null ? "dm_tts" : HashLongPressVoiceHook.OPTION);
         }
 
         synchronized boolean adoptSource(File file) {
@@ -617,6 +657,7 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
 
         void cancel() {
             synchronized (this) { cancelled = true; }
+            if (gesture != null) gesture.cancel();
             cleanup();
             SpeechSynthesis active = speech;
             if (active != null) active.close();

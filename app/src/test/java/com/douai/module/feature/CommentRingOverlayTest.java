@@ -43,7 +43,7 @@ public final class CommentRingOverlayTest {
     @Before public void setup() {
         RuntimeEnvironment.getApplication().getSharedPreferences("douai_automation_ui", Context.MODE_PRIVATE)
                 .edit().clear().commit();
-        activity = Robolectric.buildActivity(Activity.class).setup().get();
+        activity = Robolectric.buildActivity(Activity.class).setup().windowFocusChanged(true).get();
         clicks = new AtomicInteger();
         cancellations = new AtomicInteger();
         overlay = new CommentRingOverlay(activity, clicks::incrementAndGet, cancellations::incrementAndGet);
@@ -83,8 +83,10 @@ public final class CommentRingOverlayTest {
             float commentX = overlay.view().getX(), commentY = overlay.view().getY();
             CommentRingView ring = reply.view();
             assertEquals("automation.reply.ring", ring.getTag());
-            assertEquals(Color.rgb(100, 178, 255), ring.getPrimaryColor());
-            assertEquals(Color.rgb(112, 229, 211), overlay.view().getPrimaryColor());
+            assertEquals(CommentRingView.REPLY_COLOR, ring.getPrimaryColor());
+            assertEquals(CommentRingView.COMMENT_COLOR, overlay.view().getPrimaryColor());
+            assertEquals("回复", ring.getLabel());
+            assertEquals("评论", overlay.view().getLabel());
             long now = SystemClock.uptimeMillis();
             MotionEvent down = MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, 16, 16, 0);
             MotionEvent move = MotionEvent.obtain(now, now + 50, MotionEvent.ACTION_MOVE, 86, 66, 0);
@@ -178,8 +180,8 @@ public final class CommentRingOverlayTest {
         parentGesture(decor, MotionEvent.ACTION_UP, left + 2, top + 16);
         assertEquals(1, clicks.get());
         assertEquals(0, hostTouches.get());
-        parentGesture(decor, MotionEvent.ACTION_DOWN, left + 34, top + 16);
-        parentGesture(decor, MotionEvent.ACTION_UP, left + 34, top + 16);
+        parentGesture(decor, MotionEvent.ACTION_DOWN, left + overlay.view().getWidth() + 2, top + 16);
+        parentGesture(decor, MotionEvent.ACTION_UP, left + overlay.view().getWidth() + 2, top + 16);
         assertEquals(1, clicks.get());
         assertEquals(2, hostTouches.get());
     }
@@ -278,13 +280,41 @@ public final class CommentRingOverlayTest {
     }
 
     @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
-    public void nativeNarrowPreviewIsCircularNonblankAndUsesReadableContrast() { renderPreview(); }
+    public void nativeNarrowPreviewHasLabelledCompactBoundsAndReadableContrast() { renderPreview(); }
 
     @Test @Config(qualifiers = "w640dp-h360dp-land-mdpi") @GraphicsMode(GraphicsMode.Mode.NATIVE)
-    public void nativeLandscapePreviewKeepsStableCircleWithinScreen() { renderPreview(); }
+    public void nativeLandscapePreviewKeepsTheBadgeWithinScreen() { renderPreview(); }
 
     @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
-    public void largeFontAndLargeQueueKeepTextInsideFixedCircularBounds() {
+    public void originalSizeReplyAndCommentUseDifferentShapesIconsAndColours() {
+        Bitmap[] images = new Bitmap[2];
+        CommentRingView[] badges = {new CommentRingView(activity, "reply", "自动回复", CommentRingView.REPLY_COLOR, true),
+                new CommentRingView(activity)};
+        for (int i = 0; i < badges.length; i++) {
+            badges[i].setState(2, 3, "preview", .7f);
+            badges[i].measure(View.MeasureSpec.makeMeasureSpec(32, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(32, View.MeasureSpec.EXACTLY));
+            badges[i].layout(0, 0, 32, 32);
+            images[i] = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888);
+            badges[i].draw(new Canvas(images[i]));
+        }
+        assertTrue("Comment has a rounded-square corner; reply remains circular",
+                Color.alpha(images[1].getPixel(9, 9)) > Color.alpha(images[0].getPixel(9, 9)));
+        int blueStroke = 0, amberStroke = 0;
+        // Tiny diagonal strokes are antialiased; inspect their interior region instead of one pixel.
+        for (int y = 9; y <= 15; y++) for (int x = 10; x <= 16; x++) {
+            int bubble = images[0].getPixel(x, y), pencil = images[1].getPixel(x, y);
+            if (Color.blue(bubble) > Color.red(bubble) + 20) blueStroke++;
+            if (Color.red(pencil) > Color.blue(pencil) + 40) amberStroke++;
+        }
+        assertTrue("Reply bubble uses its cool blue outline", blueStroke > 3);
+        assertTrue("Comment pencil uses its warm amber stroke", amberStroke > 3);
+        assertTrue(badges[0].getContentDescription().toString().contains("自动回复"));
+        assertTrue(badges[1].getContentDescription().toString().contains("自动评论"));
+        images[0].recycle(); images[1].recycle();
+    }
+
+    @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void largeFontAndLargeQueueKeepTextInsideTheFixedBadgeBounds() {
         android.content.res.Configuration configuration = new android.content.res.Configuration(activity.getResources().getConfiguration());
         configuration.fontScale = 2;
         CommentRingView ring = new CommentRingView(activity.createConfigurationContext(configuration));
@@ -298,16 +328,109 @@ public final class CommentRingOverlayTest {
         ring.draw(new Canvas(bitmap));
         String previewFolder = System.getenv("DOUAI_CHAT_SCREENSHOTS");
         if (previewFolder != null) save(bitmap, new File(previewFolder, "comment-ring-large-font.png"));
-        int whiteText = 0;
-        for (int y = 9; y <= 17; y++) for (int x = 0; x < 32; x++) {
+        int textPixels = 0;
+        for (int y = 13; y <= 21; y++) for (int x = 12; x < 23; x++) {
             int color = bitmap.getPixel(x, y);
-            if (Color.red(color) > 170 && Color.green(color) > 170 && Color.blue(color) > 170) {
-                assertTrue("Queue text remains within the inner circle: " + x + ',' + y, x >= 10 && x <= 22);
-                whiteText++;
-            }
+            if (Color.alpha(color) > 180 && Color.red(color) < 150 && Color.green(color) < 150) textPixels++;
         }
-        assertTrue(whiteText > 5);
+        assertTrue("Readable queue count", textPixels > 5);
+        assertEquals(0, Color.alpha(bitmap.getPixel(0, 0)));
+        assertEquals(0, Color.alpha(bitmap.getPixel(31, 31)));
         bitmap.recycle();
+    }
+
+    @Test public void idleFadeAndMicroShiftNeverRewriteTheUserPosition() {
+        show("generating", -1);
+        CommentRingView ring = overlay.view();
+        assertTrue(ring.hasWindowFocus());
+        float x = ring.getX(), y = ring.getY();
+        ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(CommentRingOverlay.IDLE_FADE_MILLIS + 1));
+        assertEquals(CommentRingOverlay.IDLE_ALPHA, ring.getAlpha(), .01f);
+        ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(CommentRingOverlay.PIXEL_SHIFT_MILLIS));
+        assertTrue(Math.abs(ring.getX() - x) <= 2.1f);
+        assertTrue(Math.abs(ring.getY() - y) <= 2.1f);
+        assertTrue("A stable badge moves a few pixels", Math.abs(ring.getX() - x) + Math.abs(ring.getY() - y) > .5f);
+        assertFalse(activity.getSharedPreferences("douai_automation_ui", Context.MODE_PRIVATE).contains("comment_ring_x"));
+        assertFalse(activity.getSharedPreferences("douai_automation_ui", Context.MODE_PRIVATE).contains("comment_ring_y"));
+        gesture(MotionEvent.ACTION_DOWN, 16, 16);
+        assertEquals(1, ring.getAlpha(), .01f);
+        float touchedX = ring.getX(), touchedY = ring.getY();
+        ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(CommentRingOverlay.PIXEL_SHIFT_MILLIS + 1000));
+        assertEquals(touchedX, ring.getX(), .01f);
+        assertEquals(touchedY, ring.getY(), .01f);
+        assertEquals(1, ring.getAlpha(), .01f);
+        gesture(MotionEvent.ACTION_CANCEL, 16, 16);
+    }
+
+    @Test public void detailsPausePassiveEffectsAndImeBoundsKeepTheBadgeAboveTheKeyboard() {
+        show("details", -1);
+        float x = overlay.view().getX(), y = overlay.view().getY();
+        ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(CommentRingOverlay.PIXEL_SHIFT_MILLIS + 1000));
+        assertEquals(x, overlay.view().getX(), .01f);
+        assertEquals(y, overlay.view().getY(), .01f);
+        assertEquals(1, overlay.view().getAlpha(), .01f);
+        gesture(MotionEvent.ACTION_DOWN, 16, 16);
+        gesture(MotionEvent.ACTION_MOVE, 1000, 1000);
+        gesture(MotionEvent.ACTION_UP, 1000, 1000);
+        WindowInsets insets = new WindowInsets.Builder().setInsets(WindowInsets.Type.ime(), Insets.of(0, 0, 0, 200))
+                .setVisible(WindowInsets.Type.ime(), true).build();
+        overlay.view().dispatchApplyWindowInsets(insets);
+        assertTrue(overlay.view().getY() + overlay.view().getHeight() <= 560 - 200 - 12);
+        overlay.detach();
+        ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(CommentRingOverlay.PIXEL_SHIFT_MILLIS + 1000));
+        assertNull(overlay.view().getParent());
+        assertEquals(1, overlay.view().getAlpha(), .01f);
+    }
+
+    @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void exportsActualCanvasLightAndDarkBadgePreviews() {
+        String output = System.getenv("DOUAI_OVERLAY_PREVIEW_DIR");
+        for (boolean dark : new boolean[]{false, true}) {
+            RuntimeEnvironment.setQualifiers(dark ? "+night" : "+notnight");
+            android.content.res.Configuration configuration = new android.content.res.Configuration(activity.getResources().getConfiguration());
+            configuration.uiMode = (configuration.uiMode & ~android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+                    | (dark ? android.content.res.Configuration.UI_MODE_NIGHT_YES : android.content.res.Configuration.UI_MODE_NIGHT_NO);
+            Context themed = activity.createConfigurationContext(configuration);
+            Bitmap board = Bitmap.createBitmap(720, 480, Bitmap.Config.ARGB_8888);
+            Canvas canvas = new Canvas(board);
+            canvas.drawColor(dark ? Color.rgb(18, 22, 28) : Color.rgb(242, 244, 247));
+            android.graphics.Paint heading = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+            heading.setColor(dark ? Color.rgb(222, 228, 235) : Color.rgb(44, 53, 66));
+            heading.setTextSize(18);
+            canvas.drawText("原尺寸 1× · 18dp 主体 / 32×32dp 触摸区", 28, 30, heading);
+            drawPreviewBadge(canvas, themed, true, false, 40, 55, 1);
+            drawPreviewBadge(canvas, themed, false, false, 380, 55, 1);
+            canvas.drawText("回复", 88, 78, heading);
+            canvas.drawText("评论", 428, 78, heading);
+            canvas.drawText("4× 放大（仅便于查看，实际不会放大）", 28, 132, heading);
+            drawPreviewBadge(canvas, themed, true, false, 40, 150, 4);
+            drawPreviewBadge(canvas, themed, false, false, 380, 150, 4);
+            canvas.drawText("4× 放大 · 闲置降亮，微移不改变拖动位置", 28, 307, heading);
+            drawPreviewBadge(canvas, themed, true, true, 40, 325, 4);
+            drawPreviewBadge(canvas, themed, false, true, 380, 325, 4);
+            assertNotEquals("Original-size icon paints above the page", board.getPixel(0, 0), board.getPixel(56, 71));
+            assertNotEquals("Active icon paints above the page", board.getPixel(0, 0), board.getPixel(104, 214));
+            assertNotEquals("Idle icon remains visible", board.getPixel(0, 0), board.getPixel(104, 389));
+            if (output != null && !output.trim().isEmpty()) {
+                save(board, new File(output, "progress-icons-original-size-" + (dark ? "dark" : "light") + ".png"));
+            }
+            board.recycle();
+        }
+        RuntimeEnvironment.setQualifiers("+notnight");
+    }
+
+    private static void drawPreviewBadge(Canvas canvas, Context context, boolean reply, boolean idle, int x, int y, int scale) {
+        CommentRingView badge = reply ? new CommentRingView(context, "reply", "自动回复", CommentRingView.REPLY_COLOR, true)
+                : new CommentRingView(context);
+        badge.setState(reply ? 2 : 3, 3, idle ? "speech" : "preview", idle ? -1 : .7f);
+        badge.setAmbient(idle);
+        badge.measure(View.MeasureSpec.makeMeasureSpec(32, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(32, View.MeasureSpec.EXACTLY));
+        badge.layout(0, 0, 32, 32);
+        canvas.save(); canvas.translate(x, y); canvas.scale(scale, scale);
+        if (idle) canvas.saveLayerAlpha(0, 0, 32, 32, Math.round(255 * CommentRingOverlay.IDLE_ALPHA));
+        badge.draw(canvas);
+        if (idle) canvas.restore();
+        canvas.restore();
     }
 
     private void renderPreview() {
@@ -321,17 +444,17 @@ public final class CommentRingOverlayTest {
         assertTrue(Color.alpha(isolated.getPixel(16, 16)) > 220);
         int minPainted = 32;
         int maxPainted = -1;
-        int lightPixels = 0;
+        int textPixels = 0;
         int accentPixels = 0;
         for (int y = 0; y < 32; y++) for (int x = 0; x < 32; x++) {
             int color = isolated.getPixel(x, y);
             if (Color.alpha(color) != 0) { minPainted = Math.min(minPainted, x); maxPainted = Math.max(maxPainted, x); }
-            if (Color.red(color) > 170 && Color.green(color) > 170 && Color.blue(color) > 170) lightPixels++;
-            if (Color.green(color) > 180 && Color.red(color) < 160 && Color.blue(color) > 150) accentPixels++;
+            if (Color.alpha(color) > 180 && Color.red(color) < 150 && Color.green(color) < 150) textPixels++;
+            if (Color.red(color) > Color.blue(color) + 50 && Color.red(color) > Color.green(color) + 25) accentPixels++;
         }
-        assertEquals("Visible ring must stay camera-sized", 18, maxPainted - minPainted + 1);
-        assertTrue("Readable text should render", lightPixels > 10);
-        assertTrue("Progress arc should render", accentPixels > 8);
+        assertTrue("Original 18dp visible bounds", maxPainted - minPainted + 1 >= 16 && maxPainted - minPainted + 1 <= 18);
+        assertTrue("Readable task count", textPixels > 5);
+        assertTrue("Warm comment accent should render", accentPixels > 8);
         isolated.recycle();
         assertTrue(ring.getX() >= 0 && ring.getY() >= 0);
         assertTrue(ring.getX() + ring.getWidth() <= decor.getWidth());
@@ -360,6 +483,8 @@ public final class CommentRingOverlayTest {
     }
 
     private static void save(Bitmap bitmap, File file) {
+        File parent = file.getParentFile();
+        assertTrue(parent.isDirectory() || parent.mkdirs());
         try (FileOutputStream stream = new FileOutputStream(file)) {
             assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream));
         } catch (IOException failure) { throw new AssertionError(failure); }

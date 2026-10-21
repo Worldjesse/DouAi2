@@ -28,11 +28,107 @@ public final class MiniMaxSpeechOptionsTest {
         assertFalse(request.has("pronunciation_dict"));
         assertFalse(request.has("voice_modify"));
         assertFalse(request.has("aigc_watermark"));
+        assertFalse(request.has("timbre_weights"));
+        assertFalse(options.hasMixedVoices());
+        assertEquals("url", request.getString("output_format"));
         JSONObject audio = request.getJSONObject("audio_setting");
         assertEquals("mp3", audio.getString("format"));
         assertEquals(32000, audio.getInt("sample_rate"));
         assertEquals(128000, audio.getInt("bitrate"));
         assertEquals(1, audio.getInt("channel"));
+    }
+
+    @Test public void enabledFormatsPreserveEncodingAndTransportWhileMuLawUsesItsFixedRate() throws Exception {
+        assertArrayEquals(new String[]{"mp3", "wav", "flac", "opus", "pcmu_wav", "aac"}, MiniMaxSpeechOptions.FORMATS);
+        for (String format : MiniMaxSpeechOptions.FORMATS) {
+            MiniMaxSpeechOptions options = options(Map.of(MiniMaxSpeechOptions.AUDIO_FORMAT, format,
+                    MiniMaxSpeechOptions.OUTPUT_FORMAT, "hex", MiniMaxSpeechOptions.SAMPLE_RATE, "44100",
+                    MiniMaxSpeechOptions.CHANNEL, "2"));
+            JSONObject request = new JSONObject(); options.applyTo(request);
+            JSONObject audio = request.getJSONObject("audio_setting");
+            assertEquals(format, audio.getString("format"));
+            assertEquals("hex", request.getString("output_format"));
+            assertEquals(2, audio.getInt("channel"));
+            assertEquals(MiniMaxSpeechOptions.isMuLawFormat(format) ? 8000 : 44100, audio.getInt("sample_rate"));
+            assertEquals("The saved rate remains available when changing formats", 44100, options.sampleRate);
+            assertEquals("mp3".equals(format), audio.has("bitrate"));
+        }
+        for (String format : new String[]{"pcm", "pcmu_raw", "m4a"}) {
+            assertThrows(IllegalArgumentException.class, () -> MiniMaxSpeechOptions.validateValue(MiniMaxSpeechOptions.AUDIO_FORMAT, format));
+        }
+        assertThrows(IllegalArgumentException.class,
+                () -> MiniMaxSpeechOptions.validateValue(MiniMaxSpeechOptions.OUTPUT_FORMAT, "base64"));
+    }
+
+    @Test public void experimentalAacIsRequestedFromTheApiWithoutBecomingALocalOutputSetting() throws Exception {
+        MiniMaxSpeechOptions options = options(Map.of(MiniMaxSpeechOptions.AUDIO_FORMAT, "aac"));
+        JSONObject request = new JSONObject(); options.applyTo(request);
+        assertEquals("aac", request.getJSONObject("audio_setting").getString("format"));
+        assertEquals("url", request.getString("output_format"));
+        assertFalse(request.has("voice_modify"));
+        assertFalse(MiniMaxSpeechOptions.supportsVoiceModify("aac"));
+        assertEquals("", MiniMaxSpeechOptions.candidateIssue(Map.of(), MiniMaxSpeechOptions.AUDIO_FORMAT, "aac"));
+    }
+
+    @Test public void mixedVoicesUseTheRootArrayAndAnExplicitEmptySingleVoiceWithoutChangingSavedSettings() throws Exception {
+        Map<String, Object> values = new LinkedHashMap<>();
+        values.put(SpeechSettings.MINIMAX_VOICE_ID, "saved-single");
+        values.put(MiniMaxSpeechOptions.TIMBRE_WEIGHTS, " voice-one / 030\r\nvoice-two/30 \n");
+        MiniMaxSpeechOptions options = options(values);
+        assertTrue(options.hasMixedVoices());
+        assertEquals("voice-one/30\nvoice-two/30", MiniMaxSpeechOptions.validateValue(
+                MiniMaxSpeechOptions.TIMBRE_WEIGHTS, (String) values.get(MiniMaxSpeechOptions.TIMBRE_WEIGHTS)));
+        JSONObject request = new JSONObject().put("model", "speech-2.8-hd").put("text", "unchanged")
+                .put("voice_setting", new JSONObject().put("voice_id", "saved-single").put("speed", 1.5));
+        options.applyTo(request);
+        assertEquals("", request.getJSONObject("voice_setting").getString("voice_id"));
+        assertEquals(1.5, request.getJSONObject("voice_setting").getDouble("speed"), 0);
+        assertEquals("voice-one", request.getJSONArray("timbre_weights").getJSONObject(0).getString("voice_id"));
+        assertEquals(30, request.getJSONArray("timbre_weights").getJSONObject(1).getInt("weight"));
+        assertEquals("unchanged", request.getString("text"));
+        assertEquals("speech-2.8-hd", request.getString("model"));
+        assertEquals("saved-single", values.get(SpeechSettings.MINIMAX_VOICE_ID));
+    }
+
+    @Test public void mixValidationAllowsFourVoicesWithoutAnInventedTotalWeightAndRejectsAmbiguousInput() {
+        assertEquals("v1/1\nv2/1\nv3/1\nv4/1", MiniMaxSpeechOptions.validateValue(
+                MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "v1/1\nv2/1\nv3/1\nv4/1"));
+        for (String mix : new String[]{"/50", "voice", "voice/0", "voice/101", "voice/1.5", "voice/-1",
+                "voice/1\nvoice/2", "voice\t/2", "voice/2\u0000", "x".repeat(257) + "/2",
+                "v1/1\nv2/2\nv3/3\nv4/4\nv5/5"}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> MiniMaxSpeechOptions.validateValue(MiniMaxSpeechOptions.TIMBRE_WEIGHTS, mix));
+        }
+        assertEquals("voice/with/slash/25", MiniMaxSpeechOptions.validateValue(
+                MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "voice/with/slash/25"));
+    }
+
+    @Test public void mixingKeepsTheExistingModelCompatibilityChecksAndAllowsTheProviderEmptyVoiceId() {
+        options(Map.of(SpeechSettings.MINIMAX_VOICE_ID, "", MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "one/20\ntwo/30")).validate();
+        assertThrows(IllegalArgumentException.class, () -> options(Map.of(SpeechSettings.MINIMAX_VOICE_ID, "")).validate());
+        options(Map.of(SpeechSettings.MINIMAX_MODEL, "speech-future-hd", MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "one/10")).validate();
+        assertThrows(IllegalArgumentException.class, () -> options(Map.of(SpeechSettings.MINIMAX_MODEL, "speech-01-hd",
+                MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "one/10", MiniMaxSpeechOptions.TEXT_NORMALIZATION_MODE, "quality")).validate());
+        assertThrows(IllegalArgumentException.class, () -> options(Map.of(MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "one/10",
+                MiniMaxSpeechOptions.EMOTION, "whisper")).validate());
+        options(Map.of(SpeechSettings.MINIMAX_MODEL, "speech-2.6-hd", MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "one/10",
+                MiniMaxSpeechOptions.EMOTION, "whisper")).validate();
+    }
+
+    @Test public void incompatibleVoiceEffectsRequireAnExplicitResetInsteadOfBeingSilentlyOmitted() {
+        for (String format : new String[]{"opus", "pcmu_wav", "aac"}) {
+            for (String effect : new String[]{MiniMaxSpeechOptions.MODIFY_PITCH, MiniMaxSpeechOptions.MODIFY_INTENSITY,
+                    MiniMaxSpeechOptions.MODIFY_TIMBRE, MiniMaxSpeechOptions.SOUND_EFFECT}) {
+                Map<String, Object> values = new LinkedHashMap<>();
+                values.put(MiniMaxSpeechOptions.AUDIO_FORMAT, format);
+                values.put(effect, effect.equals(MiniMaxSpeechOptions.SOUND_EFFECT) ? "robotic" : "1");
+                assertThrows(IllegalArgumentException.class, () -> options(values).validate());
+                assertFalse(MiniMaxSpeechOptions.candidateIssue(values, MiniMaxSpeechOptions.OUTPUT_FORMAT, "hex").isEmpty());
+            }
+            Map<String, Object> saved = new LinkedHashMap<>(); saved.put(MiniMaxSpeechOptions.MODIFY_PITCH, "1");
+            assertTrue(MiniMaxSpeechOptions.candidateIssue(saved, MiniMaxSpeechOptions.AUDIO_FORMAT, format).contains("重置"));
+            assertFalse(saved.containsKey(MiniMaxSpeechOptions.AUDIO_FORMAT));
+        }
     }
 
     @Test public void documentedOptionsHaveTheirCorrectRequestLayersAndNonMp3OmitsBitrate() throws Exception {

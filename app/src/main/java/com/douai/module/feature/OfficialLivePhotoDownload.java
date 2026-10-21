@@ -178,13 +178,13 @@ final class OfficialLivePhotoDownload {
         @Override public Encoded encode(ClassLoader loader, File image, File video) throws Exception {
             boolean legacy = legacyHost();
             // This ROM branch encodes directly into its system album, not a portable file.
-            Class<?> rom = Class.forName(legacy ? "X.0BDp" : "X.0DeI", true, loader);
+            Class<?> rom = Class.forName(legacy ? "X.0BDp" : "X.0eiB", true, loader);
             if (Boolean.TRUE.equals(invoke(rom.getMethod("LIZLLL"), null))) {
                 throw new UnsupportedOperationException("当前设备的实况编码不支持独立文件保存");
             }
             Object album = album(loader);
-            Class<?> contract = Class.forName(legacy ? "X.0PoP" : "X.0TcK", false, loader);
-            Object result = invoke(contract.getMethod(legacy ? "Xi" : "gj", String.class, String.class, long.class),
+            Class<?> contract = Class.forName(legacy ? "X.0PoP" : "X.0S4A", false, loader);
+            Object result = invoke(contract.getMethod(legacy ? "Xi" : "hj", String.class, String.class, long.class),
                     album, image.getAbsolutePath(), video.getAbsolutePath(), 0L);
             if (result == null) throw new IOException("宿主实况编码器没有返回结果");
             Object paths = field(result, "LIZ");
@@ -200,7 +200,7 @@ final class OfficialLivePhotoDownload {
         }
 
         @Override public boolean isLivePhoto(ClassLoader loader, File file) throws Exception {
-            Class<?> contract = Class.forName(legacyHost() ? "X.0PoP" : "X.0TcK", false, loader);
+            Class<?> contract = Class.forName(legacyHost() ? "X.0PoP" : "X.0S4A", false, loader);
             return Boolean.TRUE.equals(invoke(contract.getMethod("isLivePhoto", String.class),
                     album(loader), file.getAbsolutePath()));
         }

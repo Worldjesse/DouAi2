@@ -39,8 +39,8 @@ public final class DouyinHostAnchorTest {
         File apk = apkPath == null ? null : new File(apkPath);
         Assume.assumeTrue(apk != null && apk.isFile());
         boolean legacy = HostApkTestProfile.is406(apk);
-        String callbackType = legacy ? "LY/AObjectS313S0200000_35;" : "LY/AObjectS314S0200000_36;";
-        String modelType = legacy ? "LX/0yFs;" : "LX/13hi;";
+        String callbackType = legacy ? "LY/AObjectS313S0200000_35;" : "LY/AObjectS307S0200000_36;";
+        String modelType = legacy ? "LX/0yFs;" : "LX/13Zi;";
         Method checked = null;
         Method callbackConstructor = null;
         try (ZipFile archive = new ZipFile(apk)) {
@@ -83,9 +83,9 @@ public final class DouyinHostAnchorTest {
             callbackFields.put(field.getName(), ((TwoRegisterInstruction) instruction).getRegisterA());
         }
         assertEquals("Host callback l0 stores the model argument",
-                Integer.valueOf(legacy ? secondCallbackArgument : firstCallbackArgument), callbackFields.get("l0"));
+                Integer.valueOf(secondCallbackArgument), callbackFields.get("l0"));
         assertEquals("Host callback l1 stores the request argument",
-                Integer.valueOf(legacy ? firstCallbackArgument : secondCallbackArgument), callbackFields.get("l1"));
+                Integer.valueOf(firstCallbackArgument), callbackFields.get("l1"));
         List<Instruction> instructions = new ArrayList<>();
         for (Instruction instruction : checked.getImplementation().getInstructions()) instructions.add(instruction);
         Map<Integer, String> objectRegisters = new HashMap<>();
@@ -115,13 +115,13 @@ public final class DouyinHostAnchorTest {
                         instruction instanceof FiveRegisterInstruction);
                 FiveRegisterInstruction construct = (FiveRegisterInstruction) instruction;
                 assertEquals("First callback argument retains the profiled role",
-                        legacy ? "request" : "model", objectRegisters.get(construct.getRegisterD()));
+                        "request", objectRegisters.get(construct.getRegisterD()));
                 assertEquals("Second callback argument retains the profiled role",
-                        legacy ? "model" : "request", objectRegisters.get(construct.getRegisterE()));
+                        "model", objectRegisters.get(construct.getRegisterE()));
                 callbackRegister = construct.getRegisterC();
             }
             if (!"Lcom/ss/android/ugc/aweme/comment/helper/AudioUploader;".equals(call.getDefiningClass())
-                    || !(legacy ? "LJFF" : "LJI").equals(call.getName())) continue;
+                    || !"LJFF".equals(call.getName())) continue;
             assertTrue("Host constructs the owned callback before starting its audio upload", callbackRegister >= 0);
             assertEquals("The upload receives the callback whose l0 is model and l1 is request",
                     callbackRegister, ((FiveRegisterInstruction) instruction).getRegisterF());

@@ -97,10 +97,11 @@ public final class CommentReplyHostContractTest {
                 PUBLISH_PRESENTER, PUBLISH_REQUEST));
         Set<String> taskClasses = new HashSet<>(Arrays.asList(TASK));
         try (ZipFile archive = new ZipFile(apk)) {
-            readSelectedClasses(archive, legacy ? "classes17.dex" : "classes31.dex", required);
+            readSelectedClasses(archive, legacy ? "classes17.dex" : "classes22.dex", required);
+            if (!legacy) readSelectedClasses(archive, "classes31.dex", required);
             readSelectedClasses(archive, legacy ? "classes30.dex" : "classes31.dex", commentClasses);
             if (!legacy) readSelectedClasses(archive, "classes30.dex", commentClasses);
-            readSelectedClasses(archive, legacy ? "classes33.dex" : "classes43.dex", taskClasses);
+            readSelectedClasses(archive, legacy ? "classes33.dex" : "classes41.dex", taskClasses);
         }
         assertTrue("Missing original comment inbox classes: " + required, required.isEmpty());
         assertTrue("Missing original comment recipient/publish classes: " + commentClasses, commentClasses.isEmpty());
@@ -127,14 +128,9 @@ public final class CommentReplyHostContractTest {
     }
 
     @Test public void theNativeDefaultMapStoresFortyFourForReceivedCommentsRatherThanUiCategoryThree() {
-        Method initializer;
-        if (legacy) initializer = method(FACTORY, "invoke", "Ljava/lang/Object;");
-        else {
-            assertTrue("The lambda bridge must reach the default-map implementation",
-                    calls(method(FACTORY, "invoke", "Ljava/lang/Object;"), FACTORY, "invoke$0"));
-            initializer = method(FACTORY, "invoke$0", "Ljava/lang/Object;", FACTORY);
-            assertTrue(AccessFlags.STATIC.isSet(initializer.getAccessFlags()));
-        }
+        // Both verified originals (40609900 and 40809900) keep this dispatcher
+        // directly in invoke; the retired 40809985 split bridge is not a target.
+        Method initializer = method(FACTORY, "invoke", "Ljava/lang/Object;");
         Code code = new Code(initializer);
         int key = stringIndexFollowedByCall(code, "2", "LX/14Ml;", "LIZJ");
         int keyRegister = ((OneRegisterInstruction) code.at(key)).getRegisterA();

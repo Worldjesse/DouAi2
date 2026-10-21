@@ -84,7 +84,7 @@ public final class HostMediaPickerTest {
         assertEquals("com.ss.android.ugc.aweme.im.business.mediaselectpage.choose.MediaChooseActivity",
                 intent.getComponent().getClassName());
         Object config = intent.getSerializableExtra("extra_choose_parameters");
-        assertEquals("X.1UOy", config.getClass().getName());
+        assertEquals("X.1Cd0", config.getClass().getName());
         assertEquals(0x1, config.getClass().getField("a").getInt(config));
         assertEquals(3, config.getClass().getField("e").getInt(config));
         assertEquals(4, config.getClass().getField("f").getInt(config));
@@ -304,6 +304,7 @@ public final class HostMediaPickerTest {
         info.applicationInfo = activity.getApplicationInfo();
         info.versionName = name;
         info.setLongVersionCode(code);
+        HostProfileFixture.attachOriginalApk(info);
         ((ShadowPackageManager) Shadow.extract(activity.getPackageManager())).installPackage(info);
     }
 

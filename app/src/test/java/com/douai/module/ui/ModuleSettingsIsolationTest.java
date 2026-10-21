@@ -12,6 +12,7 @@ import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
+import org.robolectric.shadows.ShadowDialog;
 
 import static org.junit.Assert.*;
 
@@ -24,7 +25,12 @@ public final class ModuleSettingsIsolationTest {
         ModuleSettingsScreen screen = new ModuleSettingsScreen(activity,
                 new SettingsRepository(activity));
         View root = screen.createView();
-        assertTrue(countText(root, "抖音内功能设置独立保存在抖音应用，本页只显示模块应用状态。"));
+        assertTrue(countText(root, "抖音内功能设置独立保存在抖音应用；此处可查看模块状态及调试日志。"));
+        assertNull(root.findViewWithTag("settings.option.调试与日志"));
+        root.findViewWithTag("settings.option.关于").performClick();
+        android.app.Dialog about = ShadowDialog.getLatestDialog();
+        assertNotNull(about.getWindow().getDecorView().findViewWithTag("about.debug"));
+        screen.dismissChildPages();
         assertFalse(countText(root, "组件隐藏"));
         assertFalse(countText(root, "推荐流筛选"));
         activity.finish();

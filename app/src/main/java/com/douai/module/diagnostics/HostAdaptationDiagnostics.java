@@ -17,9 +17,20 @@ public final class HostAdaptationDiagnostics {
         try {
             // Archive parsing is independent of the module's PackageManager version-spoof hook.
             String archive = context.getApplicationInfo().sourceDir;
-            return versionEvidence(archive == null ? null
-                    : context.getPackageManager().getPackageArchiveInfo(archive, 0));
-        } catch (RuntimeException failure) {
+            if (archive == null) return versionEvidence(null);
+            java.io.File apk = new java.io.File(archive);
+            com.douai.module.scan.HostApkProfile.Identity identity =
+                    com.douai.module.scan.HostApkProfile.readIdentity(apk);
+            PackageInfo info = new PackageInfo();
+            info.packageName = identity.packageName;
+            info.versionName = identity.versionName;
+            info.setLongVersionCode(identity.versionCode);
+            Bundle result = versionEvidence(info);
+            result.putLong("host_update_version_code", identity.updateVersionCode);
+            result.putBoolean("host_version_profile_matched",
+                    com.douai.module.scan.HostApkProfile.read(apk) != null);
+            return result;
+        } catch (java.io.IOException | RuntimeException failure) {
             return versionEvidence(null);
         }
     }
@@ -188,6 +199,9 @@ public final class HostAdaptationDiagnostics {
         if (snapshot.getBoolean("host_version_available")) {
             detail.append(snapshot.getString("host_version_name", "未知"))
                     .append(" / ").append(snapshot.getLong("host_version_code"));
+            if (snapshot.getLong("host_update_version_code", -1) >= 0) {
+                detail.append(" / 构建 ").append(snapshot.getLong("host_update_version_code"));
+            }
         } else detail.append("读取失败，未验证");
         if (snapshot.getBoolean("host_adaptation_static_verified")) {
             detail.append("\n版本和规则配置匹配 ").append(snapshot.getString("host_version_name", "未知"))

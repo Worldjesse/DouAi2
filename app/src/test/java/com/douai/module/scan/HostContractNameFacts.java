@@ -17,10 +17,10 @@ import java.util.Set;
 
 /**
  * Independently audited original-APK names, not scanner rules or a behavioral emulator.
- * 40.6 names are normalized to 40.8 names only to share semantic assertions. Type aliases
+ * Both verified original builds normalize names to stable test labels only to share semantic assertions. Type aliases
  * and full owner/signature method aliases are reversible and injective. Opcodes, arguments,
  * registers, field names, string/literal values, branches and return instructions are untouched.
- * Real structural differences, such as the factory invoke bridge and safety discriminators,
+ * Real structural differences, such as callback argument order and safety discriminators,
  * are checked separately by each suite's actual Manifest-selected profile.
  */
 final class HostContractNameFacts {
@@ -115,6 +115,86 @@ final class HostContractNameFacts {
         method(logic, "LJJZZIII()Landroidx/lifecycle/MutableLiveData;", "LJLIIL");
         method("Lcom/ss/android/ugc/aweme/homepage/tab/bottom/MPFBottomTabComponent;",
                 "LJJL(Landroid/view/ViewGroup;)Landroid/view/View;", "LJJLIIIJL");
+        if (!legacy) {
+            // Current original APK build 40809900 is normalized to the existing
+            // semantic test labels; the retired 40809985 APK is never accepted.
+            types.clear(); typeTargets.clear(); methods.clear(); methodTargets.clear();
+            for (String[] pair : new String[][]{
+                    {"LX/1NtM;", "LX/1SVO;"},
+                    {"LX/00zj;", "LX/00s8;"},
+                    {"LX/0TA5;", "LX/0V8X;"},
+                    {"LX/0TsJ;", "LX/0YRa;"},
+                    {"LX/0TxD;", "LX/0YcX;"},
+                    {"LX/0TxG;", "LX/0Yca;"},
+                    {"LX/0Txd;", "LX/0Yce;"},
+                    {"LX/1KUl;", "LX/0io8;"},
+                    {"LX/1KV4;", "LX/0ioG;"},
+                    {"LX/1KUi;", "LX/0isP;"},
+                    {"LX/0p77;", "LX/0vbu;"},
+                    {"LX/13m0;", "LX/12j8;"},
+                    {"LX/13Ju;", "LX/13a7;"},
+                    {"LX/13L6;", "LX/13ao;"},
+                    {"LX/13L7;", "LX/13ar;"},
+                    {"LX/13UT;", "LX/13eY;"},
+                    {"LX/13Px;", "LX/13ea;"},
+                    {"LX/13Zx;", "LX/13gy;"},
+                    {"LX/13aM;", "LX/13hD;"},
+                    {"LX/13Zg;", "LX/13hg;"},
+                    {"LX/13Zi;", "LX/13hi;"},
+                    {"LX/13aF;", "LX/13iG;"},
+                    {"LX/13ns;", "LX/13wP;"},
+                    {"LX/14xj;", "LX/14Ea;"},
+                    {"LX/14v8;", "LX/14Ec;"},
+                    {"LX/14qs;", "LX/14Ep;"},
+                    {"LX/13vg;", "LX/14Es;"},
+                    {"LX/13vs;", "LX/14F9;"},
+                    {"LX/13w5;", "LX/14FE;"},
+                    {"LX/0pEc;", "LX/14Gs;"},
+                    {"LX/0pIU;", "LX/14HZ;"},
+                    {"LX/0pFh;", "LX/14J4;"},
+                    {"LX/0p2G;", "LX/14Jz;"},
+                    {"LX/0pIH;", "LX/14Kj;"},
+                    {"LX/0oul;", "LX/14LK;"},
+                    {"LX/0pIC;", "LX/14MA;"},
+                    {"LX/0pIL;", "LX/14MD;"},
+                    {"LX/0pIQ;", "LX/14MH;"},
+                    {"LX/0ouQ;", "LX/14Mk;"},
+                    {"LX/0ouT;", "LX/14Ml;"},
+                    {"LX/0pK3;", "LX/14PD;"},
+                    {"LX/0pK2;", "LX/14PE;"},
+                    {"LX/0p2F;", "LX/14jX;"},
+                    {"LX/0pII;", "LX/14u0;"},
+                    {"LX/14nw;", "LX/155h;"},
+                    {"LX/14o1;", "LX/156M;"},
+                    {"LX/14qw;", "LX/159L;"},
+                    {"LX/1V2o;", "LX/16Pt;"},
+                    {"LX/1Tk2;", "LX/16Tc;"},
+                    {"LX/1O3p;", "LX/1WHh;"},
+                    {"LX/1TVN;", "LX/1Z5A;"},
+                    {"LX/1TUn;", "LX/1Z5F;"},
+                    {"LX/1TZK;", "LX/1Z6p;"},
+                    {"LX/1TU5;", "LX/1Z6z;"},
+                    {"LX/1TX2;", "LX/1Z8C;"},
+                    {"LX/1Ta8;", "LX/1Z99;"},
+                    {"LX/1TZf;", "LX/1Z9A;"},
+                    {"LY/AObjectS332S0000000_28;", "LY/AObjectS353S0000000_36;"},
+                    {"LY/ATCallbackS204S1200000_49;", "LY/ATCallbackS220S1200000_37;"},
+                    {"LY/ATRunnableS25S1110000_49;", "LY/ATRunnableS26S1110000_37;"},
+            }) {
+                if (types.put(pair[0], pair[1]) != null || !typeTargets.add(pair[1]))
+                    throw new AssertionError("Non-injective current original type alias");
+            }
+            method("Lcom/bytedance/im/core/model/ConversationListModel;", "LJLI(Ljava/lang/String;ZLcom/bytedance/im/core/client/callback/IRequestListener;)V", "LJLIIL");
+            method("Lcom/ss/android/ugc/aweme/comment/model/Comment;", "LLIIIL()Ljava/lang/String;", "LLIIIJ");
+            method("Lcom/ss/android/ugc/aweme/comment/model/Comment;", "LLJILJILJ()Ljava/lang/Long;", "LLJILLL");
+            method("Lcom/ss/android/ugc/aweme/comment/model/Comment;", "LLLLII()Ljava/lang/String;", "LLLLIILL");
+            method("Lcom/ss/android/ugc/aweme/comment/model/Comment;", "LLLLJ()Ljava/lang/String;", "LLLLJI");
+            method("Lcom/ss/android/ugc/aweme/comment/model/Comment;", "LLLLLJIL()I", "LLLLLJLJLL");
+            method("Lcom/ss/android/ugc/aweme/comment/model/Comment;", "LLLLZI()Lcom/ss/android/ugc/aweme/profile/model/User;", "LLLLZLL");
+            method("Lcom/ss/android/ugc/aweme/comment/model/CommentItemList;", "LLIIIL()I", "LLIIIJ");
+            method("Lcom/ss/android/ugc/aweme/comment/model/CommentItemList;", "LLJILJILJ(Ljava/lang/String;)V", "LLJILLL");
+            method("Lcom/ss/android/ugc/aweme/homepage/tab/bottom/MPFBottomTabComponent;", "LJJLIIIJ(Landroid/view/ViewGroup;)Landroid/view/View;", "LJJLIIIJL");
+        }
         rewriter = new DexRewriter(new RewriterModule() {
             @Override public Rewriter<String> getTypeRewriter(Rewriters rewriters) {
                 return HostContractNameFacts.this::renamedType;
@@ -126,7 +206,8 @@ final class HostContractNameFacts {
                         String name = methods.get(signature(original));
                         if (name == null) {
                             name = original.getName();
-                            if (methodTargets.contains(signature(renamedTypes))) name = "__douai_original406_" + name;
+                            if (methodTargets.contains(signature(renamedTypes)))
+                                name = (legacy ? "__douai_original406_" : "__douai_original4089900_") + name;
                         }
                         return new ImmutableMethodReference(renamedTypes.getDefiningClass(), name,
                                 renamedTypes.getParameterTypes(), renamedTypes.getReturnType());
@@ -136,17 +217,18 @@ final class HostContractNameFacts {
         });
     }
 
-    String type(String original) { return legacy ? renamedType(original) : original; }
+    String type(String original) { return renamedType(original); }
     private String renamedType(String original) {
         if (original.startsWith("[")) return "[" + renamedType(original.substring(1));
         String renamed = types.get(original);
         if (renamed != null) return renamed;
         // A 40.6 APK may also contain an unrelated class already using a 40.8 alias.
         // Keep that original class in a reversible separate namespace, never merge it.
-        return typeTargets.contains(original) ? "Ldouai/test/original406/" + original.substring(1) : original;
+        return typeTargets.contains(original) ? "Ldouai/test/"
+                + (legacy ? "original406/" : "original4089900/") + original.substring(1) : original;
     }
     ClassDef originalFacts(ClassDef original) {
-        ClassDef result = ImmutableClassDef.of(legacy ? rewriter.getClassDefRewriter().rewrite(original) : original);
+        ClassDef result = ImmutableClassDef.of(rewriter.getClassDefRewriter().rewrite(original));
         Set<String> signatures = new HashSet<>();
         int before = 0, after = 0;
         for (var method : original.getMethods()) before++;

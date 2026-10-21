@@ -556,6 +556,7 @@ public final class NativeAiConversationTest {
         info.applicationInfo = activity.getApplicationInfo();
         info.versionName = version;
         info.setLongVersionCode(code);
+        HostProfileFixture.attachOriginalApk(info);
         ((ShadowPackageManager) Shadow.extract(activity.getPackageManager())).installPackage(info);
     }
 

@@ -4,21 +4,26 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.os.SystemClock;
+import com.douai.module.ui.ModuleTheme;
 import android.view.View;
 import android.view.ViewOutlineProvider;
 
-/** Compact comment queue status; private comment content is shown only in the detail dialog. */
+/** Quiet, labelled task badges; message content stays in the detail dialog. */
 public final class CommentRingView extends View {
     public static final int DIAMETER_DP = 18;
     public static final int TOUCH_SIZE_DP = 32;
-    private static final int TEAL = Color.rgb(112, 229, 211);
+    public static final int TOUCH_WIDTH_DP = 32;
+    public static final int REPLY_COLOR = Color.rgb(120, 174, 239);
+    public static final int COMMENT_COLOR = Color.rgb(222, 168, 98);
     private static final int AMBER = Color.rgb(255, 201, 113);
     private static final int RED = Color.rgb(255, 127, 144);
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF arc = new RectF();
+    private final Path icon = new Path();
     private final String title;
     private final int primaryColor;
     private final boolean reply;
@@ -26,16 +31,17 @@ public final class CommentRingView extends View {
         @Override public void run() {
             if (!animates()) return;
             invalidate();
-            postOnAnimationDelayed(this, 32);
+            postOnAnimationDelayed(this, 120);
         }
     };
     private int queueCount;
     private int retriesLeft;
     private String phase = "waiting";
     private float progress = -1;
+    private boolean ambient;
 
     public CommentRingView(Context context) {
-        this(context, "automation.comment.ring", "自动评论", TEAL, false);
+        this(context, "automation.comment.ring", "自动评论", COMMENT_COLOR, false);
     }
 
     CommentRingView(Context context, String tag, String title, int color, boolean reply) {
@@ -50,14 +56,14 @@ public final class CommentRingView extends View {
         setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
         setOutlineProvider(new ViewOutlineProvider() {
             @Override public void getOutline(View view, android.graphics.Outline outline) {
-                int diameter = Math.round(dp(DIAMETER_DP));
-                int left = (view.getWidth() - diameter) / 2;
-                int top = (view.getHeight() - diameter) / 2;
-                outline.setOval(left, top, left + diameter, top + diameter);
-                outline.setAlpha(.22f);
+                int left = (view.getWidth() - Math.round(dp(DIAMETER_DP))) / 2;
+                int top = (view.getHeight() - Math.round(dp(DIAMETER_DP))) / 2;
+                outline.setRoundRect(left, top, left + Math.round(dp(DIAMETER_DP)),
+                        top + Math.round(dp(DIAMETER_DP)), dp(reply ? 9 : 4));
+                outline.setAlpha(.12f);
             }
         });
-        setElevation(dp(3));
+        setElevation(dp(2));
         updateDescription();
     }
 
@@ -76,6 +82,15 @@ public final class CommentRingView extends View {
     public int getRetriesLeft() { return retriesLeft; }
     public String getPhase() { return phase; }
     public int getPrimaryColor() { return primaryColor; }
+    public String getLabel() { return reply ? "回复" : "评论"; }
+
+    void setAmbient(boolean value) {
+        if (ambient == value) return;
+        ambient = value;
+        removeCallbacks(frame);
+        if (animates()) postOnAnimation(frame);
+        invalidate();
+    }
 
     @Override public boolean performClick() { return super.performClick(); }
 
@@ -84,66 +99,73 @@ public final class CommentRingView extends View {
     }
 
     @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-        int diameter = Math.round(dp(TOUCH_SIZE_DP));
-        setMeasuredDimension(resolveSize(diameter, widthMeasureSpec), resolveSize(diameter, heightMeasureSpec));
+        setMeasuredDimension(resolveSize(Math.round(dp(TOUCH_WIDTH_DP)), widthMeasureSpec),
+                resolveSize(Math.round(dp(TOUCH_SIZE_DP)), heightMeasureSpec));
     }
 
     @Override protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        float diameter = Math.min(dp(DIAMETER_DP), Math.min(getWidth(), getHeight()));
-        float scale = diameter / dp(DIAMETER_DP);
-        if (scale <= 0) return;
+        if (getWidth() <= 0 || getHeight() <= 0) return;
+        boolean dark = ModuleTheme.isDark(getContext());
         canvas.save();
-        canvas.translate((getWidth() - diameter) / 2, (getHeight() - diameter) / 2);
-        canvas.scale(scale, scale);
-        float center = dp(DIAMETER_DP / 2f);
+        canvas.scale(getWidth() / dp(TOUCH_WIDTH_DP), getHeight() / dp(TOUCH_SIZE_DP));
+        canvas.clipRect(dp(7), dp(7), dp(25), dp(25));
+        float radius = dp(reply ? 9 : 4);
+        arc.set(dp(7.4f), dp(7.4f), dp(24.6f), dp(24.6f));
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(isPressed() ? Color.argb(246, 29, 34, 38) : Color.argb(232, 22, 26, 30));
-        canvas.drawCircle(center, center, dp(8), paint);
+        paint.setColor(dark ? Color.argb(221, 25, 29, 35) : Color.argb(228, 250, 249, 247));
+        if (isPressed()) paint.setColor(dark ? Color.rgb(45, 52, 61) : Color.rgb(234, 237, 240));
+        canvas.drawRoundRect(arc, radius, radius, paint);
         paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(.35f));
-        paint.setColor(Color.argb(135, 223, 237, 236));
-        canvas.drawCircle(center, center, dp(7.8f), paint);
-        paint.setStrokeWidth(dp(.8f));
-        paint.setColor(Color.argb(72, 223, 237, 236));
-        canvas.drawCircle(center, center, dp(8.6f), paint);
-        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(dp(.65f));
         paint.setColor(accent());
-        arc.set(dp(.4f), dp(.4f), dp(17.6f), dp(17.6f));
-        float angle = progress < 0 && animates() ? (SystemClock.uptimeMillis() % 1800) / 5f - 90 : -90;
-        float sweep = progress < 0 ? (animates() ? 108 : 360) : progress * 360;
-        if (sweep > 0) canvas.drawArc(arc, angle, sweep, false, paint);
-        paint.setStrokeCap(Paint.Cap.BUTT);
+        canvas.drawRoundRect(arc, radius, radius, paint);
+        paint.setColor(accent());
+        paint.setStrokeWidth(dp(.9f));
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        if (reply) {
+            arc.set(dp(10), dp(10), dp(16.2f), dp(13.8f));
+            canvas.drawRoundRect(arc, dp(1.3f), dp(1.3f), paint);
+            icon.reset(); icon.moveTo(dp(11.5f), dp(13.8f)); icon.lineTo(dp(10.8f), dp(15.1f)); icon.lineTo(dp(14), dp(13.8f));
+            canvas.drawPath(icon, paint);
+        } else {
+            canvas.drawLine(dp(10.5f), dp(14.6f), dp(15.1f), dp(10), paint);
+            canvas.drawLine(dp(10), dp(15.6f), dp(12.3f), dp(15), paint);
+        }
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(Color.rgb(249, 251, 250));
         paint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        drawText(canvas, queueCount > 99 ? "99+" : Integer.toString(queueCount), 7.5f, 6.3f, 11);
-        paint.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
-        paint.setColor("failed".equals(phase) ? RED : AMBER);
-        drawText(canvas, Integer.toString(retriesLeft), 5.5f, 12.8f, 9);
+        paint.setColor(dark ? Color.rgb(232, 235, 239) : Color.rgb(42, 49, 58));
+        drawText(canvas, queueCount > 99 ? "99+" : Integer.toString(queueCount), 8, 18, 17.5f, 10);
+        paint.setStrokeWidth(dp(.8f));
+        paint.setColor(Color.argb(dark ? 45 : 35, Color.red(primaryColor), Color.green(primaryColor), Color.blue(primaryColor)));
+        canvas.drawLine(dp(11), dp(22), dp(21), dp(22), paint);
+        paint.setColor(accent());
+        float start = progress >= 0 ? 11 : ambient ? 14 : 11 + (SystemClock.uptimeMillis() % 3600) / 3600f * 7;
+        float end = progress >= 0 ? 11 + progress * 10 : start + 3;
+        canvas.drawLine(dp(start), dp(22), dp(end), dp(22), paint);
+        paint.setStrokeCap(Paint.Cap.BUTT);
         canvas.restore();
     }
 
-    private void drawText(Canvas canvas, String value, float size, float centerY, float maxWidth) {
+    private void drawText(Canvas canvas, String value, float size, float centerX, float centerY, float maxWidth) {
         float fontScale = Math.max(1, Math.min(1.1f, getResources().getConfiguration().fontScale));
         paint.setTextSize(dp(size) * fontScale);
         float width = paint.measureText(value);
         if (width > dp(maxWidth)) paint.setTextSize(paint.getTextSize() * dp(maxWidth) / width);
         paint.setTextAlign(Paint.Align.CENTER);
         Paint.FontMetrics metrics = paint.getFontMetrics();
-        canvas.drawText(value, dp(DIAMETER_DP / 2f), dp(centerY) - (metrics.ascent + metrics.descent) / 2, paint);
+        canvas.drawText(value, dp(centerX), dp(centerY) - (metrics.ascent + metrics.descent) / 2, paint);
     }
 
     private int accent() {
         if ("failed".equals(phase)) return RED;
         if ("retrying".equals(phase)) return AMBER;
         if ("submitted".equals(phase)) return AMBER;
-        if ("details".equals(phase)) return Color.rgb(224, 238, 234);
         return primaryColor;
     }
 
     private boolean animates() {
-        return isAttachedToWindow() && getVisibility() == VISIBLE && progress < 0
+        return !ambient && isAttachedToWindow() && getVisibility() == VISIBLE && progress < 0
                 && !"details".equals(phase) && !"failed".equals(phase) && !"submitted".equals(phase);
     }
 
@@ -151,6 +173,8 @@ public final class CommentRingView extends View {
         String status;
         switch (phase) {
             case "generating": status = "生成中"; break;
+            case "media": status = "读取素材中"; break;
+            case "speech": status = "语音合成中"; break;
             case "preview": status = reply ? "等待回复" : "等待评论"; break;
             case "details": status = "已暂停，等待确认"; break;
             case "publishing": status = reply ? "发送中" : "发布中"; break;

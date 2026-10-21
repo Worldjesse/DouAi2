@@ -546,9 +546,16 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 return;
             }
             if (!operation.current()) return;
+            operation.outputName = incoming.group ? groups.getOrDefault(conversation, conversation)
+                    : contacts.getOrDefault(Long.toString(incoming.sender), Long.toString(incoming.sender));
+            BooleanSupplier valid = () -> operation.current() && replyStillAllowed(values, account, current)
+                    && conversationExists(conversation, incoming.group, operation.conversation)
+                    && rateLimiter.canSend(AutomationHistoryStore.REPLY, account, recipient, options);
+            operation.preparation("waiting", valid);
             String modelName = "";
             AiModelSettings models = "ai".equals(current.text("reply_mode", "fixed")) ? AiModelSettings.read(current) : null;
             operation.stage = Stage.MEDIA;
+            operation.preparation("media", valid);
             long mediaStarted = SystemClock.elapsedRealtime();
             operation.stageStarted = mediaStarted;
             List<ChatImage> images = models == null ? Collections.emptyList()
@@ -559,6 +566,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
             String secondary = current.text("reply_prompt", "自然简洁地回复对方，只输出回复正文。");
             String response;
             operation.stage = Stage.GENERATION;
+            operation.preparation("generating", valid);
             long generationStarted = SystemClock.elapsedRealtime();
             operation.stageStarted = generationStarted;
             if (models != null) {
@@ -574,22 +582,18 @@ public final class NativeMessagingHooks implements AutoCloseable {
             if (!operation.current()) return;
             if (!replyStillAllowed(values, account, current)) return;
             if (response == null || response.trim().isEmpty()) return;
-            String name = incoming.group ? groups.getOrDefault(conversation, conversation)
-                    : contacts.getOrDefault(Long.toString(incoming.sender), Long.toString(incoming.sender));
-            BooleanSupplier valid = () -> operation.current() && replyStillAllowed(values, account, current)
-                    && conversationExists(conversation, incoming.group, operation.conversation)
-                    && rateLimiter.canSend(AutomationHistoryStore.REPLY, account, recipient, options);
             SpeechPreparation.Audio audio;
             if (current.enabled("reply_voice")) {
                 if (audioSender == null) throw new IllegalStateException("Native audio sender unavailable");
                 operation.stage = Stage.SPEECH;
+                operation.response = response;
+                operation.preparation("speech", valid);
                 audio = speechPreparer.prepare(context, response, current, 120_000, valid);
                 if (!valid.getAsBoolean()) { audio.delete(); return; }
             } else audio = null;
             if (!operation.handoff()) { if (audio != null) audio.delete(); return; }
             java.util.concurrent.atomic.AtomicBoolean submitted = new java.util.concurrent.atomic.AtomicBoolean();
             operation.response = response;
-            operation.outputName = name;
             operation.voice = audio != null;
             operation.stage = Stage.QUEUE;
             dispatcher.prepare(operation.entry("pending"),
@@ -741,7 +745,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
         volatile Reason reason = Reason.NONE;
         volatile Stage stage = Stage.QUEUE;
         volatile long queueMillis = -1, mediaMillis = -1, generationMillis = -1, sendStarted = -1, stageStarted = -1;
-        volatile boolean began, reserved, nativeInvoked, voice, unknown, acknowledgmentReceived;
+        volatile boolean began, reserved, nativeInvoked, voice, unknown, acknowledgmentReceived, handedOff;
         volatile String response = "", outputName = "";
         volatile String acknowledgedOutcome;
 
@@ -787,7 +791,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 if (!current()) return false;
                 expired = SystemClock.elapsedRealtime() >= deadline;
                 // The preview/native sender now owns completion; generation timeout cannot relabel a send.
-                if (!expired) finished = true;
+                if (!expired) { finished = true; handedOff = true; }
             }
             if (expired) { cancel(true); return false; }
             release();
@@ -817,6 +821,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
             main.removeCallbacks(watchdog);
             replyQueue.remove(this);
             pendingReplies.remove(this);
+            if (!handedOff) dispatcher.discardReplyPreparation(identity);
             if (timeout && generation.get() == epoch && ownUid() == account
                     && automatic("native_auto_reply", options)) {
                 reason = began ? Reason.GENERATION_TIMEOUT : Reason.QUEUE_EXPIRED;
@@ -831,6 +836,11 @@ public final class NativeMessagingHooks implements AutoCloseable {
             main.removeCallbacks(watchdog);
             replyQueue.remove(this);
             pendingReplies.remove(this);
+            if (!handedOff) dispatcher.discardReplyPreparation(identity);
+        }
+
+        void preparation(String phase, BooleanSupplier valid) {
+            dispatcher.trackReply(entry("pending"), phase, valid, () -> cancel(false));
         }
 
         void invokingNative() {

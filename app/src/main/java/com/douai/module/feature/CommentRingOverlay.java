@@ -5,15 +5,21 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Insets;
 import android.os.Build;
+import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.widget.FrameLayout;
+import java.util.function.Consumer;
 
 /** A single decor-attached ring, with a saved free position and isolated touch handling. */
 public final class CommentRingOverlay {
+    static final long IDLE_FADE_MILLIS = 4_000;
+    static final long PIXEL_SHIFT_MILLIS = 45_000;
+    static final float IDLE_ALPHA = .62f;
+    private static final int[][] PIXEL_OFFSETS = {{0, 0}, {2, 0}, {2, 2}, {0, 2}, {-2, 2}, {-2, 0}, {-2, -2}, {0, -2}, {2, -2}};
     private final String positionX;
     private final String positionY;
     private final SharedPreferences preferences;
@@ -42,12 +48,21 @@ public final class CommentRingOverlay {
     private int insetRight;
     private int insetBottom;
     private CommentRingOverlay peer;
+    private final Consumer<String> diagnostics;
+    private final Runnable maintenance = this::maintain;
+    private long lastInteraction, lastShift;
+    private int shiftStep;
+    private float shiftX, shiftY;
 
     public CommentRingOverlay(Context app, Runnable click, Runnable longPress) {
         this(app, click, longPress, false);
     }
 
     CommentRingOverlay(Context app, Runnable click, Runnable longPress, boolean reply) {
+        this(app, click, longPress, reply, ignored -> { });
+    }
+
+    CommentRingOverlay(Context app, Runnable click, Runnable longPress, boolean reply, Consumer<String> diagnostics) {
         if (app == null || click == null || longPress == null) throw new IllegalArgumentException("Context and actions are required");
         Context application = app.getApplicationContext();
         if (application == null) application = app;
@@ -55,9 +70,10 @@ public final class CommentRingOverlay {
         positionX = (reply ? "reply" : "comment") + "_ring_x";
         positionY = (reply ? "reply" : "comment") + "_ring_y";
         ring = reply ? new CommentRingView(application, "automation.reply.ring", "自动回复",
-                android.graphics.Color.rgb(100, 178, 255), true) : new CommentRingView(application);
+                CommentRingView.REPLY_COLOR, true) : new CommentRingView(application);
         this.click = click;
         this.longPress = longPress;
+        this.diagnostics = diagnostics == null ? ignored -> { } : diagnostics;
         hold = () -> {
             if (!touching || dragging || multiTouch) return;
             held = true;
@@ -78,8 +94,7 @@ public final class CommentRingOverlay {
         if (parent != decor) {
             detach();
             parent = (ViewGroup) decor;
-            int size = dp(CommentRingView.TOUCH_SIZE_DP);
-            parent.addView(ring, new FrameLayout.LayoutParams(size, size));
+            parent.addView(ring, new FrameLayout.LayoutParams(dp(CommentRingView.TOUCH_WIDTH_DP), dp(CommentRingView.TOUCH_SIZE_DP)));
             parent.addOnLayoutChangeListener(layoutListener);
             ring.setOnApplyWindowInsetsListener((view, insets) -> {
                 updateInsets(insets);
@@ -92,8 +107,14 @@ public final class CommentRingOverlay {
             ring.setOnTouchListener((view, event) -> touch(event));
             ring.requestApplyInsets();
             applyPosition();
+            diagnostic("attach", activity);
+            lastShift = SystemClock.uptimeMillis();
+            wake(false);
+            ring.postDelayed(maintenance, 1000);
         }
+        boolean changed = ring.getQueueCount() != Math.max(0, queueCount) || !ring.getPhase().equals(phase);
         ring.setState(queueCount, retriesLeft, phase, progress);
+        if (changed) wake(false);
         applyPosition();
         ring.setVisibility(View.VISIBLE);
         ring.bringToFront();
@@ -101,6 +122,11 @@ public final class CommentRingOverlay {
 
     public void detach() {
         ring.removeCallbacks(hold);
+        ring.removeCallbacks(maintenance);
+        shiftStep = 0;
+        shiftX = shiftY = 0;
+        ring.setAlpha(1);
+        ring.setAmbient(false);
         touching = dragging = held = multiTouch = false;
         ring.setPressed(false);
         ring.setOnTouchListener(null);
@@ -110,6 +136,7 @@ public final class CommentRingOverlay {
         ring.setLongClickable(false);
         ring.setOnApplyWindowInsetsListener(null);
         if (parent != null) {
+            diagnostic("detach", null);
             parent.requestDisallowInterceptTouchEvent(false);
             parent.removeOnLayoutChangeListener(layoutListener);
             parent.removeView(ring);
@@ -118,11 +145,53 @@ public final class CommentRingOverlay {
         insetLeft = insetTop = insetRight = insetBottom = 0;
     }
 
+    private void diagnostic(String event, Activity activity) {
+        try {
+            diagnostics.accept("[DouAi.ReplyOverlay] event=" + event
+                    + " activity=" + (activity == null ? "none" : activity.getClass().getSimpleName())
+                    + " parent_match=" + (parent != null && ring.getParent() == parent)
+                    + " attached=" + ring.isAttachedToWindow() + " shown=" + ring.isShown()
+                    + " window_visibility=" + ring.getWindowVisibility()
+                    + " width=" + (parent == null ? 0 : parent.getWidth())
+                    + " height=" + (parent == null ? 0 : parent.getHeight())
+                    + " x=" + Math.round(ring.getX()) + " y=" + Math.round(ring.getY()));
+        } catch (Throwable ignored) { }
+    }
+
     public CommentRingView view() { return ring; }
+
+    private void wake(boolean interaction) {
+        lastInteraction = SystemClock.uptimeMillis();
+        if (interaction) lastShift = lastInteraction;
+        ring.setAlpha(1);
+        ring.setAmbient(false);
+    }
+
+    private void maintain() {
+        if (parent == null) return;
+        long now = SystemClock.uptimeMillis();
+        boolean interactive = touching || dragging || "details".equals(ring.getPhase())
+                || !ring.isShown() || !ring.hasWindowFocus();
+        if (!interactive) {
+            if (now - lastInteraction >= IDLE_FADE_MILLIS) {
+                ring.setAlpha(IDLE_ALPHA);
+                ring.setAmbient(true);
+            }
+            if (now - lastShift >= PIXEL_SHIFT_MILLIS && (peer == null || !peer.touching && !peer.dragging)) {
+                shiftStep = (shiftStep + 1) % PIXEL_OFFSETS.length;
+                shiftX = dp(PIXEL_OFFSETS[shiftStep][0]);
+                shiftY = dp(PIXEL_OFFSETS[shiftStep][1]);
+                lastShift = now;
+                applyPosition();
+            }
+        }
+        ring.postDelayed(maintenance, 1000);
+    }
 
     private boolean touch(MotionEvent event) {
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
+                wake(true);
                 touching = true;
                 dragging = held = multiTouch = false;
                 downX = event.getRawX();
@@ -158,6 +227,7 @@ public final class CommentRingOverlay {
                 boolean cancelLatest = touching && held && !dragging && !multiTouch;
                 boolean activate = touching && !dragging && !held && !multiTouch;
                 touching = dragging = held = multiTouch = false;
+                wake(true);
                 if (parent != null) parent.requestDisallowInterceptTouchEvent(false);
                 if (cancelLatest) ring.performLongClick();
                 else if (activate) ring.performClick();
@@ -166,6 +236,7 @@ public final class CommentRingOverlay {
                 ring.removeCallbacks(hold);
                 ring.setPressed(false);
                 touching = dragging = held = multiTouch = false;
+                wake(true);
                 if (parent != null) parent.requestDisallowInterceptTouchEvent(false);
                 applyPosition();
                 return true;
@@ -177,7 +248,7 @@ public final class CommentRingOverlay {
     private void updateInsets(WindowInsets insets) {
         if (insets == null) return;
         if (Build.VERSION.SDK_INT >= 30) {
-            Insets safe = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            Insets safe = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
             insetLeft = safe.left;
             insetTop = safe.top;
             insetRight = safe.right;
@@ -197,10 +268,19 @@ public final class CommentRingOverlay {
     }
 
     private void applyPosition() {
-        if (dragging || parent == null || parent.getWidth() == 0 || parent.getHeight() == 0) return;
+        if (touching || dragging || parent == null || parent.getWidth() == 0 || parent.getHeight() == 0) return;
         float[] bounds = bounds();
-        ring.setTranslationX(bounds[0] + normalizedX * (bounds[2] - bounds[0]) - ring.getLeft());
-        ring.setTranslationY(bounds[1] + normalizedY * (bounds[3] - bounds[1]) - ring.getTop());
+        float x = bounds[0] + normalizedX * (bounds[2] - bounds[0]);
+        float y = bounds[1] + normalizedY * (bounds[3] - bounds[1]);
+        float shiftedX = clamp(x + shiftX, bounds[0], bounds[2]);
+        float shiftedY = clamp(y + shiftY, bounds[1], bounds[3]);
+        if (peer != null && peer.parent == parent && peer.ring.getParent() != null
+                && overlaps(shiftedX, shiftedY, peer.ring.getX(), peer.ring.getY(),
+                dp(CommentRingView.TOUCH_WIDTH_DP), dp(CommentRingView.TOUCH_SIZE_DP), dp(8))) {
+            shiftedX = x; shiftedY = y;
+        }
+        ring.setTranslationX(shiftedX - ring.getLeft());
+        ring.setTranslationY(shiftedY - ring.getTop());
         avoidOverlap(bounds);
     }
 
@@ -215,21 +295,23 @@ public final class CommentRingOverlay {
         float[] bounds = bounds();
         normalizedX = fraction(ring.getX(), bounds[0], bounds[2]);
         normalizedY = fraction(ring.getY(), bounds[1], bounds[3]);
+        shiftStep = 0;
+        shiftX = shiftY = 0;
         preferences.edit().putFloat(positionX, normalizedX).putFloat(positionY, normalizedY).apply();
     }
 
     private void avoidOverlap(float[] bounds) {
         if (peer == null || peer.parent != parent || peer.ring.getParent() == null || peer.ring.getVisibility() != View.VISIBLE) return;
-        float size = dp(CommentRingView.TOUCH_SIZE_DP), gap = dp(8);
+        float width = dp(CommentRingView.TOUCH_WIDTH_DP), height = dp(CommentRingView.TOUCH_SIZE_DP), gap = dp(8);
         float x = ring.getX(), y = ring.getY(), px = peer.ring.getX(), py = peer.ring.getY();
-        if (!overlaps(x, y, px, py, size, gap)) return;
-        float[][] candidates = {{x, py + size + gap}, {x, py - size - gap},
-                {px + size + gap, y}, {px - size - gap, y}};
+        if (!overlaps(x, y, px, py, width, height, gap)) return;
+        float[][] candidates = {{x, py + height + gap}, {x, py - height - gap},
+                {px + width + gap, y}, {px - width - gap, y}};
         float distance = Float.MAX_VALUE;
         float bestX = x, bestY = y;
         for (float[] point : candidates) {
             if (point[0] < bounds[0] || point[0] > bounds[2] || point[1] < bounds[1] || point[1] > bounds[3]
-                    || overlaps(point[0], point[1], px, py, size, gap)) continue;
+                    || overlaps(point[0], point[1], px, py, width, height, gap)) continue;
             float delta = (point[0] - x) * (point[0] - x) + (point[1] - y) * (point[1] - y);
             if (delta < distance) { distance = delta; bestX = point[0]; bestY = point[1]; }
         }
@@ -237,19 +319,19 @@ public final class CommentRingOverlay {
         ring.setTranslationY(bestY - ring.getTop());
     }
 
-    private static boolean overlaps(float x, float y, float px, float py, float size, float gap) {
-        return x < px + size + gap && x + size + gap > px && y < py + size + gap && y + size + gap > py;
+    private static boolean overlaps(float x, float y, float px, float py, float width, float height, float gap) {
+        return x < px + width + gap && x + width + gap > px && y < py + height + gap && y + height + gap > py;
     }
 
     private float[] bounds() {
         int margin = dp(12);
         int width = parent == null ? 0 : parent.getWidth();
         int height = parent == null ? 0 : parent.getHeight();
-        int size = dp(CommentRingView.TOUCH_SIZE_DP);
-        float left = Math.min(insetLeft + margin, Math.max(0, width - size));
-        float top = Math.min(insetTop + margin, Math.max(0, height - size));
-        return new float[]{left, top, Math.max(left, width - insetRight - margin - size),
-                Math.max(top, height - insetBottom - margin - size)};
+        int badgeWidth = dp(CommentRingView.TOUCH_WIDTH_DP), badgeHeight = dp(CommentRingView.TOUCH_SIZE_DP);
+        float left = Math.min(insetLeft + margin, Math.max(0, width - badgeWidth));
+        float top = Math.min(insetTop + margin, Math.max(0, height - badgeHeight));
+        return new float[]{left, top, Math.max(left, width - insetRight - margin - badgeWidth),
+                Math.max(top, height - insetBottom - margin - badgeHeight)};
     }
 
     private static float fraction(float value, float min, float max) { return max <= min ? 0 : normalized((value - min) / (max - min)); }

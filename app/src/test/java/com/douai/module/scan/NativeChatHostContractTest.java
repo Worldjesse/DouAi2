@@ -303,7 +303,7 @@ public final class NativeChatHostContractTest {
         for (String field : new String[]{"duration", "fileSize"}) assertPublicInstanceField(ALBUM_MODEL, field, "J");
         assertPublicInstanceField(ALBUM_MODEL, "mimeType", "Ljava/lang/String;");
         assertPublicInstanceField(ALBUM_MODEL, "edited", "Z");
-        Method video = assertCallable(ALBUM_MODEL, HostResourceProfile.legacy(profile) ? "q2" : "t2", "Z", false);
+        Method video = assertCallable(ALBUM_MODEL, HostResourceProfile.legacy(profile) ? "q2" : "s2", "Z", false);
         assertTrue("Native video classification must still read MediaModel.type", referencesField(video, ALBUM_MODEL, "type"));
         assertTrue(literals(video).contains(1));
     }
@@ -453,28 +453,17 @@ public final class NativeChatHostContractTest {
     private static int rid(int canonicalId) { return HostResourceProfile.id(profile, canonicalId); }
 
     private static String completionMethod() {
-        return HostResourceProfile.legacy(profile) ? "LLLLZIL" : "LLLLLZ";
+        return HostResourceProfile.legacy(profile) ? "LLLLZIL" : "LLLLLZIL";
     }
 
     private static ClassDef type(String descriptor) { return types.get(hostDescriptor(descriptor)); }
 
     private static String hostDescriptor(String descriptor) {
-        if (!HostResourceProfile.legacy(profile)) return descriptor;
-        switch (descriptor) {
-            case "LX/1U1O;": return "LX/133H;";
-            case "LX/1U1r;": return "LX/133I;";
-            case "LX/1U1z;": return "LX/134V;";
-            case "LX/1U2g;": return "LX/134d;";
-            case "LX/0vUA;": return "LX/12w3;";
-            case "LX/0vTt;": return "LX/12vu;";
-            case "LX/1UWt;": return "LX/06Dh;";
-            default:
-                if (descriptor.startsWith("LX/") && descriptor.endsWith(";")) {
-                    return "L" + HostResourceProfile.className(profile,
-                            descriptor.substring(1, descriptor.length() - 1).replace('/', '.')).replace('.', '/') + ";";
-                }
-                return descriptor;
+        if (descriptor.startsWith("LX/") && descriptor.endsWith(";")) {
+            return "L" + HostResourceProfile.className(profile,
+                    descriptor.substring(1, descriptor.length() - 1).replace('/', '.')).replace('.', '/') + ";";
         }
+        return descriptor;
     }
 
     private static Method method(String descriptor, String name, String returns, String... parameters) {

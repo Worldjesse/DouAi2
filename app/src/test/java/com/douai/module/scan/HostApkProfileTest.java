@@ -30,6 +30,35 @@ public final class HostApkProfileTest {
         assertNull(HostApkProfile.read(apk(manifest("other.application", "40.8.0", 400801, true))));
     }
 
+    @Test public void only9900BuildCanSelect408EvenWhenVersionNameAndCodeAreIdentical() throws Exception {
+        for (long build : new long[]{40809985L, 40809901L, -1L}) {
+            byte[] xml = BinaryHostManifestFixture.manifest(HostAdaptation.TARGET_PACKAGE,
+                    "40.8.0", 400801, true, build);
+            assertNull("Unsupported 40.8 build must not use 9900 rules: " + build, HostApkProfile.read(apk(xml)));
+        }
+        byte[] accepted = BinaryHostManifestFixture.manifest(HostAdaptation.TARGET_PACKAGE,
+                "40.8.0", 400801, false, 40809900L);
+        assertEquals(40809900L, HostApkProfile.parseManifest(accepted).updateVersionCode);
+        assertSame(HostAdaptation.PROFILE_408, HostApkProfile.read(apk(accepted)));
+    }
+
+    @Test public void updateVersionMustBeCompiledAndroidMetadataInsideTheApplication() throws Exception {
+        byte[] xml = BinaryHostManifestFixture.manifest(HostAdaptation.TARGET_PACKAGE,
+                "40.8.0", 400801, true, 40809900L);
+        int root = 8 + buffer(xml).getInt(12);
+        int application = root + 96, meta = application + 36;
+        byte[] wrongNamespace = xml.clone();
+        buffer(wrongNamespace).putInt(meta + 36, -1);
+        assertNull(HostApkProfile.read(apk(wrongNamespace)));
+        byte[] wrongOwner = xml.clone();
+        buffer(wrongOwner).putInt(application + 20, 14); // activity is not application metadata.
+        assertNull(HostApkProfile.read(apk(wrongOwner)));
+        byte[] compiledOldBuild = xml.clone();
+        buffer(compiledOldBuild).putInt(meta + 36 + 20 + 8, 13); // Raw string says 40809900.
+        buffer(compiledOldBuild).putInt(meta + 36 + 20 + 16, 40809985);
+        assertNull(HostApkProfile.read(apk(compiledOldBuild)));
+    }
+
     @Test public void invalidChunkAttributeAndStringOffsetsFailAsIoErrors() throws Exception {
         byte[] valid = manifest(HostAdaptation.TARGET_PACKAGE, "40.8.0", 400801, true);
         assertInvalid(Arrays.copyOf(valid, valid.length - 1));
@@ -88,37 +117,9 @@ public final class HostApkProfileTest {
     private static ByteBuffer buffer(byte[] bytes) { return ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN); }
 
     private static byte[] manifest(String packageName, String versionName, int versionCode, boolean utf8) throws IOException {
-        List<String> strings = Arrays.asList("http://schemas.android.com/apk/res/android", "manifest",
-                "package", "versionName", "versionCode", packageName, versionName, "40.8.0");
-        ByteArrayOutputStream contents = new ByteArrayOutputStream();
-        int[] offsets = new int[strings.size()];
-        for (int i = 0; i < strings.size(); i++) {
-            offsets[i] = contents.size();
-            String text = strings.get(i);
-            byte[] encoded = text.getBytes(utf8 ? StandardCharsets.UTF_8 : StandardCharsets.UTF_16LE);
-            if (utf8) { contents.write(text.length()); contents.write(encoded.length); }
-            else { contents.write(text.length() & 255); contents.write(text.length() >>> 8); }
-            contents.write(encoded);
-            contents.write(0);
-            if (!utf8) contents.write(0);
-        }
-        while ((contents.size() & 3) != 0) contents.write(0);
-        int poolSize = 28 + strings.size() * 4 + contents.size();
-        int elementSize = 36 + 3 * 20;
-        ByteBuffer data = ByteBuffer.allocate(8 + poolSize + elementSize).order(ByteOrder.LITTLE_ENDIAN);
-        data.putShort((short) 3).putShort((short) 8).putInt(data.capacity());
-        data.putShort((short) 1).putShort((short) 28).putInt(poolSize);
-        data.putInt(strings.size()).putInt(0).putInt(utf8 ? 0x100 : 0).putInt(28 + strings.size() * 4).putInt(0);
-        for (int offset : offsets) data.putInt(offset);
-        data.put(contents.toByteArray());
-        data.putShort((short) 0x0102).putShort((short) 16).putInt(elementSize);
-        data.putInt(1).putInt(-1).putInt(-1).putInt(1);
-        data.putShort((short) 20).putShort((short) 20).putShort((short) 3);
-        data.putShort((short) 0).putShort((short) 0).putShort((short) 0);
-        attribute(data, -1, 2, 5, 3, 5);
-        attribute(data, 0, 3, 6, 3, 6);
-        attribute(data, 0, 4, -1, 0x10, versionCode);
-        return data.array();
+        return BinaryHostManifestFixture.manifest(packageName, versionName, versionCode, utf8,
+                "40.8.0".equals(versionName) && versionCode == 400801
+                        ? HostAdaptation.VERIFIED_UPDATE_VERSION_CODE : -1);
     }
 
     private static void attribute(ByteBuffer data, int namespace, int name, int raw, int type, int value) {

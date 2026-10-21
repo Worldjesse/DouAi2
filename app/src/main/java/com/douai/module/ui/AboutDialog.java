@@ -13,6 +13,8 @@ import android.widget.Toast;
 import android.view.View;
 import android.view.ViewGroup;
 import com.douai.module.BuildConfig;
+import com.douai.module.config.SettingsRepository;
+import com.douai.module.config.SettingsStore;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
 import com.douai.module.ui.miuix.MiuixSettingsViews;
 import java.util.function.BiConsumer;
@@ -39,6 +41,10 @@ public final class AboutDialog {
         });
     }
     static AlertDialog create(Context baseContext, boolean miuix, BiConsumer<Dialog, Runnable> presenter) {
+        return create(baseContext, miuix, presenter, new SettingsRepository(baseContext));
+    }
+    static AlertDialog create(Context baseContext, boolean miuix, BiConsumer<Dialog, Runnable> presenter,
+                              SettingsStore settings) {
         Context context = ModuleTheme.themedContext(baseContext);
         TextView content = new TextView(context);
         content.setTag("about.details");
@@ -56,27 +62,25 @@ public final class AboutDialog {
         LinearLayout body = new LinearLayout(context);
         body.setOrientation(LinearLayout.VERTICAL);
         HelpDialog[] help = new HelpDialog[1];
+        DebugLogDialog[] logs = new DebugLogDialog[1];
         Runnable openHelp = () -> {
             if (help[0] != null && help[0].dialog().isShowing()) return;
             help[0] = new HelpDialog(context, miuix);
             presenter.accept(help[0].dialog(), null);
         };
-        View helpRow;
-        if (miuix) {
-            helpRow = new MiuixSettingsViews.Option(context, "帮助", "", null, true, openHelp).getView();
-        } else {
-            TextView label = new TextView(context);
-            label.setText("帮助");
-            label.setTextSize(16);
-            label.setPadding(padding, padding / 2, padding, padding / 2);
-            label.setMinimumHeight(Math.round(48 * context.getResources().getDisplayMetrics().density));
-            label.setFocusable(true);
-            label.setOnClickListener(ignored -> openHelp.run());
-            helpRow = label;
-        }
+        View helpRow = option(context, miuix, "帮助", openHelp, padding);
         helpRow.setTag("about.help");
         helpRow.setContentDescription("帮助");
         body.addView(helpRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        View logsRow = option(context, miuix, "调试与日志", () -> {
+            if (logs[0] != null && logs[0].dialog().isShowing()) return;
+            logs[0] = new DebugLogDialog(baseContext, settings, miuix);
+            presenter.accept(logs[0].dialog(), logs[0]::close);
+        }, padding);
+        logsRow.setTag("about.debug");
+        logsRow.setContentDescription("调试与日志");
+        body.addView(logsRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
         body.addView(content);
         ScrollView scroll = new ScrollView(context);
@@ -86,6 +90,7 @@ public final class AboutDialog {
             @Override public void onViewAttachedToWindow(View view) { }
             @Override public void onViewDetachedFromWindow(View view) {
                 if (help[0] != null) help[0].dialog().dismiss();
+                if (logs[0] != null) { logs[0].close(); logs[0].dialog().dismiss(); }
             }
         });
         return new MiuixDialogBuilder(context, miuix).setTitle("关于 DouAi")
@@ -94,6 +99,17 @@ public final class AboutDialog {
                 .setNeutralButton("LSP 仓库", (dialog, which) -> open(context, LSP_URL))
                 .setPositiveButton("源码仓库", (dialog, which) -> open(context, SOURCE_URL))
                 .create();
+    }
+    private static View option(Context context, boolean miuix, String title, Runnable action, int padding) {
+        if (miuix) return new MiuixSettingsViews.Option(context, title, "", null, true, action).getView();
+        TextView label = new TextView(context);
+        label.setText(title);
+        label.setTextSize(16);
+        label.setPadding(padding, padding / 2, padding, padding / 2);
+        label.setMinimumHeight(Math.round(48 * context.getResources().getDisplayMetrics().density));
+        label.setFocusable(true);
+        label.setOnClickListener(ignored -> action.run());
+        return label;
     }
     private static void open(Context context, String url) {
         try { context.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); }

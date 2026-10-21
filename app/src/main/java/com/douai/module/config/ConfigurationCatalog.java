@@ -20,7 +20,7 @@ public final class ConfigurationCatalog {
         PLAYBACK, AUTO_PLAY, GESTURE, MESSAGE_RECALL, SPOOF, FOLLOW_LISTS, AUTOMATION_DISPATCH,
         HOST_BEHAVIOR, DIRECT_MESSAGE_SPEECH, MEDIA_MODEL, COMMENT_ENHANCEMENTS,
         COMMENT_VOICE, NATIVE_COMMENT_SPEECH, AUTO_LIKE, AUTO_FOLLOW, AUTO_MESSAGE,
-        COMMENT_TOOLS, IMMERSIVE, VERSION, TOP_TABS, REFRESH
+        COMMENT_TOOLS, IMMERSIVE, VERSION, TOP_TABS, REFRESH, DIAGNOSTICS
     }
 
     /** A missing default means the owning domain still resolves a context-dependent/legacy default. */
@@ -74,6 +74,8 @@ public final class ConfigurationCatalog {
                 + "hide_camera_plus hide_video_black_edges prevent_insert_video prevent_skip_hidden remove_splash_ads "
                 + "remove_teen_dialog remove_update_dialog");
         add(keys, "boolean", LocalOptions.OFFICIAL_DOWNLOAD_DIRECT);
+        add(keys, "boolean", LocalOptions.DEBUG_LOGGING);
+        add(keys, "boolean", LocalOptions.HASH_LONG_PRESS_VOICE);
         add(keys, "boolean", LocalOptions.REPLY_RECOGNIZE_IMAGES + " " + LocalOptions.REPLY_RECOGNIZE_VIDEO);
         add(keys, "boolean", LocalOptions.COMMENT_REPLY_ENABLED
                 + " comment_reply_tip_enabled comment_reply_failure_notify");
@@ -125,11 +127,11 @@ public final class ConfigurationCatalog {
         depend(Feature.FOLLOW_LISTS, "reply_scope_mode comment_scope_mode reply_private_chats reply_global reply_scope_relations reply_targets reply_group_targets reply_group_members comment_scope_relations comment_scope_users relation_lists_refresh_token", "");
         depend(Feature.AUTOMATION_DISPATCH, "reply_tip comment_tip reply_notice_seconds comment_notice_seconds streak_tip reply_save_history comment_save_history", "");
         depend(Feature.HOST_BEHAVIOR, "remove_splash_ads remove_update_dialog remove_teen_dialog hide_video_black_edges hide_camera_plus disable_double_tap_like prevent_skip_hidden prevent_insert_video block_long_press_speed", "");
-        depend(Feature.DIRECT_MESSAGE_SPEECH, "", "dm_ tts_");
+        depend(Feature.DIRECT_MESSAGE_SPEECH, LocalOptions.HASH_LONG_PRESS_VOICE, "dm_ tts_");
         depend(Feature.MEDIA_MODEL, "remove_download_limits", "");
         depend(Feature.COMMENT_ENHANCEMENTS, "comment_append_suffix comment_suffix colored_comment colored_comment_type", "");
         depend(Feature.COMMENT_VOICE, "comment_voice_replace comment_voice_path", "");
-        depend(Feature.NATIVE_COMMENT_SPEECH, "comment_tts", "tts_");
+        depend(Feature.NATIVE_COMMENT_SPEECH, "comment_tts " + LocalOptions.HASH_LONG_PRESS_VOICE, "tts_");
         depend(Feature.AUTO_LIKE, "automation_enabled auto_like_enabled", "");
         depend(Feature.AUTO_FOLLOW, "automation_enabled auto_follow_enabled", "");
         depend(Feature.AUTO_MESSAGE, "automation_enabled auto_message_enabled native_auto_reply auto_message_text hide_interface", "");
@@ -139,7 +141,10 @@ public final class ConfigurationCatalog {
         depend(Feature.TOP_TABS, "hide_top_tabs hidden_top_tabs", "");
         depend(Feature.REFRESH, "confirm_refresh", "");
 
+        depend(Feature.DIAGNOSTICS, LocalOptions.DEBUG_LOGGING, "");
         Map<String, Object> defaults = new LinkedHashMap<>();
+        defaults.put(LocalOptions.DEBUG_LOGGING, false);
+        defaults.put(LocalOptions.HASH_LONG_PRESS_VOICE, false);
         defaults.put(PLAYBACK_SPEED, PLAYBACK_SPEED_DEFAULT);
         defaults.put("download_method", DOWNLOAD_METHOD_DEFAULT);
         defaults.put("download_name_template", DOWNLOAD_NAME_DEFAULT);

@@ -122,7 +122,7 @@ public final class ApkArtifactContractTest {
                 "androidx.activity.result.contract.ActivityResultContracts$StartActivityForResult",
                 "com.ss.android.ugc.aweme.im.business.mediaselectpage.choose.MediaChooseActivity",
                 "com.ss.android.ugc.aweme.im.business.mediaselectpage.choose.model.MediaChooseResult",
-                "com.ss.android.ugc.aweme.im.service.model.MediaModel", "X.1UOy",
+                "com.ss.android.ugc.aweme.im.service.model.MediaModel", "X.1Cd0",
                 "extra_choose_parameters", "extra_choose_result", "getSelectedList", "getFilePath", "LJIILJJIL",
                 "getActivityResultRegistry", "onActivityResult", "getResultCode", "getData",
                 "register", "launch", "unregister", "com.google.gson.Gson",
@@ -141,6 +141,37 @@ public final class ApkArtifactContractTest {
             current = owner.getSuperclass();
             assertNotNull(type + " does not extend " + frameworkBase, current);
         }
+    }
+
+    @Test public void releaseHiddenSkipUsesTheHostsKotlinUnitNameAndSingleton() throws Exception {
+        DexFacts release = dexFacts("DOUAI_VERIFY_RELEASE_APK");
+        assertMethodString(release, "Lcom/douai/module/feature/HostBehaviorHooks;", "installHiddenSkip", "kotlin.Unit");
+        ClassDef unit = release.classes.get("Lkotlin/Unit;");
+        assertNotNull("Keep the class name so R8 cannot adapt host-loader literals", unit);
+        boolean instance = false;
+        for (com.android.tools.smali.dexlib2.iface.Field field : unit.getFields()) {
+            if (field.getName().equals("INSTANCE") && field.getType().equals("Lkotlin/Unit;")) instance = true;
+        }
+        assertTrue("Reflective Kotlin Unit singleton must retain INSTANCE", instance);
+    }
+
+    @Test public void releaseLikeSignatureUsesTheHostsFunction2Name() throws Exception {
+        DexFacts release = dexFacts("DOUAI_VERIFY_RELEASE_APK");
+        assertMethodString(release, "Lcom/douai/module/feature/AutoLikeHook;", "install", "kotlin.jvm.functions.Function2");
+    }
+
+    private static void assertMethodString(DexFacts facts, String owner, String name, String expected) {
+        ClassDef type = facts.classes.get(owner);
+        assertNotNull(owner, type);
+        for (Method method : type.getMethods()) {
+            if (!method.getName().equals(name) || method.getImplementation() == null) continue;
+            for (Instruction instruction : method.getImplementation().getInstructions()) {
+                if (instruction instanceof ReferenceInstruction
+                        && ((ReferenceInstruction) instruction).getReference() instanceof StringReference
+                        && expected.equals(((StringReference) ((ReferenceInstruction) instruction).getReference()).getString())) return;
+            }
+        }
+        fail(owner + "." + name + " lost host-loader string " + expected);
     }
 
     private static void assertMethod(DexFacts facts, String type, String signature,

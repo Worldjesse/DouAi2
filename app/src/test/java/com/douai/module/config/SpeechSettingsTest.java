@@ -7,6 +7,19 @@ import java.util.Map;
 import static org.junit.Assert.*;
 
 public final class SpeechSettingsTest {
+    @Test public void miniMaxMixNeedsNoSingleVoiceIdButStillRequiresCredentialsAndAValidMix() {
+        SpeechSettings mixed = new SpeechSettings(new LocalOptions(Map.of(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX,
+                SpeechSettings.MINIMAX_API_KEY, "fixture-key", SpeechSettings.MINIMAX_VOICE_ID, "",
+                MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "first/20\nsecond/20")));
+        mixed.validateMiniMax();
+        assertTrue(mixed.minimaxOptions.hasMixedVoices());
+        assertEquals("", mixed.minimaxVoiceId);
+        assertThrows(IllegalArgumentException.class, () -> new SpeechSettings(new LocalOptions(Map.of(
+                SpeechSettings.MINIMAX_API_KEY, "fixture-key", SpeechSettings.MINIMAX_VOICE_ID, ""))).validateMiniMax());
+        assertThrows(IllegalArgumentException.class, () -> new SpeechSettings(new LocalOptions(Map.of(
+                SpeechSettings.MINIMAX_API_KEY, "fixture-key", MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "first/0"))).validateMiniMax());
+    }
+
     @Test public void miniMaxHasIndependentDefaultsAndLeavesOtherProvidersUntouched() {
         SpeechSettings settings = new SpeechSettings(new LocalOptions(Map.of(
                 SpeechSettings.PROVIDER, SpeechSettings.MINIMAX,

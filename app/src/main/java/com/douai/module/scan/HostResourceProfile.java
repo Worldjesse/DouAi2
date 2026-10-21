@@ -4,7 +4,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/** Uses 40.8.0 resource IDs as semantic keys and resolves the matching original host profile. */
+/** Stable semantic resource keys and UI aliases for the two verified original host builds. */
 public final class HostResourceProfile {
     private static final Map<Integer, Integer> LEGACY_IDS = legacyIds();
     private static final Map<Integer, Integer> CANONICAL_IDS = canonicalIds();
@@ -25,19 +25,27 @@ public final class HostResourceProfile {
     }
 
     public static String className(HostAdaptation.Profile profile, String latestName) {
-        if (!legacy(profile)) return latestName;
+        boolean previous = legacy(profile);
+        // The keys stay stable for callers. The latest targets are from build 40809900.
         switch (latestName) {
-            case "X.0YVw": return "X.0s7o";
-            case "X.0vJL": return "X.0sBR";
-            case "X.0YVa": return "X.0ryb";
-            case "X.0vMA": return "X.1bWb";
-            case "X.0uuG": return "X.0qn3";
-            case "X.0vK4": return "X.0sNm";
-            case "X.0Yjd": return "X.0sMT";
-            case "X.0XZk": return "X.0sWV";
-            case "X.0uok": return "X.0sSQ";
-            case "X.0vM9": return "X.1aLM";
-            case "X.1UOy": return "X.131D";
+            case "X.0YVw": return previous ? "X.0s7o" : "X.0TzN";
+            case "X.0vJL": return previous ? "X.0sBR" : "X.1Czy";
+            case "X.0YVa": return previous ? "X.0ryb" : "X.0Tqi";
+            case "X.0vMA": return previous ? "X.1bWb" : "X.1hFv";
+            case "X.0uuG": return previous ? "X.0qn3" : "X.0URm";
+            case "X.0vK4": return previous ? "X.0sNm" : "X.14XH";
+            case "X.0Yjd": return previous ? "X.0sMT" : "X.0UGJ";
+            case "X.0XZk": return previous ? "X.0sWV" : "X.0TQx";
+            case "X.0uok": return previous ? "X.0sSQ" : "X.1Cni";
+            case "X.0vM9": return previous ? "X.1aLM" : "X.1fyy";
+            case "X.1UOy": return previous ? "X.131D" : "X.1Cd0";
+            case "X.1U1O": return previous ? "X.133H" : "X.1Cue";
+            case "X.1U1r": return previous ? "X.133I" : "X.1CuX";
+            case "X.1U1z": return previous ? "X.134V" : "X.1CuH";
+            case "X.1U2g": return previous ? "X.134d" : "X.1Cur";
+            case "X.0vUA": return previous ? "X.12w3" : "X.1Ccz";
+            case "X.0vTt": return previous ? "X.12vu" : "X.1Ct9";
+            case "X.1UWt": return previous ? "X.06Dh" : "X.1Czx";
             default: return latestName;
         }
     }

@@ -16,6 +16,10 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
 import java.io.IOException;
+import java.io.ByteArrayOutputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +37,8 @@ import static org.junit.Assert.*;
 public final class MiniMaxSpeechClientTest {
     private static final String MP3_HEX = "49443366697874757265";
     private static final byte[] MP3 = new byte[]{'I', 'D', '3', 'f', 'i', 'x', 't', 'u', 'r', 'e'};
+    // A valid ADTS header declaring AAC-LC/44.1 kHz/mono; no decoder acceptance is claimed by this transport fixture.
+    private static final byte[] AAC_ADTS = {(byte) 0xff, (byte) 0xf1, 0x50, 0x40, 0x01, 0x3f, (byte) 0xfc, 0, 0};
 
     @Test public void sendsNativeJsonWithIndependentVoiceControlsAndPreservesUnicodeText() throws Exception {
         try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
@@ -91,11 +97,133 @@ public final class MiniMaxSpeechClientTest {
             server.enqueue(success(MP3_HEX)); server.start();
             MiniMaxSpeechClient.synthesize(request, "hello", settings(server));
             JSONObject body = new JSONObject(server.takeRequest(2, TimeUnit.SECONDS).getBody().readUtf8());
-            for (String field : new String[]{"language_boost", "text_normalization_mode", "voice_modify", "pronunciation_dict", "aigc_watermark"}) {
+            for (String field : new String[]{"language_boost", "text_normalization_mode", "voice_modify", "pronunciation_dict", "aigc_watermark", "timbre_weights"}) {
                 assertFalse(field, body.has(field));
             }
             JSONObject voice = body.getJSONObject("voice_setting");
             assertFalse(voice.has("emotion")); assertFalse(voice.has("latex_read")); assertFalse(voice.has("text_normalization"));
+        }
+    }
+
+    @Test public void hexAndUrlOutputOptionsReachTheProviderWithoutChangingTheAudioCodec() throws Exception {
+        try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            server.start();
+            for (String output : new String[]{"hex", "url"}) {
+                server.enqueue(success("hex".equals(output) ? MP3_HEX : server.url("/signed.mp3").toString()));
+                if ("url".equals(output)) server.enqueue(mp3());
+                SpeechHttpClient.Resource audio = MiniMaxSpeechClient.synthesize(request, "hello",
+                        settings(server, Map.of(MiniMaxSpeechOptions.OUTPUT_FORMAT, output)));
+                assertArrayEquals(MP3, audio.bytes);
+                JSONObject body = new JSONObject(server.takeRequest(2, TimeUnit.SECONDS).getBody().readUtf8());
+                assertEquals(output, body.getString("output_format"));
+                assertEquals("mp3", body.getJSONObject("audio_setting").getString("format"));
+                if ("url".equals(output)) {
+                    RecordedRequest media = server.takeRequest(2, TimeUnit.SECONDS);
+                    assertEquals("GET", media.getMethod()); assertNull(media.getHeader("Authorization"));
+                }
+            }
+        }
+    }
+
+    @Test public void mixedVoicesSendAnExplicitEmptySingleIdAndIntegerWeightsWithoutAForcedTotal() throws Exception {
+        try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            server.enqueue(success(MP3_HEX)); server.start();
+            SpeechSettings settings = settings(server, Map.of(SpeechSettings.MINIMAX_VOICE_ID, "",
+                    MiniMaxSpeechOptions.TIMBRE_WEIGHTS, " voice-alpha/20\nvoice-beta/40 "));
+            assertTrue(settings.minimaxOptions.hasMixedVoices());
+            MiniMaxSpeechClient.synthesize(request, "hello", settings);
+            JSONObject body = new JSONObject(server.takeRequest(2, TimeUnit.SECONDS).getBody().readUtf8());
+            JSONObject voice = body.getJSONObject("voice_setting");
+            assertTrue(voice.has("voice_id")); assertEquals("", voice.getString("voice_id"));
+            assertEquals(2, body.getJSONArray("timbre_weights").length());
+            JSONObject first = body.getJSONArray("timbre_weights").getJSONObject(0);
+            JSONObject second = body.getJSONArray("timbre_weights").getJSONObject(1);
+            assertEquals("voice-alpha", first.getString("voice_id")); assertEquals(20, first.getInt("weight"));
+            assertEquals("voice-beta", second.getString("voice_id")); assertEquals(40, second.getInt("weight"));
+            assertTrue(first.get("weight") instanceof Number); assertTrue(second.get("weight") instanceof Number);
+            assertFalse(body.toString().contains("private-key"));
+        }
+    }
+
+    @Test public void sixProviderChoicesIncludingExperimentalAacPreserveEveryAudioByte() throws Exception {
+        byte[] muLaw = {(byte) 0xff, 0x7f, 0x00, (byte) 0x80};
+        try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            server.start();
+            for (String format : new String[]{"mp3", "wav", "flac", "opus", "pcmu_wav", "aac"}) {
+                byte[] payload = switch (format) {
+                    case "wav" -> MiniMaxAudioFormatTest.pcmWave(1, (short) 0, (short) 12, (short) -12, (short) 0);
+                    case "flac" -> "fLaCfixture".getBytes(StandardCharsets.US_ASCII);
+                    case "opus" -> opusFixture();
+                    case "pcmu_wav" -> MiniMaxAudioFormatTest.muLawWave(1, muLaw);
+                    case "aac" -> AAC_ADTS;
+                    default -> MP3;
+                };
+                server.enqueue(success(hex(payload)));
+                SpeechHttpClient.Resource result = MiniMaxSpeechClient.synthesize(request, "hello", settings(server,
+                        Map.of(MiniMaxSpeechOptions.AUDIO_FORMAT, format, MiniMaxSpeechOptions.OUTPUT_FORMAT, "hex",
+                                MiniMaxSpeechOptions.SAMPLE_RATE, "44100", MiniMaxSpeechOptions.CHANNEL, "1")));
+                JSONObject body = new JSONObject(server.takeRequest(2, TimeUnit.SECONDS).getBody().readUtf8());
+                assertFalse(body.getBoolean("stream")); assertEquals("hex", body.getString("output_format"));
+                JSONObject audio = body.getJSONObject("audio_setting");
+                assertEquals(format, audio.getString("format")); assertEquals(1, audio.getInt("channel"));
+                boolean muLawFormat = format.startsWith("pcmu_");
+                assertEquals(muLawFormat ? 8000 : 44100, audio.getInt("sample_rate"));
+                assertEquals("mp3".equals(format), audio.has("bitrate"));
+                assertArrayEquals(payload, result.bytes);
+                if (muLawFormat) MiniMaxAudioFormatTest.assertMuLawWave(result, 1, muLaw);
+                assertEquals(muLawFormat ? ".wav" : "opus".equals(format) ? ".ogg" : "." + format, result.audioExtension());
+            }
+        }
+    }
+
+    @Test public void muLawOggAndExperimentalAacDownloadsKeepTheirOriginalBytesWithoutApiCredentials() throws Exception {
+        byte[] muLaw = {(byte) 0xff, 0x7f, 0x00, (byte) 0x80};
+        try (MockWebServer api = new MockWebServer(); MockWebServer cdn = new MockWebServer();
+             SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            api.start(); cdn.start();
+            for (String format : new String[]{"pcmu_wav", "opus", "aac"}) {
+                byte[] payload = "pcmu_wav".equals(format) ? MiniMaxAudioFormatTest.muLawWave(1, muLaw)
+                        : "aac".equals(format) ? AAC_ADTS : opusFixture();
+                String type = "pcmu_wav".equals(format) ? "audio/wav" : "aac".equals(format) ? "audio/aac" : "audio/ogg";
+                api.enqueue(success(cdn.url("/signed-audio").toString()));
+                cdn.enqueue(new MockResponse().setHeader("Content-Type", type).setBody(new Buffer().write(payload)));
+                SpeechHttpClient.Resource result = MiniMaxSpeechClient.synthesize(request, "hello", settings(api,
+                        Map.of(MiniMaxSpeechOptions.AUDIO_FORMAT, format, MiniMaxSpeechOptions.OUTPUT_FORMAT, "url")));
+                assertEquals("Bearer private-key", api.takeRequest(2, TimeUnit.SECONDS).getHeader("Authorization"));
+                RecordedRequest media = cdn.takeRequest(2, TimeUnit.SECONDS);
+                assertEquals("GET", media.getMethod()); assertNull(media.getHeader("Authorization"));
+                assertArrayEquals(payload, result.bytes);
+                if ("pcmu_wav".equals(format)) MiniMaxAudioFormatTest.assertMuLawWave(result, 1, muLaw);
+                assertEquals("pcmu_wav".equals(format) ? ".wav" : "aac".equals(format) ? ".aac" : ".ogg", result.audioExtension());
+            }
+        }
+    }
+
+    @Test public void muLawErrorBodiesFailSafelyWithoutWrappingOrConvertingAnything() throws Exception {
+        try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            server.start();
+            server.enqueue(success(hex("{\"error\":\"private-key private-text\"}".getBytes(StandardCharsets.UTF_8))));
+            assertSafe(assertThrows(IOException.class, () -> MiniMaxSpeechClient.synthesize(request, "private-text",
+                    settings(server, Map.of(MiniMaxSpeechOptions.AUDIO_FORMAT, "pcmu_wav")))));
+            server.enqueue(success(server.url("/invalid-wave").toString()));
+            server.enqueue(json("{\"error\":\"private-key private-text\"}"));
+            assertSafe(assertThrows(IOException.class, () -> MiniMaxSpeechClient.synthesize(request, "private-text",
+                    settings(server, Map.of(MiniMaxSpeechOptions.AUDIO_FORMAT, "pcmu_wav")))));
+        }
+    }
+
+    @Test public void experimentalAacProviderRejectionNeverRetriesOrChangesTheChosenFormat() throws Exception {
+        try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            server.start();
+            server.enqueue(json("{\"base_resp\":{\"status_code\":2013,\"status_msg\":\"private-key private-text\"}}"));
+            server.enqueue(success(MP3_HEX)); // Any silent fallback would consume this response and violate the contract.
+            SpeechSettings selected = settings(server, Map.of(MiniMaxSpeechOptions.AUDIO_FORMAT, "aac"));
+            IOException failure = assertThrows(IOException.class, () -> MiniMaxSpeechClient.synthesize(request, "private-text", selected));
+            assertSafe(failure); assertTrue(failure.getMessage().contains("2013"));
+            assertEquals(1, server.getRequestCount());
+            JSONObject body = new JSONObject(server.takeRequest(2, TimeUnit.SECONDS).getBody().readUtf8());
+            assertEquals("aac", body.getJSONObject("audio_setting").getString("format"));
+            assertEquals("aac", selected.minimaxOptions.audioFormat);
         }
     }
 
@@ -174,7 +302,12 @@ public final class MiniMaxSpeechClientTest {
                     Map.of(SpeechSettings.MINIMAX_MODEL, "speech-02-turbo", MiniMaxSpeechOptions.LANGUAGE_BOOST, "Persian"),
                     Map.of(SpeechSettings.MINIMAX_MODEL, "speech-01-turbo", MiniMaxSpeechOptions.LANGUAGE_BOOST, "Filipino"),
                     Map.of(MiniMaxSpeechOptions.LATEX_READ, "true", MiniMaxSpeechOptions.LANGUAGE_BOOST, "English"),
-                    Map.of(MiniMaxSpeechOptions.AUDIO_FORMAT, "pcm"), Map.of(MiniMaxSpeechOptions.SAMPLE_RATE, "48000"),
+                    Map.of(MiniMaxSpeechOptions.AUDIO_FORMAT, "pcm"), Map.of(MiniMaxSpeechOptions.AUDIO_FORMAT, "pcmu_raw"),
+                    Map.of(MiniMaxSpeechOptions.AUDIO_FORMAT, "m4a"), Map.of(MiniMaxSpeechOptions.OUTPUT_FORMAT, "binary"),
+                    Map.of(MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "voice/0"), Map.of(MiniMaxSpeechOptions.TIMBRE_WEIGHTS, "voice/101"),
+                    Map.of(MiniMaxSpeechOptions.AUDIO_FORMAT, "opus", MiniMaxSpeechOptions.MODIFY_PITCH, "1"),
+                    Map.of(MiniMaxSpeechOptions.AUDIO_FORMAT, "aac", MiniMaxSpeechOptions.MODIFY_PITCH, "1"),
+                    Map.of(MiniMaxSpeechOptions.SAMPLE_RATE, "48000"),
                     Map.of(MiniMaxSpeechOptions.BITRATE, "96000"), Map.of(MiniMaxSpeechOptions.CHANNEL, "3"),
                     Map.of(MiniMaxSpeechOptions.MODIFY_PITCH, "101"), Map.of(MiniMaxSpeechOptions.MODIFY_INTENSITY, "-101"),
                     Map.of(MiniMaxSpeechOptions.MODIFY_TIMBRE, "1.5"), Map.of(MiniMaxSpeechOptions.AIGC_WATERMARK, "yes"),
@@ -420,6 +553,41 @@ public final class MiniMaxSpeechClientTest {
 
     private static String modelDocument(String models) {
         return "{\"components\":{\"schemas\":{\"T2aV2Req\":{\"properties\":{\"model\":{\"enum\":" + models + "}}}}}}";
+    }
+
+    private static String hex(byte[] bytes) {
+        StringBuilder result = new StringBuilder(bytes.length * 2);
+        for (byte value : bytes) result.append(Character.forDigit((value >>> 4) & 15, 16)).append(Character.forDigit(value & 15, 16));
+        return result.toString();
+    }
+
+    /** A local Ogg/Opus fixture: real OpusHead/Tags pages and one standard 20 ms silence packet. */
+    private static byte[] opusFixture() {
+        byte[] head = ByteBuffer.allocate(19).order(ByteOrder.LITTLE_ENDIAN)
+                .put("OpusHead".getBytes(StandardCharsets.US_ASCII)).put((byte) 1).put((byte) 1)
+                .putShort((short) 0).putInt(48000).putShort((short) 0).put((byte) 0).array();
+        byte[] tags = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
+                .put("OpusTags".getBytes(StandardCharsets.US_ASCII)).putInt(0).putInt(0).array();
+        ByteArrayOutputStream stream = new ByteArrayOutputStream();
+        for (byte[] page : new byte[][]{oggPage(head, 0, 0, 2), oggPage(tags, 1, 0, 0),
+                oggPage(new byte[]{(byte) 0xf8, (byte) 0xff, (byte) 0xfe}, 2, 960, 4)}) {
+            stream.write(page, 0, page.length);
+        }
+        return stream.toByteArray();
+    }
+
+    private static byte[] oggPage(byte[] packet, int sequence, long granule, int flags) {
+        ByteBuffer data = ByteBuffer.allocate(28 + packet.length).order(ByteOrder.LITTLE_ENDIAN);
+        data.put("OggS".getBytes(StandardCharsets.US_ASCII)).put((byte) 0).put((byte) flags).putLong(granule);
+        data.putInt(1).putInt(sequence).putInt(0).put((byte) 1).put((byte) packet.length).put(packet);
+        byte[] bytes = data.array();
+        int crc = 0;
+        for (byte value : bytes) {
+            crc ^= (value & 255) << 24;
+            for (int bit = 0; bit < 8; bit++) crc = (crc << 1) ^ ((crc & 0x80000000) == 0 ? 0 : 0x04c11db7);
+        }
+        data.putInt(22, crc);
+        return bytes;
     }
 
     private static SpeechSettings settings(MockWebServer server) {

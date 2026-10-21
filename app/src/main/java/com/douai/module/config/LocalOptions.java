@@ -16,6 +16,8 @@ public final class LocalOptions {
     public static final String REPLY_RECOGNIZE_IMAGES = "reply_recognize_images";
     public static final String REPLY_RECOGNIZE_VIDEO = "reply_recognize_video";
     public static final String COMMENT_VOICE = "comment_voice";
+    public static final String DEBUG_LOGGING = "debug_logging";
+    public static final String HASH_LONG_PRESS_VOICE = "hash_long_press_voice";
     /** Receives comment replies as a channel of native_auto_reply, like private/group chat reception. */
     public static final String COMMENT_REPLY_ENABLED = "native_comment_reply";
 

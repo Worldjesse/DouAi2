@@ -67,7 +67,7 @@ public final class AutoMessageHostContractTest {
                 RIPS_UI, NESTED_UI, MODE, PLAIN, STATE, BOTTOM, BOTTOM_COMPONENT));
         try (ZipFile archive = new ZipFile(apk)) {
             for (String name : legacy ? Arrays.asList("classes26.dex", "classes37.dex", "classes34.dex")
-                    : Arrays.asList("classes13.dex", "classes18.dex", "classes26.dex", "classes32.dex")) {
+                    : Arrays.asList("classes11.dex", "classes22.dex", "classes36.dex", "classes40.dex", "classes41.dex")) {
                 ZipEntry entry = archive.getEntry(name);
                 assertNotNull("Missing original DEX " + name, entry);
                 try (BufferedInputStream input = new BufferedInputStream(archive.getInputStream(entry))) {

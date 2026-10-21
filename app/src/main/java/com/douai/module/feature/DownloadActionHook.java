@@ -15,6 +15,7 @@ import io.github.libxposed.api.XposedInterface;
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.ThirdPartyDownloadSettings;
+import com.douai.module.scan.HostAdaptation;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -704,7 +705,12 @@ public final class DownloadActionHook implements AutoCloseable {
                 || moduleName.getParameterCount() != 0 || moduleName.getReturnType() != String.class) {
             throw new IllegalArgumentException("Unexpected native download moduleName signature");
         }
-        if (!"LJJIFFI".equals(viewFactory.getName()) || viewFactory.getParameterCount() != 2
+        HostAdaptation.Profile profile = HostAdaptation.currentProfile();
+        if (profile != HostAdaptation.PROFILE_406 && profile != HostAdaptation.PROFILE_408) {
+            throw new IllegalArgumentException("Verified native download host profile is required");
+        }
+        String factoryName = profile == HostAdaptation.PROFILE_406 ? "LJJIFFI" : "LJJI";
+        if (!factoryName.equals(viewFactory.getName()) || viewFactory.getParameterCount() != 2
                 || viewFactory.getParameterTypes()[0] != Context.class
                 || viewFactory.getParameterTypes()[1] != ViewGroup.class
                 || !View.class.isAssignableFrom(viewFactory.getReturnType())) {

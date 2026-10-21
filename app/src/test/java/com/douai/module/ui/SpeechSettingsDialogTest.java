@@ -87,12 +87,13 @@ public final class SpeechSettingsDialogTest {
         store.putString("tts_pitch", "0.8");
         store.putString(SpeechSettings.GET_TEMPLATE, "https://example.com/speak?text={text}");
         open(false);
-        assertNotNull(root.findViewWithTag("settings.option.语音引擎"));
+        assertNotNull(root.findViewWithTag("settings.option.接口设置"));
+        assertNull(root.findViewWithTag("settings.option.语音引擎"));
         assertNull(root.findViewWithTag("settings.option.合成 GET"));
         chooseProvider(1);
         assertNull(root.findViewWithTag("settings.option.语音引擎"));
         assertNotNull(root.findViewWithTag("settings.option.合成 GET"));
-        assertNotNull(root.findViewWithTag("settings.option.音色列表 GET"));
+        assertNull(root.findViewWithTag("settings.option.音色列表 GET"));
         assertNotNull(root.findViewWithTag("settings.option.音色高级设置"));
         assertCompactThirdPartyPage();
         chooseProvider(0);
@@ -102,6 +103,111 @@ public final class SpeechSettingsDialogTest {
         assertEquals("1.4", value("语速"));
         assertEquals("0.8", value("音调"));
         assertEquals("https://example.com/speak?text={text}", store.getString(SpeechSettings.GET_TEMPLATE, ""));
+    }
+
+    @Test public void miniMaxMixEditorValidatesWeightsAndRetainsTheSavedSingleVoice() {
+        store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+        store.putString(SpeechSettings.MINIMAX_VOICE_ID, "saved-single");
+        open(false);
+        View form = miniMaxSection("混音与声音效果");
+        AlertDialog editor = option(form, "混合音色（每行 voice_id/weight）");
+        EditText text = input(editor, "混合音色（每行 voice_id/weight）");
+        text.setText("one/10\none/20"); save(editor);
+        assertTrue(editor.isShowing());
+        assertNotNull(text.getError());
+        text.setText(" one/20 \n two/30 "); save(editor);
+        assertFalse(editor.isShowing());
+        assertEquals("one/20\ntwo/30", store.getString(MiniMaxSpeechOptions.TIMBRE_WEIGHTS, ""));
+        assertEquals("saved-single", store.getString(SpeechSettings.MINIMAX_VOICE_ID, ""));
+        TextView hint = form.findViewWithTag("speech.minimax.mix.hint");
+        assertTrue(hint.getText().toString().contains("普通音色 ID 将被忽略"));
+        form = miniMaxSection("音频输出");
+        assertEquals("音频 URL · url", value(form, "返回方式（传输）"));
+        pick(form, "返回方式（传输）", 1);
+        assertEquals("hex", store.getString(MiniMaxSpeechOptions.OUTPUT_FORMAT, ""));
+        assertEquals("mp3", new MiniMaxSpeechOptions(new com.douai.module.config.LocalOptions(store.values)).audioFormat);
+    }
+
+    @Test public void miniMaxGroupsKeepTheMainPageCompactAndRefreshOpenSummariesAndCleanup() {
+        store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+        open(false);
+        for (String title : new String[]{"API Key", "API 地址", "语速", "音量", "音调", "生成音频格式（API）", "情绪"}) {
+            assertNull(title + " belongs in its group", root.findViewWithTag("settings.option." + title));
+        }
+        AlertDialog advanced = option("MiniMax 高级设置");
+        View summary = advanced.getWindow().getDecorView();
+        for (String title : new String[]{"音频输出", "语言与发音", "混音与声音效果"}) {
+            assertNotNull(summary.findViewWithTag("settings.option." + title));
+        }
+        assertNull(summary.findViewWithTag("settings.option.情绪"));
+        View audio = miniMaxSection("音频输出");
+        AlertDialog formats = option(audio, "生成音频格式（API）");
+        assertTrue(formats.getListView().getAdapter().getItem(5).toString().contains("实验"));
+        formats.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+        assertEquals("mp3", store.getString(MiniMaxSpeechOptions.AUDIO_FORMAT, "mp3"));
+        pick(audio, "生成音频格式（API）", 5);
+        assertEquals("aac", store.getString(MiniMaxSpeechOptions.AUDIO_FORMAT, ""));
+        assertNotNull(audio.findViewWithTag("speech.minimax.aac.hint"));
+        assertNull(audio.findViewWithTag("settings.option.MP3 码率"));
+        assertTrue(value(summary, "音频输出").contains("AAC（实验）"));
+        View effects = miniMaxSection("混音与声音效果");
+        assertNull(effects.findViewWithTag("settings.option.音高调整（-100 至 100）"));
+        chooseProvider(0);
+        assertNotNull(effects.findViewWithTag("speech.minimax.inactive"));
+        chooseProvider(2);
+        assertNotNull(effects.findViewWithTag("settings.option.混合音色（每行 voice_id/weight）"));
+        assertEquals("aac", store.getString(MiniMaxSpeechOptions.AUDIO_FORMAT, ""));
+        page.close();
+        assertFalse(advanced.isShowing());
+        for (Dialog child : children) assertFalse("Grouped dialogs must close with settings", child.isShowing());
+    }
+
+    @Test public void muLawShowsItsFixedRateAndRestoresTheSavedRateWhenChangingBack() {
+        store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+        store.putString(MiniMaxSpeechOptions.AUDIO_FORMAT, "pcmu_wav");
+        store.putString(MiniMaxSpeechOptions.SAMPLE_RATE, "44100");
+        store.putString(MiniMaxSpeechOptions.CHANNEL, "2");
+        open(false);
+        View form = miniMaxSection("音频输出");
+        View effects = miniMaxSection("混音与声音效果");
+        assertNull(form.findViewWithTag("settings.option.采样率"));
+        assertNull(effects.findViewWithTag("settings.option.音高调整（-100 至 100）"));
+        assertEquals("双声道", value(form, "声道"));
+        TextView hint = form.findViewWithTag("speech.minimax.mulaw.hint");
+        assertTrue(hint.getText().toString().contains("8000 Hz"));
+        assertEquals("44100", store.getString(MiniMaxSpeechOptions.SAMPLE_RATE, ""));
+        pick(form, "生成音频格式（API）", 1);
+        assertEquals("44100 Hz", value(form, "采样率"));
+        assertNotNull(effects.findViewWithTag("settings.option.音高调整（-100 至 100）"));
+        assertEquals("2", store.getString(MiniMaxSpeechOptions.CHANNEL, ""));
+    }
+
+    @Test public void changingToOpusCannotSilentlyDropVoiceEffectsAndResetRequiresExplicitConfirmation() {
+        store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
+        store.putString(MiniMaxSpeechOptions.MODIFY_PITCH, "20");
+        store.putString(SpeechSettings.MINIMAX_VOICE_ID, "saved-single");
+        open(false);
+        View form = miniMaxSection("音频输出");
+        View effects = miniMaxSection("混音与声音效果");
+        AlertDialog formats = option(form, "生成音频格式（API）");
+        assertEquals(6, formats.getListView().getAdapter().getCount());
+        assertTrue(formats.getListView().getAdapter().getItem(3).toString().contains("重置"));
+        formats.getListView().performItemClick(null, 3, 3); ShadowLooper.idleMainLooper();
+        assertTrue(formats.isShowing());
+        assertEquals("20", store.getString(MiniMaxSpeechOptions.MODIFY_PITCH, ""));
+        assertEquals("mp3", store.getString(MiniMaxSpeechOptions.AUDIO_FORMAT, "mp3"));
+        formats.dismiss();
+        AlertDialog reset = option(effects, "重置音色调整");
+        reset.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+        assertEquals("20", store.getString(MiniMaxSpeechOptions.MODIFY_PITCH, ""));
+        reset = option(effects, "重置音色调整");
+        reset.getButton(AlertDialog.BUTTON_POSITIVE).performClick(); ShadowLooper.idleMainLooper();
+        assertEquals("0", store.getString(MiniMaxSpeechOptions.MODIFY_PITCH, ""));
+        assertEquals("saved-single", store.getString(SpeechSettings.MINIMAX_VOICE_ID, ""));
+        pick(form, "生成音频格式（API）", 3);
+        assertEquals("opus", store.getString(MiniMaxSpeechOptions.AUDIO_FORMAT, ""));
+        assertNull(effects.findViewWithTag("settings.option.音高调整（-100 至 100）"));
+        assertNotNull(effects.findViewWithTag("speech.minimax.effects.hint"));
     }
 
     @Test public void miniMaxControlsPreserveSystemAndThirdPartySettingsAndHideTheApiKey() {
@@ -276,17 +382,18 @@ public final class SpeechSettingsDialogTest {
         store.putString(SpeechSettings.RATE, "1.8");
         store.putString(SpeechSettings.PITCH, "1.4");
         open(false);
-        AlertDialog advanced = option("MiniMax 高级设置");
-        View form = advanced.getWindow().getDecorView();
+        View form = miniMaxSection("语言与发音");
         pick(form, "情绪", 1);
         assertEquals("happy", store.getString(MiniMaxSpeechOptions.EMOTION, ""));
-        pick(form, "音频格式", 1);
+        form = miniMaxSection("音频输出");
+        pick(form, "生成音频格式（API）", 1);
         assertEquals("wav", store.getString(MiniMaxSpeechOptions.AUDIO_FORMAT, ""));
         assertNull(form.findViewWithTag("settings.option.MP3 码率"));
         pick(form, "采样率", 5);
         pick(form, "声道", 1);
         assertEquals("44100", store.getString(MiniMaxSpeechOptions.SAMPLE_RATE, ""));
         assertEquals("2", store.getString(MiniMaxSpeechOptions.CHANNEL, ""));
+        form = miniMaxSection("混音与声音效果");
         AlertDialog editor = option(form, "音高调整（-100 至 100）");
         input(editor, "音高调整（-100 至 100）").setText("101");
         save(editor);
@@ -294,6 +401,7 @@ public final class SpeechSettingsDialogTest {
         input(editor, "音高调整（-100 至 100）").setText("-30");
         save(editor);
         assertEquals("-30", store.getString(MiniMaxSpeechOptions.MODIFY_PITCH, ""));
+        form = miniMaxSection("语言与发音");
         editor = option(form, "发音字典（每行 原文/替换内容）");
         input(editor, "发音字典（每行 原文/替换内容）").setText("invalid");
         save(editor);
@@ -308,8 +416,7 @@ public final class SpeechSettingsDialogTest {
     @Test public void miniMaxAdvancedAndModelEditsRejectIncompatibleMergedSettingsBeforeSaving() {
         store.putString(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);
         open(false);
-        AlertDialog advanced = option("MiniMax 高级设置");
-        View form = advanced.getWindow().getDecorView();
+        View form = miniMaxSection("语言与发音");
         AlertDialog emotion = option(form, "情绪");
         assertTrue(emotion.getListView().getAdapter().getItem(9).toString().contains("不适用"));
         assertTrue(emotion.getListView().getAdapter().getItem(9).toString().contains("speech-2.6"));
@@ -328,7 +435,7 @@ public final class SpeechSettingsDialogTest {
         pick(form, "LaTeX 朗读", 1);
         assertEquals("true", store.getString(MiniMaxSpeechOptions.LATEX_READ, ""));
         pick(form, "文本归一化", 2);
-        advanced.dismiss();
+        for (Dialog child : children) child.dismiss();
         AlertDialog models = option("模型");
         boolean offeredConflict = false;
         for (int index = 0; index < models.getListView().getAdapter().getCount(); index++) {
@@ -738,7 +845,7 @@ public final class SpeechSettingsDialogTest {
             store.putString(SpeechSettings.VOICE_GET_TEMPLATE, server.url("/voices").toString());
             store.putString(SpeechSettings.VOICE_HEADERS, "{\"X-Catalog\":\"catalog-key\"}");
             open(true);
-            root.findViewWithTag("settings.option.刷新音色").performClick();
+            fieldParent("刷新音色").findViewWithTag("settings.option.刷新音色").performClick();
             RecordedRequest request = server.takeRequest(2, TimeUnit.SECONDS);
             assertNotNull(request);
             assertEquals("GET", request.getMethod());
@@ -761,12 +868,12 @@ public final class SpeechSettingsDialogTest {
             current.start();
             store.putString(SpeechSettings.VOICE_GET_TEMPLATE, old.url("/old").toString());
             open(true);
-            root.findViewWithTag("settings.option.刷新音色").performClick();
+            fieldParent("刷新音色").findViewWithTag("settings.option.刷新音色").performClick();
             assertNotNull(old.takeRequest(2, TimeUnit.SECONDS));
             AlertDialog editor = option("音色列表 GET");
             input(editor, "音色列表 GET").setText(current.url("/new").toString());
             save(editor);
-            root.findViewWithTag("settings.option.刷新音色").performClick();
+            fieldParent("刷新音色").findViewWithTag("settings.option.刷新音色").performClick();
             assertNotNull(current.takeRequest(2, TimeUnit.SECONDS));
             await(() -> "7. 当前音色".equals(store.getString("tts_voice_sample", "")));
             assertEquals("当前音色 · 7", ((AlertDialog) ShadowDialog.getLatestDialog()).getListView().getAdapter().getItem(0));
@@ -806,7 +913,36 @@ public final class SpeechSettingsDialogTest {
     }
 
     private AlertDialog option(String title) {
-        return option(root, title);
+        return option(fieldParent(title), title);
+    }
+
+    private View miniMaxSection(String title) {
+        for (Dialog child : children) {
+            if (child.isShowing() && child.getWindow().getDecorView().findViewWithTag("speech.section." + title) != null) {
+                return child.getWindow().getDecorView();
+            }
+        }
+        View advanced = fieldParent(title);
+        return option(advanced, title).getWindow().getDecorView();
+    }
+
+    private View fieldParent(String title) {
+        if (root.findViewWithTag("settings.option." + title) != null) return root;
+        for (int index = children.size() - 1; index >= 0; index--) {
+            Dialog child = children.get(index);
+            if (child.isShowing() && child.getWindow().getDecorView().findViewWithTag("settings.option." + title) != null) {
+                return child.getWindow().getDecorView();
+            }
+        }
+        String section;
+        if (java.util.Arrays.asList("API Key", "API 地址", "语音引擎", "语音语言", "合成请求头", "合成响应样本", "音频地址字段").contains(title)) section = "接口设置";
+        else if (java.util.Arrays.asList("语速", "音量", "音调").contains(title)) section = "朗读设置";
+        else if (java.util.Arrays.asList("音色列表 GET", "刷新音色").contains(title)) section = "音色高级设置";
+        else if (java.util.Arrays.asList("音频输出", "语言与发音", "混音与声音效果").contains(title)) section = "MiniMax 高级设置";
+        else throw new AssertionError("Missing speech settings row: " + title);
+        View opened = option(root, section).getWindow().getDecorView();
+        assertNotNull(title, opened.findViewWithTag("settings.option." + title));
+        return opened;
     }
 
     private AlertDialog option(View parent, String title) {
@@ -825,7 +961,7 @@ public final class SpeechSettingsDialogTest {
     }
 
     private String value(String title) {
-        return value(root, title);
+        return value(fieldParent(title), title);
     }
 
     private String value(View parent, String title) {
@@ -835,8 +971,9 @@ public final class SpeechSettingsDialogTest {
     }
 
     private void assertCompactThirdPartyPage() {
-        assertNotNull(root.findViewWithTag("settings.option.合成请求头"));
-        assertNotNull(root.findViewWithTag("settings.option.音频地址字段"));
+        assertNotNull(root.findViewWithTag("settings.option.接口设置"));
+        assertNull(root.findViewWithTag("settings.option.合成请求头"));
+        assertNull(root.findViewWithTag("settings.option.音频地址字段"));
         assertNull(root.findViewWithTag("settings.option.音色列表参数"));
         for (String title : new String[]{"音色列表请求头", "列表字段", "音色编号字段", "音色名称字段", "音色列表样本"}) {
             assertNull(title, root.findViewWithTag("settings.option." + title));
@@ -923,6 +1060,7 @@ public final class SpeechSettingsDialogTest {
             savePreview(page.dialog(), "speech-settings-voices");
             AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("settings.option.音色高级设置"), false));
             ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option.音色高级设置"), false));
+            scrollToOption(children.get(children.size() - 1), "音色列表请求头");
             AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("settings.option.音色列表请求头"), false));
             savePreview(children.get(children.size() - 1), "speech-voice-advanced");
             compose.runOnUiThread(() -> {
@@ -930,12 +1068,16 @@ public final class SpeechSettingsDialogTest {
                 store.putString("tts_synthesis_sample", "{\"data\":{\"audio\":\"https://example.com/sound.mp3\"}}");
                 return Unit.INSTANCE;
             });
-            scrollToOption("音频地址字段");
+            scrollToOption("接口设置");
+            ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option.接口设置"), false));
+            Dialog thirdInterface = children.get(children.size() - 1);
+            scrollToOption(thirdInterface, "音频地址字段");
             ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option.音频地址字段"), false));
             AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasText("data.audio", false, false), false));
             savePreview(children.get(children.size() - 1), "speech-audio-fields");
             compose.runOnUiThread(() -> {
                 children.get(children.size() - 1).dismiss();
+                thirdInterface.dismiss();
                 return Unit.INSTANCE;
             });
             scrollToOption("语音来源");
@@ -977,16 +1119,61 @@ public final class SpeechSettingsDialogTest {
                 return Unit.INSTANCE;
             });
             scrollToOption("MiniMax 高级设置");
+            verifySimpleSection("接口设置", new String[]{"API Key", "API 地址"}, "speech-minimax-interface");
+            verifySimpleSection("朗读设置", new String[]{"语速", "音量", "音调"}, "speech-minimax-reading");
+            scrollToOption("MiniMax 高级设置");
             ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option.MiniMax 高级设置"), false));
             compose.waitForIdle();
             Dialog minimaxAdvanced = children.get(children.size() - 1);
-            scrollToOption(minimaxAdvanced, "情绪");
-            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("settings.option.情绪"), false));
-            scrollToOption(minimaxAdvanced, "发音字典（每行 原文/替换内容）");
-            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("settings.option.发音字典（每行 原文/替换内容）"), false));
-            scrollToOption(minimaxAdvanced, "AIGC 水印");
-            AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("settings.option.AIGC 水印"), false));
             savePreview(minimaxAdvanced, "speech-minimax-advanced");
+            for (String section : new String[]{"音频输出", "语言与发音", "混音与声音效果"}) {
+                scrollToOption(minimaxAdvanced, section);
+                ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option." + section), false));
+                compose.waitForIdle();
+                Dialog grouped = children.get(children.size() - 1);
+                String[] controls = "音频输出".equals(section)
+                        ? new String[]{"生成音频格式（API）", "返回方式（传输）", "采样率", "MP3 码率", "声道", "AIGC 水印"}
+                        : "语言与发音".equals(section)
+                        ? new String[]{"情绪", "语言增强", "文本归一化", "发音字典（每行 原文/替换内容）", "LaTeX 朗读"}
+                        : new String[]{"混合音色（每行 voice_id/weight）", "音高调整（-100 至 100）", "音强调整（-100 至 100）", "音色调整（-100 至 100）", "声音效果", "重置音色调整"};
+                for (String control : controls) {
+                    scrollToOption(grouped, control);
+                    AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("settings.option." + control), false));
+                }
+                savePreview(grouped, "speech-minimax-" + section);
+                if ("音频输出".equals(section)) {
+                    scrollToOption(grouped, "生成音频格式（API）");
+                    ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option.生成音频格式（API）"), false));
+                    ActionsKt.performScrollToIndex(compose.onNode(FiltersKt.hasTestTag("miuix.dialog.choices"), false), 5);
+                    ActionsKt.performClick(compose.onNode(FiltersKt.hasText("AAC（实验，接口可能拒绝）", false, false), false));
+                    compose.waitForIdle();
+                    assertEquals("aac", store.getString(MiniMaxSpeechOptions.AUDIO_FORMAT, ""));
+                    compose.runOnIdle(() -> {
+                        View audio = grouped.getWindow().getDecorView();
+                        assertNotNull(audio.findViewWithTag("speech.minimax.aac.hint"));
+                        assertNull(audio.findViewWithTag("settings.option.MP3 码率"));
+                        return Unit.INSTANCE;
+                    });
+                    scrollToOption(grouped, "生成音频格式（API）");
+                    ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option.生成音频格式（API）"), false));
+                    ActionsKt.performScrollToIndex(compose.onNode(FiltersKt.hasTestTag("miuix.dialog.choices"), false), 0);
+                    ActionsKt.performClick(compose.onNode(FiltersKt.hasText("MP3", false, false), false));
+                    compose.waitForIdle();
+                }
+                compose.runOnUiThread(() -> { grouped.dismiss(); return Unit.INSTANCE; });
+            }
+        }
+
+        private void verifySimpleSection(String section, String[] controls, String screenshot) throws Exception {
+            scrollToOption(section);
+            ActionsKt.performClick(compose.onNode(FiltersKt.hasTestTag("settings.option." + section), false));
+            Dialog grouped = children.get(children.size() - 1);
+            for (String control : controls) {
+                scrollToOption(grouped, control);
+                AssertionsKt.assertIsDisplayed(compose.onNode(FiltersKt.hasTestTag("settings.option." + control), false));
+            }
+            savePreview(grouped, screenshot);
+            compose.runOnUiThread(() -> { grouped.dismiss(); return Unit.INSTANCE; });
         }
 
         private void scrollToOption(String title) {

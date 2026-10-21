@@ -10,5 +10,10 @@
     public androidx.activity.result.ActivityResultRegistry getActivityResultRegistry();
 }
 
+# Host-loader reflection and signature checks must use the host's Kotlin names.
+# R8 otherwise adapts these literals to module-only obfuscated dependency names.
+-keep class kotlin.Unit { *; }
+-keep interface kotlin.jvm.functions.** { *; }
+
 # Provided by the Xposed runtime rather than packaged in the APK.
 -dontwarn io.github.libxposed.api.**

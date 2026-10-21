@@ -104,6 +104,7 @@ public final class ModuleSettingsScreen {
             new SearchEntry("comment-reply", "评论回复", "自动回复 > 接收评论回复", "评论回复 楼中楼 回复评论 接收评论", SearchDestination.AUTO_REPLY),
             new SearchEntry("backup", "配置备份与恢复", "扩展功能 > 配置备份", "数据备份 导出配置 导入配置 恢复 迁移 密钥", SearchDestination.BACKUP),
             new SearchEntry("analytics", "本地数据分析与报告", "扩展功能 > 本地数据分析", "本地分析 统计 图表 浏览历史 AI分析 报告 导出 长图 PNG PDF 分享", SearchDestination.ANALYTICS),
+            new SearchEntry("debug-logs", "调试与日志", "关于 > 调试与日志", "调试 debug 日志 log LSPosed 详细 简要 JSON 刷新 清空 复制 导出", SearchDestination.DEBUG_LOGS),
             new SearchEntry("speed", "自动倍速与自动播放", "自动播放 > 倍速数值", "倍速 播放速度 自动滑动 智能滑动 暂停评论", SearchDestination.AUTOPLAY),
             new SearchEntry("interaction", "互动自动化", "自动播放 > 互动自动化", "自动点赞 自动关注 停止自动化", SearchDestination.INTERACTION),
             new SearchEntry("feed-filter", "视频筛选", "视频筛选 > 过滤总开关", "过滤 广告 直播 图集 关键词 时长 低赞 推荐商家", SearchDestination.FILTER),
@@ -111,7 +112,9 @@ public final class ModuleSettingsScreen {
             new SearchEntry("streak", "自动续火花", "自动续火花 > 选择用户", "续火花 好友 定时 结果未知 重试", SearchDestination.STREAK),
             new SearchEntry("message-recall", "消息防撤回", "消息管理 > 消息防撤回", "私信 防撤回 撤回背景 消息记录", SearchDestination.MESSAGE),
             new SearchEntry("gestures", "长按与双击手势", "界面相关 > 长按事件与双击事件", "手势 长按 双击 悬浮条 工具栏", SearchDestination.GESTURES),
-            new SearchEntry("comment-tools", "评论工具", "评论相关 > 长按操作", "复制评论 评论图片 彩色评论 后缀 替换语音", SearchDestination.COMMENT),
+            new SearchEntry("comment-tools", "评论工具", "评论相关 > 长按操作", "复制评论 评论图片 复制源数据 查看评论数据 评论解析 JSON 语音摘要 彩色评论 后缀 替换语音", SearchDestination.COMMENT),
+            new SearchEntry("comment-speech", "评论转语音", "评论相关 > 评论转语音", "语音 TTS # 单击发送 评论", SearchDestination.COMMENT, "settings.option.评论转语音"),
+            new SearchEntry("hash-long-press-voice", "#长按发送转语音（全局）", "评论相关 > #长按发送转语音（全局）", "语音 TTS #长按 长按发送 全局 私信 群聊 评论", SearchDestination.COMMENT, "settings.toggle.#长按发送转语音（全局）"),
             new SearchEntry("ai-chat", "AI 测试对话", "扩展功能 > AI 模型设置 > 测试对话", "AI 聊天 测试模型 对话 图片", SearchDestination.AI_CHAT)
     };
 
@@ -160,6 +163,8 @@ public final class ModuleSettingsScreen {
         } else {
             addFrameworkSyncStatus();
             addIndependentSettingsNotice();
+            addOption("关于", "DouAi " + com.douai.module.BuildConfig.VERSION_NAME, null, true,
+                    () -> openCategory(Category.ABOUT));
             ModuleTheme.bind(scroll);
             return scroll;
         }
@@ -267,6 +272,7 @@ public final class ModuleSettingsScreen {
             case SPEECH: showSpeechSettings(); break;
             case BACKUP: showConfigBackup(); break;
             case ANALYTICS: showLocalAnalytics(); break;
+            case DEBUG_LOGS: showDebugLogs(); break;
             case INTERACTION: showAutomationSettings(); break;
             case AI_CHAT: showAiChat(); break;
             default:
@@ -388,7 +394,7 @@ public final class ModuleSettingsScreen {
         if (closed || category == null) return;
         settings = repository.load();
         if (category == Category.ABOUT) {
-            showOptionDialog(AboutDialog.create(context, miuixHome != null, this::showOptionDialog));
+            showOptionDialog(AboutDialog.create(context, miuixHome != null, this::showOptionDialog, repository));
             return;
         }
         if (category == Category.COMPONENT_HIDE) {
@@ -561,8 +567,8 @@ public final class ModuleSettingsScreen {
                             repository.putBoolean("comment_voice_replace", value);
                             if (value) showAudioPathEditor("评论语音文件", "comment_voice_path");
                         });
-                addLocalSwitch("评论自动文本转语音",
-                        "", "comment_tts");
+                addOption("评论转语音", "", null, true, this::showCommentSpeechSettings);
+                addLocalSwitch("#长按发送转语音（全局）", "适用于私信、群聊和评论。输入以 # 开头时长按发送，只发送语音，不发送文字。", "hash_long_press_voice");
                 addCommentLongPressOption();
                 addLocalSwitch("彩色评论", "", "colored_comment");
                 addChoiceOption("彩色评论类型", "colored_comment_type", new String[]{"类型 0", "类型 33"},
@@ -635,6 +641,22 @@ public final class ModuleSettingsScreen {
         ConfigTransferDialog page = new ConfigTransferDialog(context, repository, miuixHome != null,
                 () -> settings = repository.load());
         showOptionDialog(page.dialog(), page::close);
+    }
+
+    private void showDebugLogs() {
+        DebugLogDialog page = new DebugLogDialog(context, repository, miuixHome != null);
+        showOptionDialog(page.dialog(), page::close);
+    }
+
+    private void showCommentSpeechSettings() {
+        LinearLayout previous = content;
+        LinearLayout panel = form();
+        content = panel;
+        try {
+            addLocalSwitch("评论自动文本转语音", "评论以 # 开头时，单击发送转为语音。", "comment_tts");
+        } finally { content = previous; }
+        showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle("评论转语音")
+                .setView(scrolling(panel)).setPositiveButton("完成", null).create());
     }
 
     private void buildDownloadControls() {
@@ -1601,7 +1623,7 @@ public final class ModuleSettingsScreen {
     }
 
     private void addIndependentSettingsNotice() {
-        TextView notice = text("抖音内功能设置独立保存在抖音应用，本页只显示模块应用状态。",
+        TextView notice = text("抖音内功能设置独立保存在抖音应用；此处可查看模块状态及调试日志。",
                 14, TEXT, false);
         notice.setPadding(dp(14), dp(14), dp(14), dp(14));
         notice.setBackground(makeRounded(Color.WHITE, LINE, dp(7)));
@@ -1945,7 +1967,7 @@ public final class ModuleSettingsScreen {
         AUTOPLAY("自动播放", 6),
         AUTO_REPLY("自动回复", 13),
         AUTO_COMMENT("自动评论", 8),
-        COMMENT("评论相关", 7),
+        COMMENT("评论相关", 8),
         STREAK("自动续火花", 7),
         COMPONENT_HIDE("组件隐藏", 24),
         MESSAGE("消息管理", 6),
@@ -1962,12 +1984,13 @@ public final class ModuleSettingsScreen {
         }
 
         String searchText() {
+            if (this == ABOUT) return title + " 调试 日志 LSPosed";
             return this == EXTENSION ? title + " AI 模型设置 文本转语音设置 本地数据分析 数据备份 配置备份" : title;
         }
     }
 
     private enum SearchDestination {
-        AI(null), SPEECH(null), BACKUP(null), ANALYTICS(null), INTERACTION(null), AI_CHAT(null),
+        AI(null), SPEECH(null), BACKUP(null), ANALYTICS(null), DEBUG_LOGS(null), INTERACTION(null), AI_CHAT(null),
         DOWNLOAD(Category.DOWNLOAD), AUTO_COMMENT(Category.AUTO_COMMENT), AUTO_REPLY(Category.AUTO_REPLY),
         AUTOPLAY(Category.AUTOPLAY), FILTER(Category.FILTER), COMPONENT_HIDE(Category.COMPONENT_HIDE),
         STREAK(Category.STREAK), MESSAGE(Category.MESSAGE), GESTURES(Category.INTERFACE), COMMENT(Category.COMMENT);

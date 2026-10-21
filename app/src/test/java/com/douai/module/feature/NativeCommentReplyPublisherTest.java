@@ -302,7 +302,11 @@ public final class NativeCommentReplyPublisherTest {
         assertNotNull(model.A);
         assertSame(audio.file, model.A.audio.localFile);
         assertEquals(audio.duration, model.A.audio.duration.longValue());
-        assertEquals(Collections.emptyList(), model.A.audio.waveList);
+        assertFalse("KMP omits the whole audio slot when audio_wave is empty", model.A.audio.waveList.isEmpty());
+        for (Object value : model.A.audio.waveList) {
+            assertTrue("Wire waveform amplitudes must be normalized", value instanceof Float
+                    && Float.isFinite((Float) value) && (Float) value >= 0 && (Float) value <= 1);
+        }
         assertEquals("", model.A.text.toString());
         assertEquals(Collections.emptyList(), model.d);
         assertEquals("douai_comment_reply", model.n);
@@ -445,6 +449,7 @@ public final class NativeCommentReplyPublisherTest {
     }
 
     @Test public void audioFailureHintAndPermissionDiagnosticsIgnoreForeignCallbacksAndOrdinaryTextFailures() throws Throwable {
+        diagnostics.clear(); // Probe-registration messages precede this request-ownership check.
         Exception failure = new com.ss.android.ugc.aweme.base.api.exceptions.server.ApiServerException(5, "时长 private-hint", "");
         framework.invoke(Request.class.getMethod("failed", Exception.class), new Request(), failure);
         ShadowLooper.idleMainLooper();

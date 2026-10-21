@@ -64,6 +64,19 @@ public final class HelpDialogTest {
         assertTrue(details.getText().toString().contains("免责协议"));
         assertTrue(details.getText().toString().contains(AboutDialog.DISCLAIMER_TEXT));
         assertNotNull(page.getWindow().getDecorView().findViewWithTag("about.help"));
+        assertNotNull(page.getWindow().getDecorView().findViewWithTag("about.debug"));
+    }
+
+    @Test public void aboutOpensDebugLogsAndClosingSettingsClosesTheChild() {
+        home.findViewWithTag("settings.category.ABOUT").performClick();
+        AlertDialog about = latest();
+        about.getWindow().getDecorView().findViewWithTag("about.debug").performClick();
+        AlertDialog logs = latest();
+        assertTrue(about.isShowing());
+        assertNotNull(logs.getWindow().getDecorView().findViewWithTag("debug.logs.enabled"));
+        screen.dismissChildPages();
+        assertFalse(logs.isShowing());
+        assertFalse(about.isShowing());
     }
 
     @Test public void helpSearchFindsBodyContentAndReturningFromTopicPreservesQuery() {

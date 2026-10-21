@@ -409,6 +409,112 @@ public final class AutomationDispatcherTest {
     @Test @Config(qualifiers = "w640dp-h360dp-land-mdpi") @GraphicsMode(GraphicsMode.Mode.NATIVE)
     public void landscapeNoticeRemainsBoundedAndScrollable() { layoutPreview(); }
 
+    @Test public void replyPreparationIsVisibleAndReusesItsRingForTheOriginalPreview() {
+        dispatcher.setOptions(options(true, false));
+        AtomicInteger cancelled = new AtomicInteger();
+        AutomationHistoryStore.Entry entry = replyPreparation("early");
+        dispatcher.trackReply(entry, "media", () -> true, cancelled::incrementAndGet);
+        CommentRingView preparing = replyRing();
+        assertNotNull(preparing);
+        assertEquals("media", preparing.getPhase());
+        advance(10);
+        worker.runAll();
+        assertEquals(0, sends.get());
+        dispatcher.trackReply(entry, "speech", () -> true, cancelled::incrementAndGet);
+        assertSame(preparing, replyRing());
+        assertEquals("speech", replyRing().getPhase());
+        assertTrue(replyRing().getContentDescription().toString().contains("语音合成"));
+        dispatcher.prepare(entry, () -> true, result -> {
+            sends.incrementAndGet(); result.accept("sent");
+        }, ignored -> { });
+        assertSame(preparing, replyRing());
+        assertEquals("preview", replyRing().getPhase());
+        assertEquals(1, replyRing().getQueueCount());
+        advance(2); worker.runAll(); assertEquals(0, sends.get());
+        advance(1); worker.runAll(); assertEquals(1, sends.get());
+        assertNull(replyRing());
+        assertEquals(0, cancelled.get());
+    }
+
+    @Test public void cancellingPreparationCancelsGenerationAndRejectsALateReadyCallback() {
+        dispatcher.setOptions(options(true, false));
+        AtomicInteger cancelled = new AtomicInteger();
+        AutomationHistoryStore.Entry entry = replyPreparation("cancel-early");
+        dispatcher.trackReply(entry, "generating", () -> true, cancelled::incrementAndGet);
+        replyRing().performLongClick();
+        assertEquals(1, cancelled.get());
+        assertNull(replyRing());
+        dispatcher.trackReply(entry, "speech", () -> true, cancelled::incrementAndGet);
+        dispatcher.prepare(entry, () -> true, result -> sends.incrementAndGet(), ignored -> { });
+        advance(10); worker.runAll();
+        assertEquals(0, sends.get());
+        assertEquals(1, cancelled.get());
+        assertNull(replyRing());
+    }
+
+    @Test public void preparationCleanupDoesNotStickAndBackgroundPreviewStillSendsNormally() {
+        dispatcher.setOptions(options(true, false));
+        AutomationHistoryStore.Entry abandoned = replyPreparation("abandoned");
+        dispatcher.trackReply(abandoned, "speech", () -> true, () -> { });
+        assertNotNull(replyRing());
+        dispatcher.discardReplyPreparation(abandoned.id);
+        assertNull(replyRing());
+
+        AutomationHistoryStore.Entry background = replyPreparation("background");
+        dispatcher.trackReply(background, "generating", () -> true, () -> { });
+        dispatcher.onActivityPaused(activity);
+        assertNull(replyRing());
+        dispatcher.prepare(background, () -> true, result -> {
+            sends.incrementAndGet(); result.accept("sent");
+        }, ignored -> { });
+        advance(3); worker.runAll();
+        assertEquals(1, sends.get());
+        dispatcher.onActivityResumed(activity);
+        assertNull(replyRing());
+    }
+
+    @Test public void preparationDiagnosticsExplainVisibilityWithoutMessageOrTargetData() {
+        dispatcher.close(); worker.runAll();
+        worker = new ManualExecutor();
+        List<String> events = new ArrayList<>();
+        dispatcher = new AutomationDispatcher(activity, events::add, worker);
+        dispatcher.setOptions(options(true, false));
+        dispatcher.onActivityResumed(activity);
+        dispatcher.trackReply(replyPreparation("private-task-id"), "media", () -> true, () -> { });
+        dispatcher.onActivityPaused(activity);
+        String joined = String.join("\n", events);
+        assertTrue(joined.contains("state=no_activity"));
+        assertTrue(joined.contains("event=attach"));
+        assertTrue(joined.contains("phase=media"));
+        assertTrue(joined.contains("lifecycle=paused"));
+        assertTrue(joined.contains("event=detach"));
+        assertFalse(joined.contains("private-task-id"));
+        assertFalse(joined.contains("private-target"));
+        assertFalse(joined.contains("private-input"));
+    }
+
+    @Test public void preparationDoesNotReserveAReadyPreviewSlotOrBypassItsCapacity() {
+        dispatcher.setOptions(options(true, false));
+        AutomationHistoryStore.Entry early = replyPreparation("capacity-early");
+        dispatcher.trackReply(early, "generating", () -> true, () -> { });
+        for (int index = 0; index < 16; index++) {
+            dispatcher.prepare(replyPreparation("ready-" + index), () -> true, result -> {
+                sends.incrementAndGet(); result.accept("sent");
+            }, ignored -> { });
+        }
+        java.util.concurrent.atomic.AtomicReference<String> earlyOutcome = new java.util.concurrent.atomic.AtomicReference<>();
+        dispatcher.prepare(early, () -> true, result -> sends.addAndGet(100), earlyOutcome::set);
+        assertEquals("cancelled", earlyOutcome.get());
+        advance(3); worker.runAll();
+        assertEquals(16, sends.get());
+        assertNull(replyRing());
+    }
+
+    private static AutomationHistoryStore.Entry replyPreparation(String id) {
+        return new AutomationHistoryStore.Entry(id, "reply", "private-target", "private-name",
+                "private-input", "", "model", "pending", 1, 1);
+    }
+
     @Test public void privateGroupAndCommentRepliesShareOneBlueRingWithoutDuplicatedBanners() {
         Map<String, Object> values = base(true, true);
         values.put(LocalOptions.COMMENT_REPLY_ENABLED, true);
@@ -425,8 +531,10 @@ public final class AutomationDispatcherTest {
         assertEquals(3, reply.getQueueCount());
         assertEquals(1, comment.getQueueCount());
         assertEquals(3, reply.getRetriesLeft()); // Reply variant displays countdown seconds in its small counter.
-        assertEquals(android.graphics.Color.rgb(100, 178, 255), reply.getPrimaryColor());
-        assertEquals(android.graphics.Color.rgb(112, 229, 211), comment.getPrimaryColor());
+        assertEquals(CommentRingView.REPLY_COLOR, reply.getPrimaryColor());
+        assertEquals(CommentRingView.COMMENT_COLOR, comment.getPrimaryColor());
+        assertEquals("回复", reply.getLabel());
+        assertEquals("评论", comment.getLabel());
         assertFalse(overlap(reply, comment));
         assertTrue(reply.getContentDescription().toString().contains("自动回复"));
         assertFalse(reply.getContentDescription().toString().contains("生成内容"));
