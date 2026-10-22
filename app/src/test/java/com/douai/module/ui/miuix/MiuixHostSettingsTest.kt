@@ -24,8 +24,6 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
-import androidx.compose.ui.test.performTouchInput
-import androidx.compose.ui.test.longClick
 import com.douai.module.config.HostSettingsStore
 import com.douai.module.config.AiModelConfig
 import com.douai.module.config.AiModelSettings
@@ -170,7 +168,7 @@ class MiuixHostSettingsTest {
             android.view.WindowManager.LayoutParams.MATCH_PARENT)
         compose.onNodeWithTag("miuix.category.page").assertIsDisplayed()
         compose.onNodeWithTag("miuix.category.back").assertIsDisplayed()
-        compose.onNodeWithTag("settings.toggle.是否启用抖音下载自定义命名").performClick()
+        compose.onNodeWithTag("settings.toggle.自定义文件名").performClick()
         compose.runOnIdle {
             assertTrue(store.getBoolean("download_custom_name", false))
             assertTrue(store.load().downloadEnabled)
@@ -734,10 +732,19 @@ class MiuixHostSettingsTest {
     }
 
     @Test
-    fun longPressPreservesPartialCommentSelectionAndDoesNotToggleOnRelease() {
+    fun commentLongPressOptionPreservesPartialSelectionAndAllowsIndividualDeselection() {
         compose.onNodeWithTag("settings.search").performTextReplacement("评论相关")
         compose.onNodeWithTag("settings.category.7").performClick()
-        compose.onNodeWithTag("settings.toggle.长按操作").performTouchInput { longClick() }
+        compose.onNodeWithTag("settings.toggle.长按操作").assertDoesNotExist()
+        compose.waitForIdle()
+        compose.runOnUiThread {
+            val decor = ShadowDialog.getLatestDialog().window!!.decorView
+            val row = decor.findViewWithTag<View>("settings.option.长按操作")
+            assertNotNull(row)
+            findNativeScroll(decor)!!.scrollTo(0, row.top)
+        }
+        compose.waitForIdle()
+        compose.onNodeWithTag("settings.option.长按操作").assertIsDisplayed().performClick()
         compose.runOnUiThread {
             val options = ShadowDialog.getLatestDialog() as android.app.AlertDialog
             assertFalse(store.getBoolean("copy_comment_text", false))
@@ -750,8 +757,52 @@ class MiuixHostSettingsTest {
             assertFalse(store.getBoolean("comment_media_tools", false))
             assertFalse(store.getBoolean("copy_source_data", false))
         }
-        compose.onNodeWithTag("settings.toggle.长按操作").performClick()
-        assertFalse(store.getBoolean("copy_comment_text", true))
+        compose.onNodeWithTag("settings.option.长按操作").performClick()
+        compose.runOnUiThread {
+            val options = ShadowDialog.getLatestDialog() as android.app.AlertDialog
+            assertTrue(options.listView.isItemChecked(0))
+            assertFalse(options.listView.isItemChecked(1))
+            assertFalse(options.listView.isItemChecked(2))
+        }
+        compose.onNodeWithTag("miuix.dialog.choice.0").performClick()
+        compose.onNodeWithTag("miuix.dialog.button.${Dialog.BUTTON_POSITIVE}").performClick()
+        compose.runOnIdle {
+            assertFalse(store.getBoolean("copy_comment_text", true))
+            assertFalse(store.getBoolean("comment_media_tools", false))
+            assertFalse(store.getBoolean("copy_source_data", false))
+        }
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun enabledCommentVoiceReplacementKeepsItsPathEditorReachable() {
+        compose.runOnUiThread {
+            store.putBoolean("comment_voice_replace", true)
+            store.putString("comment_voice_path", "/storage/emulated/0/Music/original.mp3")
+        }
+        compose.onNodeWithTag("settings.search").performTextReplacement("评论相关")
+        compose.onNodeWithTag("settings.category.7").performClick()
+        compose.runOnIdle { assertTrue(store.getBoolean("comment_voice_replace", false)) }
+        compose.onNodeWithTag("settings.toggle.替换语音文件").assertIsDisplayed()
+        compose.onNodeWithTag("settings.option.评论语音文件").assertIsEnabled().performClick()
+        compose.onNodeWithTag("settings.input.文件路径").assertIsDisplayed()
+            .performTextReplacement("/storage/emulated/0/Music/replacement.mp3")
+        saveDialogPreview("menu-comment-voice-path")
+        compose.onNodeWithTag("miuix.dialog.button.${Dialog.BUTTON_POSITIVE}").performClick()
+        compose.runOnIdle {
+            assertEquals("/storage/emulated/0/Music/replacement.mp3",
+                store.getString("comment_voice_path", ""))
+            assertTrue(store.getBoolean("comment_voice_replace", false))
+        }
+        compose.onNodeWithTag("settings.toggle.替换语音文件").assertIsDisplayed()
+        compose.onNodeWithTag("settings.option.评论语音文件").performClick()
+        compose.onNodeWithTag("settings.input.文件路径").assertIsDisplayed()
+            .performTextReplacement("/storage/emulated/0/Music/second.mp3")
+        compose.onNodeWithTag("miuix.dialog.button.${Dialog.BUTTON_POSITIVE}").performClick()
+        compose.runOnIdle {
+            assertEquals("/storage/emulated/0/Music/second.mp3", store.getString("comment_voice_path", ""))
+            assertTrue(store.getBoolean("comment_voice_replace", false))
+        }
     }
 
     private fun saveDialogPreview(name: String) {

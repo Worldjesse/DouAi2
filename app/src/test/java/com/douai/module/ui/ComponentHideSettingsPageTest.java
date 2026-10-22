@@ -151,10 +151,10 @@ public final class ComponentHideSettingsPageTest {
                 {"AUTOPLAY", "自动播放", "6项"},
                 {"AUTO_REPLY", "自动回复", "13项"},
                 {"AUTO_COMMENT", "自动评论", "8项"},
-                {"COMMENT", "评论相关", "8项"},
+                {"COMMENT", "评论相关", "11项"},
                 {"STREAK", "自动续火花", "7项"},
                 {"COMPONENT_HIDE", "组件隐藏", "24项"},
-                {"MESSAGE", "消息管理", "6项"},
+                {"MESSAGE", "消息管理", "8项"},
                 {"SPOOF", "本地伪装", "6项"},
                 {"EXTENSION", "扩展功能", "4项"},
                 {"ABOUT", "关于", ""}

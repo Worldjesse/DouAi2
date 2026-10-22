@@ -88,7 +88,7 @@ public final class ThirdPartyDownloadSettingsTest {
 
     @Test public void officialDefaultBehaviorStartsOffAndActualSwitchPersistsBothStates() {
         View page = openDownloads();
-        Switch direct = page.findViewWithTag("settings.toggle.默认行为");
+        Switch direct = page.findViewWithTag("settings.toggle.直接保存全部媒体");
         Switch master = page.findViewWithTag("settings.toggle.启用下载菜单");
         assertNotNull(direct);
         assertFalse(direct.isChecked());
@@ -109,15 +109,15 @@ public final class ThirdPartyDownloadSettingsTest {
         assertTrue("Turning off direct saving must keep the shared download menu enabled", master.isChecked());
         screen.dismissChildPages();
         page = openDownloads();
-        assertFalse(((Switch) page.findViewWithTag("settings.toggle.默认行为")).isChecked());
+        assertFalse(((Switch) page.findViewWithTag("settings.toggle.直接保存全部媒体")).isChecked());
     }
 
     @Test public void switchingMethodsKeepsTheirIndependentDefaultBehaviorControlsAndValues() {
         View page = openDownloads();
-        Switch direct = page.findViewWithTag("settings.toggle.默认行为");
+        Switch direct = page.findViewWithTag("settings.toggle.直接保存全部媒体");
         direct.performClick();
         selectMethod(page, 1);
-        Switch thirdPartyDirect = page.findViewWithTag("settings.toggle.默认行为");
+        Switch thirdPartyDirect = page.findViewWithTag("settings.toggle.直接保存全部媒体");
         assertNotNull(thirdPartyDirect);
         assertNotSame(direct, thirdPartyDirect);
         assertFalse(thirdPartyDirect.isChecked());
@@ -128,7 +128,7 @@ public final class ThirdPartyDownloadSettingsTest {
         assertTrue(store.getBoolean(ThirdPartyDownloadSettings.DIRECT, false));
 
         selectMethod(page, 0);
-        direct = page.findViewWithTag("settings.toggle.默认行为");
+        direct = page.findViewWithTag("settings.toggle.直接保存全部媒体");
         assertNotNull(direct);
         assertTrue(direct.isChecked());
         assertNull(page.findViewWithTag("settings.option.GET 请求"));
@@ -137,26 +137,26 @@ public final class ThirdPartyDownloadSettingsTest {
         assertFalse(store.getBoolean(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, true));
         assertTrue(store.getBoolean(ThirdPartyDownloadSettings.DIRECT, false));
         selectMethod(page, 1);
-        assertTrue(((Switch) page.findViewWithTag("settings.toggle.默认行为")).isChecked());
+        assertTrue(((Switch) page.findViewWithTag("settings.toggle.直接保存全部媒体")).isChecked());
         assertFalse(new LocalOptions(store.values).officialDownloadDirect());
     }
 
     @Test public void openingThirdPartySettingsDoesNotInheritOrResetASavedOfficialDefaultBehavior() {
         store.putBoolean(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, true);
         View page = openThirdPartyDownloads();
-        assertFalse(((Switch) page.findViewWithTag("settings.toggle.默认行为")).isChecked());
+        assertFalse(((Switch) page.findViewWithTag("settings.toggle.直接保存全部媒体")).isChecked());
         assertNull(page.findViewWithTag("settings.option.文件名模板"));
         assertTrue(store.getBoolean(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, false));
         assertFalse(new ThirdPartyDownloadSettings(new LocalOptions(store.values)).direct);
         selectMethod(page, 0);
-        assertTrue(((Switch) page.findViewWithTag("settings.toggle.默认行为")).isChecked());
+        assertTrue(((Switch) page.findViewWithTag("settings.toggle.直接保存全部媒体")).isChecked());
     }
 
     @Test public void thirdPartyDefaultBehaviorStartsOffAndItsSwitchSavesBothStatesWithoutChangingFields() {
         store.putString(ThirdPartyDownloadSettings.DOWNLOAD_FIELDS, "[\"data.audio\"]");
         store.putString(ThirdPartyDownloadSettings.NAMING_FIELDS, "[\"data.id\"]");
         View page = openThirdPartyDownloads();
-        Switch direct = page.findViewWithTag("settings.toggle.默认行为");
+        Switch direct = page.findViewWithTag("settings.toggle.直接保存全部媒体");
         Switch master = page.findViewWithTag("settings.toggle.启用下载菜单");
         assertNotNull(direct);
         assertFalse(direct.isChecked());
@@ -178,7 +178,7 @@ public final class ThirdPartyDownloadSettingsTest {
         assertEquals("[\"data.id\"]", store.getString(ThirdPartyDownloadSettings.NAMING_FIELDS, ""));
         screen.dismissChildPages();
         page = openDownloads();
-        assertFalse(((Switch) page.findViewWithTag("settings.toggle.默认行为")).isChecked());
+        assertFalse(((Switch) page.findViewWithTag("settings.toggle.直接保存全部媒体")).isChecked());
     }
 
     @Test public void savingDirectoryIsSharedBetweenMethodsAndCanBeResetToDefault() {

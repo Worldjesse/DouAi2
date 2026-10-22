@@ -84,22 +84,22 @@ public final class ModuleSettingsReferenceTest {
                         "不允许系统跳过已隐藏视频", "不允许中途插入视频", "拦截长按倍数启用场景",
                         "拦截系统长按手势", "长按事件", "双击事件", "沉浸式全屏", "隐藏顶部Tab开关",
                         "设置顶部Tab", "首页刷新确认"},
-                {"FILTER", "过滤总开关", "中断开关", "去广告开关", "去直播开关", "去推荐卡片开关",
-                        "去推荐商家开关", "去小游戏开关", "去长视频开关", "长视频时间界定",
-                        "去低赞视频开关", "去图集开关", "过滤字符串", "过滤短视频", "最短时长（秒）"},
-                {"DOWNLOAD", "启用下载菜单", "下载方式", "保存位置", "下载任务", "默认行为", "是否启用抖音下载自定义命名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
+                {"FILTER", "过滤总开关", "整页筛空时保留原列表", "去广告开关", "去直播开关", "去推荐卡片开关",
+                        "去推荐商家开关", "去小游戏开关", "去长视频开关", "最长时长（秒）",
+                        "最低点赞数（0不限制）", "去图集开关", "屏蔽关键词", "过滤短视频", "最短时长（秒）"},
+                {"DOWNLOAD", "启用下载菜单", "下载方式", "保存位置", "下载任务", "直接保存全部媒体", "自定义文件名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
                 {"AUTOPLAY", "自动滑动到下一个视频", "自动倍速播放", "倍速数值", "打开评论时,不滑动视频",
                         "滑动智能判断上下", "互动自动化"},
                 {"AUTO_REPLY", "开启自动回复", "回复模式", "回复内容", "素材识别", "语音回复", "接收私聊", "私聊范围", "接收群聊", "群聊范围",
                         "接收评论回复", "每日最大回复数", "同一用户回复间隔（分钟）", "发送与记录"},
                 {"AUTO_COMMENT", "开启自动评论", "评论模式", "评论内容", "语音评论", "作品范围", "素材识别",
                         "每日最大评论数", "同一作者评论间隔（分钟）", "发送与记录"},
-                {"COMMENT", "评论自动添加后缀", "后缀内容", "替换语音文件",
-                        "评论转语音", "#长按发送转语音（全局）", "长按操作", "彩色评论", "彩色评论类型"},
+                {"COMMENT", "评论自动添加后缀", "后缀内容", "替换语音文件", "评论语音文件",
+                        "评论转语音", "文本转语音设置", "#长按发送转语音（全局）", "长按操作", "彩色评论", "彩色评论类型"},
                 {"STREAK", "自动续火花", "选择用户", "续火花内容", "续火花成功弹出Tip",
                         "重试结果未知的续火花", "清空续火花记录", "续火花限制时间", "内容Api"},
                 {"MESSAGE", "消息防撤回", "自己撤回的消息", "对方撤回的消息", "撤回的背景色", "替换私聊语音",
-                        "自动文本转语音"},
+                        "私聊语音文件", "自动文本转语音", "文本转语音设置"},
                 {"SPOOF", "伪装总开关", "获赞数量", "关注数量", "粉丝数量", "互关数量", "版本信息"},
                 {"EXTENSION", "AI 模型设置", "文本转语音设置", "本地数据分析", "配置备份"}
         };
@@ -242,7 +242,10 @@ public final class ModuleSettingsReferenceTest {
                 }
                 boolean voiceComment = "语音评论".contentEquals(control.getContentDescription());
                 boolean globalHashVoice = "#长按发送转语音（全局）".contentEquals(control.getContentDescription());
-                assertEquals(category + ": " + control.getContentDescription(), voiceComment || globalHashVoice ? 2 : 1, visibleLabels);
+                boolean privateMessageVoice = "MESSAGE".equals(category)
+                        && "自动文本转语音".contentEquals(control.getContentDescription());
+                assertEquals(category + ": " + control.getContentDescription(),
+                        voiceComment || globalHashVoice || privateMessageVoice ? 2 : 1, visibleLabels);
                 if (globalHashVoice) {
                     assertTrue(containsText(labels, "适用于私信、群聊和评论"));
                     assertTrue(containsText(labels, "只发送语音，不发送文字"));
@@ -251,6 +254,9 @@ public final class ModuleSettingsReferenceTest {
                     assertTrue(containsText(labels, "最终使用完整正文，不截断音频"));
                     assertTrue(containsText(labels, "实际上传失败仍遵循原回退与防重"));
                     assertFalse(containsText(labels, "30秒"));
+                }
+                if (privateMessageVoice) {
+                    assertTrue(containsText(labels, "私信以 # 开头时，单击发送转为语音。"));
                 }
             }
             if ("AUTOPLAY".equals(category)) {
@@ -268,10 +274,10 @@ public final class ModuleSettingsReferenceTest {
         store.putString(ThirdPartyDownloadSettings.METHOD, ThirdPartyDownloadSettings.THIRD_PARTY);
         store.putString(ThirdPartyDownloadSettings.SIGNATURE_MODE, ThirdPartyDownloadSettings.SIGNATURE_NONE);
         View page = openCategory("DOWNLOAD");
-        assertEquals(Arrays.asList("启用下载菜单", "下载方式", "保存位置", "下载任务", "默认行为",
+        assertEquals(Arrays.asList("启用下载菜单", "下载方式", "保存位置", "下载任务", "直接保存全部媒体",
                 "GET 请求", "请求参数", "签名方式", "请求头", "响应样本", "下载字段", "文件命名字段", "测试 GET"),
                 settingTitles(page));
-        Switch direct = toggle(page, "默认行为");
+        Switch direct = toggle(page, "直接保存全部媒体");
         assertFalse(direct.isChecked());
         assertFalse(containsText((View) direct.getParent(), "开启后解析成功即保存所选下载字段，不显示下载选择。"));
         direct.setChecked(true);
@@ -380,7 +386,7 @@ public final class ModuleSettingsReferenceTest {
         View page = openCategory("FILTER");
         Switch master = toggle(page, "过滤总开关");
         Switch ads = toggle(page, "去广告开关");
-        View keyword = option(page, "过滤字符串");
+        View keyword = option(page, "屏蔽关键词");
         assertFalse(master.isChecked());
         assertTrue(master.isEnabled());
         assertFalse(ads.isEnabled());
@@ -422,7 +428,7 @@ public final class ModuleSettingsReferenceTest {
         assertFalse(store.load().hideRecommendationCards);
         assertTrue(store.load().hideRecommendationMerchants);
         toggle(page, "去图集开关").setChecked(true);
-        editOption(page, "过滤字符串", "广告,测试");
+        editOption(page, "屏蔽关键词", "广告,测试");
         screen.dismissChildPages();
         View download = openCategory("DOWNLOAD");
         toggle(download, "启用下载菜单").setChecked(true);
@@ -466,17 +472,17 @@ public final class ModuleSettingsReferenceTest {
     public void thresholdAndKeywordRowsActivateOnlyForConfiguredValues() {
         View page = openCategory("FILTER");
         toggle(page, "过滤总开关").setChecked(true);
-        editOption(page, "去低赞视频开关", "120");
+        editOption(page, "最低点赞数（0不限制）", "120");
         assertTrue(store.load().minimumLikesEnabled);
         assertEquals(120, store.load().minimumLikeCount);
-        editOption(page, "过滤字符串", "  美食,广告  ");
+        editOption(page, "屏蔽关键词", "  美食,广告  ");
         assertTrue(store.load().keywordFilterEnabled);
         assertEquals("美食,广告", store.load().keyword);
         assertEquals(120, store.load().minimumLikeCount);
-        editOption(page, "去低赞视频开关", "0");
+        editOption(page, "最低点赞数（0不限制）", "0");
         assertFalse(store.load().minimumLikesEnabled);
         assertTrue(store.load().keywordFilterEnabled);
-        editOption(page, "过滤字符串", "  ");
+        editOption(page, "屏蔽关键词", "  ");
         assertFalse(store.load().keywordFilterEnabled);
         assertEquals("", store.load().keyword);
         assertTrue(store.load().feedFilterEnabled);
@@ -1665,7 +1671,7 @@ public final class ModuleSettingsReferenceTest {
         View page = openCategory("DOWNLOAD");
         Switch menu = toggle(page, "启用下载菜单");
         assertFalse(menu.isChecked());
-        Switch direct = toggle(page, "默认行为");
+        Switch direct = toggle(page, "直接保存全部媒体");
         assertFalse(direct.isChecked());
         assertFalse(containsText((View) direct.getParent(), "开启后手势直接保存视频或全部图片，不显示下载选择。"));
         direct.setChecked(true);
@@ -1673,7 +1679,7 @@ public final class ModuleSettingsReferenceTest {
         assertTrue(store.load().downloadEnabled);
         assertTrue(store.getBoolean(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, false));
         menu.setChecked(false);
-        toggle(page, "是否启用抖音下载自定义命名").setChecked(true);
+        toggle(page, "自定义文件名").setChecked(true);
         assertTrue(menu.isChecked());
         assertTrue(store.load().downloadEnabled);
         menu.setChecked(false);
@@ -1688,20 +1694,30 @@ public final class ModuleSettingsReferenceTest {
     }
 
     @Test
-    public void dismissingCommentChoicesKeepsTheOuterSwitchInSync() {
+    public void dismissingCommentChoicesKeepsTheirSelectionAndUpdatesTheOptionSummary() {
         View page = openCategory("COMMENT");
-        Switch tools = toggle(page, "长按操作");
-        assertFalse(tools.isChecked());
-        assertTrue(tools.performLongClick());
+        View tools = option(page, "长按操作");
+        assertNull(page.findViewWithTag("settings.toggle.长按操作"));
+        assertTrue(tools.performClick());
         AlertDialog choices = (AlertDialog) ShadowDialog.getLatestDialog();
+        bindDialogChoices(choices);
         choices.getListView().performItemClick(null, 0, 0);
         choices.cancel();
         ShadowLooper.idleMainLooper();
         assertTrue(store.getBoolean("copy_comment_text", false));
-        assertTrue(tools.isChecked());
         assertFalse(store.getBoolean("comment_media_tools", false));
-        tools.setChecked(false);
+        assertTrue(containsText(tools, "复制评论"));
+        assertTrue(tools.performClick());
+        choices = (AlertDialog) ShadowDialog.getLatestDialog();
+        bindDialogChoices(choices);
+        assertTrue(choices.getListView().isItemChecked(0));
+        choices.getListView().performItemClick(null, 0, 0);
+        choices.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        ShadowLooper.idleMainLooper();
         assertFalse(store.getBoolean("copy_comment_text", true));
+        assertFalse(store.getBoolean("comment_media_tools", false));
+        assertFalse(store.getBoolean("copy_source_data", false));
+        assertFalse(containsText(tools, "复制评论"));
     }
 
     @Test
@@ -1865,6 +1881,15 @@ public final class ModuleSettingsReferenceTest {
         }
     }
 
+    private static void bindDialogChoices(AlertDialog dialog) {
+        ShadowLooper.idleMainLooper();
+        ListView choices = dialog.getListView();
+        choices.measure(View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.AT_MOST));
+        choices.layout(0, 0, choices.getMeasuredWidth(), choices.getMeasuredHeight());
+        ShadowLooper.idleMainLooper();
+    }
+
     private View openCategory(String category) {
         View row = home.findViewWithTag("settings.category." + category);
         assertNotNull(category, row);
@@ -1912,10 +1937,10 @@ public final class ModuleSettingsReferenceTest {
     }
 
     private static void assertUnavailableFiltersRemainDisabled(View page) {
-        for (String title : Arrays.asList("中断开关", "去小游戏开关", "去长视频开关")) {
+        for (String title : Arrays.asList("整页筛空时保留原列表", "去小游戏开关", "去长视频开关")) {
             assertTrue(title, toggle(page, title).isEnabled());
         }
-        assertTrue(option(page, "长视频时间界定").isEnabled());
+        assertTrue(option(page, "最长时长（秒）").isEnabled());
     }
 
     private static List<String> settingTitles(View root) {

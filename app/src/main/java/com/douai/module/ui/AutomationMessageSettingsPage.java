@@ -20,7 +20,6 @@ import android.widget.TextView;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.AutomationMessageSettings;
-import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.feature.AutomationScopePolicy;
@@ -305,13 +304,26 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
         if (groups.isEmpty() && selected.isEmpty()) {
             showOptionDialog(new MiuixDialogBuilder(context, useMiuix).setTitle("选择群聊")
                     .setMessage("暂无可用群会话。")
+                    .setNeutralButton("填写会话 ID", (dialog, which) ->
+                            new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> showGroupConversationIds(preview)))
                     .setNegativeButton("返回", null).create());
             return;
         }
         showProfileSelection("选择群聊", NativeMessagingHooks.availableGroupProfiles(), selected, next -> {
                     repository.putString("reply_group_targets", String.join(",", next));
                     preview.setValue(selectedGroupPreview());
-                }, null);
+                }, () -> showGroupConversationIds(preview));
+    }
+
+    private void showGroupConversationIds(OptionRow preview) {
+        LinearLayout form = form();
+        EditText input = formInput(form, "群会话 ID，以逗号分隔", repository.getString("reply_group_targets", ""), false);
+        showOptionDialog(new MiuixDialogBuilder(context, useMiuix).setTitle("填写会话 ID").setView(form)
+                .setNegativeButton("取消", null).setPositiveButton("保存", (dialog, which) -> {
+                    if (closed) return;
+                    repository.putString("reply_group_targets", String.join(",", GroupReplyPolicy.entries(input.getText().toString())));
+                    preview.setValue(selectedGroupPreview());
+                }).create());
     }
 
     private void showGroupMemberSelection() {
@@ -351,20 +363,14 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
         MiuixDialogBuilder builder = new MiuixDialogBuilder(context, useMiuix);
         builder.setTitle(title).setView(list).setNegativeButton("取消", null)
                 .setPositiveButton("保存", (dialog, which) -> saved.accept(list.selected()));
-        if (manual != null) builder.setNeutralButton("填写 UID", (dialog, which) ->
+        if (manual != null) builder.setNeutralButton("选择群聊".equals(title) ? "填写会话 ID" : "填写 UID", (dialog, which) ->
                 new android.os.Handler(android.os.Looper.getMainLooper()).post(manual));
         showOptionDialog(builder.create(), list::close);
     }
 
     private void buildAutoCommentControls(LinearLayout panel) {
-        FeatureSettings settings = repository.load();
-        ToggleControl[] master = new ToggleControl[1];
-        master[0] = addSwitch(panel, "开启自动评论", repository.getBoolean("native_auto_comment", false) && !settings.automationEnabled
-                        ? "已暂停：自动化总开关关闭" : "",
-                repository.getBoolean("native_auto_comment", false), true, value -> {
-                    repository.setEnabled("comment", value);
-                    master[0].setSummary(value && !repository.load().automationEnabled ? "已暂停：自动化总开关关闭" : "");
-                });
+        addSwitch(panel, "开启自动评论", "", repository.getBoolean("native_auto_comment", false), true,
+                value -> repository.setEnabled("comment", value));
         OptionRow[] media = new OptionRow[1];
         addChoiceOption(panel, "评论模式", "comment_mode", new String[]{"AI 模型", "固定内容"}, new String[]{"ai", "fixed"}, "ai", () -> {
             boolean ai = "ai".equals(repository.getString("comment_mode", "ai"));

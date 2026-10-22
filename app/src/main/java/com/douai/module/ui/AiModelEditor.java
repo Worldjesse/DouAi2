@@ -322,10 +322,13 @@ final class AiModelEditor implements AutoCloseable {
         EditText timeout = formInput(form, "超时秒数（5–120）", Integer.toString(original.timeoutSeconds), false);
         CheckBox temperatureEnabled = checkField(form, "设置温度", original.temperatureEnabled);
         EditText temperature = formInput(form, "温度", Double.toString(original.temperature), false);
+        bindOptionalInput(temperatureEnabled, temperature);
         CheckBox maxTokensEnabled = checkField(form, "限制最大输出 Token", original.maxTokensEnabled);
         EditText maxTokens = formInput(form, "最大输出 Token", Integer.toString(original.maxTokens), false);
+        bindOptionalInput(maxTokensEnabled, maxTokens);
         CheckBox topPEnabled = checkField(form, "设置 Top P", original.topPEnabled);
         EditText topP = formInput(form, "Top P", Double.toString(original.topP), false);
+        bindOptionalInput(topPEnabled, topP);
         EditText headers = formInput(form, "自定义请求头 JSON", original.customHeaders, false);
         EditText parameters = formInput(form, "自定义参数 JSON", original.customParameters, false);
         TextView status = text("", 12, MUTED, false);
@@ -334,7 +337,7 @@ final class AiModelEditor implements AutoCloseable {
         form.addView(status, matchWrap());
         Callable<AiModelConfig> readDraft = () -> {
             if (loadingAvatar) throw new IllegalStateException("正在处理头像，请稍候再保存");
-            return buildAiConfig(original.id, name, provider, protocol, responseMode,
+            return buildAiConfig(original, name, provider, protocol, responseMode,
                     reasoningValues[0][reasoningEffort.getSelectedItemPosition()], endpoint,
                     key, modelName, modelsEndpoint, systemPrompt[0], contextRounds, timeout, allowHttp,
                     temperatureEnabled, temperature, maxTokensEnabled, maxTokens,
@@ -511,7 +514,12 @@ final class AiModelEditor implements AutoCloseable {
         return values.toArray(new String[0]);
     }
 
-    private AiModelConfig buildAiConfig(String id, EditText name, Spinner provider, Spinner protocol,
+    private static void bindOptionalInput(CheckBox toggle, EditText input) {
+        input.setEnabled(toggle.isChecked());
+        toggle.setOnCheckedChangeListener((button, enabled) -> input.setEnabled(enabled));
+    }
+
+    private AiModelConfig buildAiConfig(AiModelConfig original, EditText name, Spinner provider, Spinner protocol,
                                        Spinner responseMode, String reasoningEffort,
                                        EditText endpoint, EditText key, EditText model,
                                        EditText modelsEndpoint, String prompt, EditText rounds,
@@ -521,7 +529,7 @@ final class AiModelEditor implements AutoCloseable {
                                        EditText parameters, boolean messageContactEnabled,
                                        String messageContactName, String messageContactAvatar) throws Exception {
         AiProviderPresets.Preset preset = AiProviderPresets.ALL.get(provider.getSelectedItemPosition());
-        return AiModelConfig.fromJson(new JSONObject().put("id", id).put("name", name.getText().toString())
+        return AiModelConfig.fromJson(new JSONObject().put("id", original.id).put("name", name.getText().toString())
                 .put("provider", preset.id).put("protocol", AiModelConfig.PROTOCOLS[protocol.getSelectedItemPosition()])
                 .put("responseMode", AiModelConfig.RESPONSE_MODES[responseMode.getSelectedItemPosition()])
                 .put("reasoningEffort", reasoningEffort)
@@ -532,10 +540,10 @@ final class AiModelEditor implements AutoCloseable {
                 .put("timeoutSeconds", Integer.parseInt(timeout.getText().toString().trim()))
                 .put("allowInsecureHttp", allowHttp.isChecked())
                 .put("temperatureEnabled", temperatureEnabled.isChecked())
-                .put("temperature", Double.parseDouble(temperature.getText().toString().trim()))
+                .put("temperature", temperatureEnabled.isChecked() ? Double.parseDouble(temperature.getText().toString().trim()) : original.temperature)
                 .put("maxTokensEnabled", maxTokensEnabled.isChecked())
-                .put("maxTokens", Integer.parseInt(maxTokens.getText().toString().trim()))
-                .put("topPEnabled", topPEnabled.isChecked()).put("topP", Double.parseDouble(topP.getText().toString().trim()))
+                .put("maxTokens", maxTokensEnabled.isChecked() ? Integer.parseInt(maxTokens.getText().toString().trim()) : original.maxTokens)
+                .put("topPEnabled", topPEnabled.isChecked()).put("topP", topPEnabled.isChecked() ? Double.parseDouble(topP.getText().toString().trim()) : original.topP)
                 .put("customHeaders", headers.getText().toString().trim().isEmpty() ? "{}" : headers.getText().toString())
                 .put("customParameters", parameters.getText().toString().trim().isEmpty() ? "{}" : parameters.getText().toString())
                 .put("messageContactEnabled", messageContactEnabled).put("messageContactName", messageContactName)

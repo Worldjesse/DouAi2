@@ -6,67 +6,32 @@ import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.widget.Toast;
-import com.douai.module.config.SettingsStore;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
 import java.util.UUID;
 
-/** Uses the host's AndroidX result registry without taking over its Activity callbacks. */
+/** Imports a draft file; the main-thread callback receives null on cancellation or failure. */
 public final class HostAudioPicker {
     private HostAudioPicker() { }
 
-    public static boolean launch(Activity activity, SettingsStore settings, String key,
-                                  java.util.function.Consumer<String> onImported) {
-        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return false;
-        Object[] launcher = new Object[1];
-        try {
-            ClassLoader loader = activity.getClass().getClassLoader();
-            Class<?> contract = Class.forName("androidx.activity.result.contract.ActivityResultContract", false, loader);
-            Class<?> callback = Class.forName("androidx.activity.result.ActivityResultCallback", false, loader);
-            Class<?> registryType = Class.forName("androidx.activity.result.ActivityResultRegistry", false, loader);
-            Class<?> launcherType = Class.forName("androidx.activity.result.ActivityResultLauncher", false, loader);
-            Object registry = activity.getClass().getMethod("getActivityResultRegistry").invoke(activity);
-            Object open = Class.forName("androidx.activity.result.contract.ActivityResultContracts$OpenDocument", false, loader)
-                    .getConstructor().newInstance();
-            Context context = activity.getApplicationContext();
-            Object result = Proxy.newProxyInstance(loader, new Class<?>[]{callback}, (proxy, method, arguments) -> {
-                if (method.getDeclaringClass() == Object.class) {
-                    if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
-                    if ("equals".equals(method.getName())) return arguments != null && proxy == arguments[0];
-                    return "DouAiAudioSelection";
-                }
-                if (!"onActivityResult".equals(method.getName())) return null;
-                if (launcher[0] != null) {
-                    try { launcherType.getMethod("unregister").invoke(launcher[0]); }
-                    catch (ReflectiveOperationException | RuntimeException ignored) { }
-                }
-                Object value = arguments == null || arguments.length == 0 ? null : arguments[0];
-                if (!(value instanceof Uri)) return null;
-                Uri source = (Uri) value;
-                Thread copy = new Thread(() -> importFile(context, source, settings, key, onImported), "DouAi-AudioImport");
-                copy.setDaemon(true);
-                copy.start();
-                return null;
-            });
-            Method register = registryType.getMethod("register", String.class, contract, callback);
-            launcher[0] = register.invoke(registry, "douai_audio_" + UUID.randomUUID(), open, result);
-            launcherType.getMethod("launch", Object.class).invoke(launcher[0], (Object) new String[]{"audio/*"});
-            return true;
-        } catch (ReflectiveOperationException | RuntimeException failure) {
-            if (launcher[0] != null) {
-                try { launcher[0].getClass().getMethod("unregister").invoke(launcher[0]); }
-                catch (ReflectiveOperationException | RuntimeException ignored) { }
+    static HostImagePicker launch(Activity activity, java.util.function.Consumer<String> onImported) {
+        if (activity == null || activity.isFinishing() || activity.isDestroyed() || onImported == null) return null;
+        Context context = activity.getApplicationContext();
+        // The shared document picker keeps host settings alive while the system picker is open.
+        return HostImagePicker.launch(activity, new String[]{"audio/*"}, source -> {
+            if (source == null) {
+                deliver(onImported, null);
+                return;
             }
-            return false;
-        }
+            Thread copy = new Thread(() -> importFile(context, source, onImported), "DouAi-AudioImport");
+            copy.setDaemon(true);
+            copy.start();
+        });
     }
 
-    private static void importFile(Context context, Uri source, SettingsStore settings, String key,
-                                    java.util.function.Consumer<String> onImported) {
+    private static void importFile(Context context, Uri source, java.util.function.Consumer<String> onImported) {
         File target = null;
         try {
             File directory = new File(context.getFilesDir(), "douai-voice-source");
@@ -89,12 +54,11 @@ public final class HostAudioPicker {
                 }
                 if (count == 0) throw new IllegalStateException("语音文件为空");
             }
-            settings.putString(key, target.getAbsolutePath());
             String imported = target.getAbsolutePath();
-            if (onImported != null) new Handler(Looper.getMainLooper()).post(() -> onImported.accept(imported));
-            toast(context, "语音文件已选定");
+            deliver(onImported, imported);
             target = null;
         } catch (Exception failure) {
+            deliver(onImported, null);
             toast(context, failure.getMessage() == null ? "语音文件读取失败" : failure.getMessage());
         } finally {
             if (target != null) {
@@ -102,6 +66,10 @@ public final class HostAudioPicker {
                 catch (Exception ignored) { }
             }
         }
+    }
+
+    private static void deliver(java.util.function.Consumer<String> callback, String path) {
+        if (callback != null) new Handler(Looper.getMainLooper()).post(() -> callback.accept(path));
     }
 
     private static void toast(Context context, String message) {

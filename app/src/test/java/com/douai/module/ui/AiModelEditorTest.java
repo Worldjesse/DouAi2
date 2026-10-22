@@ -285,6 +285,55 @@ public final class AiModelEditorTest {
         assertEquals("", AiModelSettings.read(store).selected().messageContactAvatar);
     }
 
+    @Test public void optionalParameterSwitchesControlTheirInputs() throws Exception {
+        editor = new AiModelEditor(activity, store, profile(), false, () -> { });
+        show(editor);
+        String[][] fields = {{"设置温度", "温度"}, {"限制最大输出 Token", "最大输出 Token"}, {"设置 Top P", "Top P"}};
+        for (String[] field : fields) {
+            CheckBox toggle = checkbox(editor.dialog().getWindow().getDecorView(), field[0]);
+            EditText value = input(editor.dialog(), field[1]);
+            assertFalse(field[1], value.isEnabled());
+            toggle.setChecked(true);
+            assertTrue(field[1], value.isEnabled());
+            toggle.setChecked(false);
+            assertFalse(field[1], value.isEnabled());
+        }
+    }
+
+    @Test public void disabledOptionalParametersDoNotBlockSavingAndKeepSavedValues() throws Exception {
+        AiModelConfig original = profile();
+        editor = new AiModelEditor(activity, store, original, false, () -> { });
+        show(editor);
+        String[][] fields = {{"设置温度", "温度"}, {"限制最大输出 Token", "最大输出 Token"}, {"设置 Top P", "Top P"}};
+        for (String[] field : fields) {
+            CheckBox toggle = checkbox(editor.dialog().getWindow().getDecorView(), field[0]);
+            toggle.setChecked(true);
+            input(editor.dialog(), field[1]).setText("");
+            toggle.setChecked(false);
+        }
+        editor.dialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertFalse(editor.dialog().isShowing());
+        AiModelConfig saved = AiModelSettings.read(store).selected();
+        assertEquals(original.temperature, saved.temperature, 0);
+        assertEquals(original.maxTokens, saved.maxTokens);
+        assertEquals(original.topP, saved.topP, 0);
+        assertFalse(saved.temperatureEnabled);
+        assertFalse(saved.maxTokensEnabled);
+        assertFalse(saved.topPEnabled);
+    }
+
+    private static CheckBox checkbox(View root, String label) {
+        if (root instanceof CheckBox && label.contentEquals(((CheckBox) root).getText())) return (CheckBox) root;
+        if (root instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) root;
+            for (int index = 0; index < group.getChildCount(); index++) {
+                CheckBox found = checkbox(group.getChildAt(index), label);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
     private void show(AiModelEditor value) {
         value.show((dialog, onDismiss) -> {
             dialog.setOwnerActivity(activity);

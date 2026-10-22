@@ -113,6 +113,8 @@ public final class ModuleSettingsScreen {
             new SearchEntry("message-recall", "消息防撤回", "消息管理 > 消息防撤回", "私信 防撤回 撤回背景 消息记录", SearchDestination.MESSAGE),
             new SearchEntry("gestures", "长按与双击手势", "界面相关 > 长按事件与双击事件", "手势 长按 双击 悬浮条 工具栏", SearchDestination.GESTURES),
             new SearchEntry("comment-tools", "评论工具", "评论相关 > 长按操作", "复制评论 评论图片 复制源数据 查看评论数据 评论解析 JSON 语音摘要 彩色评论 后缀 替换语音", SearchDestination.COMMENT),
+            new SearchEntry("comment-voice-file", "评论语音文件", "评论相关 > 评论语音文件", "替换语音 音频 文件路径 选择文件", SearchDestination.COMMENT, "settings.option.评论语音文件"),
+            new SearchEntry("message-voice-file", "私聊语音文件", "消息管理 > 私聊语音文件", "私信 替换语音 音频 文件路径 选择文件", SearchDestination.MESSAGE, "settings.option.私聊语音文件"),
             new SearchEntry("comment-speech", "评论转语音", "评论相关 > 评论转语音", "语音 TTS # 单击发送 评论", SearchDestination.COMMENT, "settings.option.评论转语音"),
             new SearchEntry("hash-long-press-voice", "#长按发送转语音（全局）", "评论相关 > #长按发送转语音（全局）", "语音 TTS #长按 长按发送 全局 私信 群聊 评论", SearchDestination.COMMENT, "settings.toggle.#长按发送转语音（全局）"),
             new SearchEntry("ai-chat", "AI 测试对话", "扩展功能 > AI 模型设置 > 测试对话", "AI 聊天 测试模型 对话 图片", SearchDestination.AI_CHAT)
@@ -562,12 +564,10 @@ public final class ModuleSettingsScreen {
                 addLocalSwitch("评论自动添加后缀", "", "comment_append_suffix");
                 addEditableOption("后缀内容", "", repository.getString("comment_suffix", ""),
                         false, true, false, value -> repository.putString("comment_suffix", value));
-                addSwitch("替换语音文件", "",
-                        repository.getBoolean("comment_voice_replace", false), true, value -> {
-                            repository.putBoolean("comment_voice_replace", value);
-                            if (value) showAudioPathEditor("评论语音文件", "comment_voice_path");
-                        });
+                addLocalSwitch("替换语音文件", "", "comment_voice_replace");
+                addAudioPathOption("评论语音文件", "comment_voice_path");
                 addOption("评论转语音", "", null, true, this::showCommentSpeechSettings);
+                addOption("文本转语音设置", "配置语音来源、接口与音色", null, true, this::showSpeechSettings);
                 addLocalSwitch("#长按发送转语音（全局）", "适用于私信、群聊和评论。输入以 # 开头时长按发送，只发送语音，不发送文字。", "hash_long_press_voice");
                 addCommentLongPressOption();
                 addLocalSwitch("彩色评论", "", "colored_comment");
@@ -603,13 +603,11 @@ public final class ModuleSettingsScreen {
                 addSwitch("对方撤回的消息", "", repository.getBoolean("recall_other", true), true,
                         value -> repository.putBoolean("recall_other", value));
                 addColorOption();
-                addSwitch("替换私聊语音", "",
-                        repository.getBoolean("dm_voice_replace", false), true, value -> {
-                            repository.putBoolean("dm_voice_replace", value);
-                            if (value) showAudioPathEditor("私聊语音文件", "dm_voice_path");
-                        });
+                addLocalSwitch("替换私聊语音", "", "dm_voice_replace");
+                addAudioPathOption("私聊语音文件", "dm_voice_path");
                 addLocalSwitch("自动文本转语音",
-                        "", "dm_tts");
+                        "私信以 # 开头时，单击发送转为语音。", "dm_tts");
+                addOption("文本转语音设置", "配置语音来源、接口与音色", null, true, this::showSpeechSettings);
                 break;
             case SPOOF:
                 addLocalSwitch("伪装总开关", "", "spoof_profile");
@@ -725,12 +723,12 @@ public final class ModuleSettingsScreen {
     }
 
     private void buildOfficialDownloadControls(ToggleControl master) {
-        addSwitch("默认行为", "",
+        addSwitch("直接保存全部媒体", "",
                 repository.getBoolean(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, false), true, value -> {
                     if (value) master.setChecked(true);
                     repository.putBoolean(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, value);
                 });
-        addSwitch("是否启用抖音下载自定义命名", "",
+        addSwitch("自定义文件名", "",
                 repository.getBoolean("download_custom_name", false), true, value -> {
                     if (value) master.setChecked(true);
                     repository.putBoolean("download_custom_name", value);
@@ -749,7 +747,7 @@ public final class ModuleSettingsScreen {
     }
 
     private void buildThirdPartyDownloadControls(ToggleControl master) {
-        addSwitch("默认行为", "",
+        addSwitch("直接保存全部媒体", "",
                 repository.getBoolean(ThirdPartyDownloadSettings.DIRECT, false), true, value -> {
                     if (value) master.setChecked(true);
                     repository.putBoolean(ThirdPartyDownloadSettings.DIRECT, value);
@@ -826,7 +824,7 @@ public final class ModuleSettingsScreen {
                     update(s -> withFeedEnabled(s, value));
                     setFeedFilterControlsEnabled(value);
                 });
-        addSwitch("中断开关", "",
+        addSwitch("整页筛空时保留原列表", "",
                 repository.getBoolean("filter_interrupt", true), settings.feedFilterEnabled, true,
                 value -> repository.putBoolean("filter_interrupt", value));
         addSwitch("去广告开关", "", settings.hideAds, settings.feedFilterEnabled,
@@ -844,11 +842,11 @@ public final class ModuleSettingsScreen {
         addSwitch("去长视频开关", "",
                 repository.getBoolean("hide_long_videos", false), settings.feedFilterEnabled, true,
                 value -> repository.putBoolean("hide_long_videos", value));
-        addEditableOption("长视频时间界定", "",
+        addEditableOption("最长时长（秒）", "",
                 repository.getString("maximum_duration_seconds", "120"), true,
                 settings.feedFilterEnabled, true,
                 value -> repository.putString("maximum_duration_seconds", value));
-        addEditableOption("去低赞视频开关", "", settings.minimumLikesEnabled
+        addEditableOption("最低点赞数（0不限制）", "", settings.minimumLikesEnabled
                         ? Integer.toString(settings.minimumLikeCount) : "0",
                 true, settings.feedFilterEnabled, true,
                 value -> update(s -> withLikes(withFilter(s, parseNonNegative(value) > 0, Filter.LIKES),
@@ -856,7 +854,7 @@ public final class ModuleSettingsScreen {
         addSwitch("去图集开关", "", settings.hideImagePosts,
                 settings.feedFilterEnabled, true,
                 value -> update(s -> withFilter(s, value, Filter.IMAGE)));
-        addEditableOption("过滤字符串", "",
+        addEditableOption("屏蔽关键词", "",
                 settings.keyword, false, settings.feedFilterEnabled, true,
                 value -> update(s -> withKeyword(withFilter(s, !value.trim().isEmpty(), Filter.KEYWORD), value)));
         addSwitch("过滤短视频", "", settings.minimumDurationEnabled,
@@ -947,30 +945,25 @@ public final class ModuleSettingsScreen {
     private void addCommentLongPressOption() {
         String[] labels = {"复制评论", "保存评论图片", "复制源数据"};
         String[] keys = {"copy_comment_text", "comment_media_tools", "copy_source_data"};
-        boolean[] syncing = {false};
-        boolean checked = repository.getBoolean(keys[0], false)
-                || repository.getBoolean(keys[1], false)
-                || repository.getBoolean(keys[2], false);
-        ToggleControl toggle = addSwitch("长按操作", "",
-                checked, true, false, value -> {
-                    if (!syncing[0]) for (String key : keys) repository.putBoolean(key, value);
-                });
-        toggle.setOnLongClickListener(view -> {
+        java.util.function.Supplier<String> selection = () -> {
+            List<String> selected = new ArrayList<>();
+            for (int index = 0; index < keys.length; index++) {
+                if (repository.getBoolean(keys[index], false)) selected.add(labels[index]);
+            }
+            return selected.isEmpty() ? "未启用" : String.join("、", selected);
+        };
+        OptionRow[] row = new OptionRow[1];
+        row[0] = addOption("长按操作", "选择评论菜单中的工具", selection.get(), true, () -> {
             boolean[] enabled = new boolean[keys.length];
             for (int index = 0; index < keys.length; index++) {
                 enabled[index] = repository.getBoolean(keys[index], false);
             }
-            showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle("长按操作")
-                    .setMultiChoiceItems(labels, enabled, (dialog, which, value) ->
-                            repository.putBoolean(keys[which], value))
-                    .setPositiveButton("完成", null).create(), () -> {
-                        boolean anyEnabled = false;
-                        for (String key : keys) anyEnabled |= repository.getBoolean(key, false);
-                        syncing[0] = true;
-                        toggle.setChecked(anyEnabled);
-                        syncing[0] = false;
-                    });
-            return true;
+            AlertDialog choices = new MiuixDialogBuilder(context, miuixHome != null).setTitle("长按操作")
+                    .setMultiChoiceItems(labels, enabled, (dialog, which, value) -> {
+                        if (!closed && ((Dialog) dialog).isShowing()) repository.putBoolean(keys[which], value);
+                    })
+                    .setPositiveButton("完成", null).create();
+            showOptionDialog(choices, () -> row[0].setValue(selection.get()));
         });
     }
 
@@ -1209,20 +1202,70 @@ public final class ModuleSettingsScreen {
         showOptionDialog(dialog);
     }
 
-    private void showAudioPathEditor(String title, String key) {
+    private void addAudioPathOption(String title, String key) {
+        OptionRow[] row = new OptionRow[1];
+        row[0] = addOption(title, "选择音频文件或填写可读取的路径", repository.getString(key, ""), true,
+                () -> showAudioPathEditor(title, key, () -> {
+                    String value = repository.getString(key, "");
+                    row[0].setValue(value.isEmpty() ? "未设置" : value);
+                }));
+    }
+
+    private void showAudioPathEditor(String title, String key, Runnable onSaved) {
+        if (closed) return;
         LinearLayout form = form();
         EditText path = formInput(form, "文件路径", repository.getString(key, ""), false);
+        List<String> importedPaths = new ArrayList<>();
+        boolean[] importing = {false};
+        HostImagePicker[] picker = new HostImagePicker[1];
         Button pick = formButton();
         pick.setText("选择音频文件");
+        AlertDialog editor = new MiuixDialogBuilder(context, miuixHome != null).setTitle(title).setView(form)
+                .setNegativeButton("取消", null).setPositiveButton("保存", null).create();
         pick.setOnClickListener(ignored -> {
-            if (!HostAudioPicker.launch(findOwnerActivity(context), repository, key, path::setText)) {
+            if (!editor.isShowing() || closed || importing[0]) return;
+            importing[0] = true;
+            pick.setEnabled(false);
+            pick.setText("正在导入音频…");
+            editor.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+            picker[0] = HostAudioPicker.launch(findOwnerActivity(context), imported -> {
+                importing[0] = false;
+                if (!editor.isShowing() || closed) {
+                    if (imported != null) deleteImportedAudio(imported);
+                    return;
+                }
+                pick.setEnabled(true);
+                pick.setText("选择音频文件");
+                editor.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);
+                if (imported == null) return;
+                importedPaths.add(imported);
+                path.setText(imported);
+            });
+            if (picker[0] == null) {
+                importing[0] = false;
+                pick.setEnabled(true);
+                pick.setText("选择音频文件");
+                editor.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);
                 android.widget.Toast.makeText(context, "文件选择器不可用，可填写可读取的音频路径", android.widget.Toast.LENGTH_SHORT).show();
             }
         });
         form.addView(MiuixFormControls.viewFor(pick), matchWrap());
-        showOptionDialog(new MiuixDialogBuilder(context, miuixHome != null).setTitle(title).setView(form)
-                .setNegativeButton("取消", null).setPositiveButton("保存", (dialog, which) ->
-                        repository.putString(key, path.getText().toString().trim())).create());
+        showOptionDialog(editor, () -> {
+            if (picker[0] != null) picker[0].close();
+            String saved = repository.getString(key, "");
+            for (String imported : importedPaths) if (!imported.equals(saved)) deleteImportedAudio(imported);
+        });
+        editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(ignored -> {
+            if (closed || !editor.isShowing() || importing[0]) return;
+            repository.putString(key, path.getText().toString().trim());
+            onSaved.run();
+            editor.dismiss();
+        });
+    }
+
+    private static void deleteImportedAudio(String path) {
+        try { java.nio.file.Files.deleteIfExists(java.nio.file.Paths.get(path)); }
+        catch (java.io.IOException | RuntimeException ignored) { }
     }
 
     private void showSpeechSettings() {
@@ -1967,10 +2010,10 @@ public final class ModuleSettingsScreen {
         AUTOPLAY("自动播放", 6),
         AUTO_REPLY("自动回复", 13),
         AUTO_COMMENT("自动评论", 8),
-        COMMENT("评论相关", 8),
+        COMMENT("评论相关", 11),
         STREAK("自动续火花", 7),
         COMPONENT_HIDE("组件隐藏", 24),
-        MESSAGE("消息管理", 6),
+        MESSAGE("消息管理", 8),
         SPOOF("本地伪装", 6),
         EXTENSION("扩展功能", 4),
         ABOUT("关于", -1);
