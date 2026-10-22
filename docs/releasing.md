@@ -153,7 +153,11 @@ python -B tools/release_verification.py integrity --run-dir artifacts/release-ve
 
 普通 CI 仍允许没有宿主 APK，但会按全部宿主合同 suite 单独显示通过、跳过和缺失。设置了宿主 APK 却跳过相应检查、缺报告或缺必要方法会失败。每次 CI 都保存 JUnit、Lint 和 R8 报告；普通 CI 绿色不代表严格发布验收或真机成功。
 
-Lint 警告使用 `tools/lint-baseline.json` 的可审查预算，以问题 ID、相对文件和归一化消息为键，不依赖行号；同键数量减少允许，新增键或数量增加失败。修复后的报告通过检查即可，无须为了减少警告更新预算。确需保留新增警告时，说明理由并显式更新清单，检查差异后再提交：
+Lint 代码警告使用 `tools/lint-baseline.json` 的可审查预算，以问题 ID、相对文件和归一化消息为键，不依赖行号；同键数量减少允许，新增键或数量增加失败。`GradleDependency`、`NewerVersionAvailable`、`AndroidGradlePluginVersion` 中完整匹配 `A newer version of ... than ... is available: ...` 的 Warning 单独作为依赖/工具链升级建议显示，不纳入代码告警增量：联网仓库是否可用、最新版本号变化不应改变同一源码的 CI 结论。其他文案、未知问题 ID、真实告警增量及所有 Error/Fatal 继续失败。
+
+JSON 中 `warnings` / `approvedWarnings` 保留报告与基线总数，`budgetWarnings` / `approvedBudgetWarnings` 记录代码门禁数量，`advisoryWarnings` 保留每条升级建议及次数；GitHub Summary 同时展示两类信息。0.2.4 起曾因本地未出现的联网提示误触发门禁，原始 0.2.4、0.2.7、0.2.12 报告已按该策略重放通过。回归覆盖最新版本号变化、重复次数、未知文案和错误级别，避免放宽真实代码问题。历史标签和其失败运行记录保持原状，修复通过新的主分支 CI 验证。
+
+修复后的报告通过检查即可，无须为了减少警告更新预算。确需保留新增代码警告时，说明理由并显式更新清单，检查差异后再提交：
 
 ```powershell
 python -B tools/lint_budget.py check --report app/build/reports/lint-results-release.xml --output app/build/reports/lint-budget.json

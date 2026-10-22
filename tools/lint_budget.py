@@ -1,4 +1,4 @@
-"""Reviewable Lint warning budget keyed by issue, relative file and normalized message."""
+"""Gate code warnings while reporting network-dependent version advice separately."""
 from __future__ import annotations
 
 import argparse
@@ -9,6 +9,10 @@ from pathlib import Path
 import re
 import sys
 import xml.etree.ElementTree as ET
+
+
+VERSION_NOTICE_IDS = frozenset({"GradleDependency", "NewerVersionAvailable", "AndroidGradlePluginVersion"})
+VERSION_NOTICE_MESSAGE = re.compile(r"A newer version of .+ than .+ is available: .+")
 
 
 class BudgetError(ValueError):
@@ -82,14 +86,26 @@ def entry(key, count):
     return dict(id=key[0], file=key[1], message=key[2], count=count)
 
 
+def is_version_notice(key):
+    # Match both identity and wording, not every diagnostic from these issue IDs.
+    # Error/Fatal entries are collected separately before Warning classification.
+    return key[0] in VERSION_NOTICE_IDS and VERSION_NOTICE_MESSAGE.fullmatch(key[2]) is not None
+
+
 def evaluate(report, root, baseline):
     actual, errors = lint_warnings(report, root)
     approved = baseline_entries(baseline)
-    added = [entry(key, count - approved[key]) for key, count in sorted(actual.items()) if count > approved[key]]
-    reduced = [entry(key, count - actual[key]) for key, count in sorted(approved.items()) if count > actual[key]]
+    budget_actual = Counter({key: count for key, count in actual.items() if not is_version_notice(key)})
+    budget_approved = Counter({key: count for key, count in approved.items() if not is_version_notice(key)})
+    advisories = [entry(key, count) for key, count in sorted(actual.items()) if is_version_notice(key)]
+    added = [entry(key, count - budget_approved[key]) for key, count in sorted(budget_actual.items())
+             if count > budget_approved[key]]
+    reduced = [entry(key, count - budget_actual[key]) for key, count in sorted(budget_approved.items())
+               if count > budget_actual[key]]
     return {"schemaVersion": 1, "passed": not errors and not added,
             "warnings": sum(actual.values()), "approvedWarnings": sum(approved.values()),
-            "errors": errors, "newWarnings": added, "removedWarnings": reduced}
+            "budgetWarnings": sum(budget_actual.values()), "approvedBudgetWarnings": sum(budget_approved.values()),
+            "advisoryWarnings": advisories, "errors": errors, "newWarnings": added, "removedWarnings": reduced}
 
 
 def write_json(path, value):
@@ -116,13 +132,22 @@ def update(report, root, baseline, reason):
 
 def summary(result):
     state = "PASSED" if result["passed"] else "FAILED"
-    lines = ["## Lint warning budget", "", f"**{state}**: {result['warnings']} warnings; "
+    budget_count = result.get("budgetWarnings", result["warnings"])
+    lines = ["## Lint warning budget", "", f"**{state}**: {result['warnings']} total warnings; "
+             f"{budget_count} budgeted warnings; "
              f"{sum(i['count'] for i in result['newWarnings'])} unreviewed additions; {len(result['errors'])} errors.", ""]
     for item in result["newWarnings"]:
         lines.append(f"- +{item['count']} `{item['id']}` in `{item['file']}`: {item['message']}")
     if result["removedWarnings"]:
         lines.append(f"Warning reductions accepted: {sum(i['count'] for i in result['removedWarnings'])}.")
-    lines.extend(["", "The budget ignores line numbers. New warning keys or increased counts require an explicit baseline update with a review reason.", ""])
+    advisories = result.get("advisoryWarnings", [])
+    if advisories:
+        lines.extend(["", "### Dependency and toolchain update notices", "",
+                      f"{sum(i['count'] for i in advisories)} advisory warnings (non-blocking):", ""])
+        for item in advisories:
+            lines.append(f"- {item['count']} `{item['id']}` in `{item['file']}`: {item['message']}")
+    lines.extend(["", "The budget ignores line numbers. New budgeted warning keys or increased counts require an explicit baseline update with a review reason.",
+                  "Standard dependency/toolchain upgrade notices remain visible advice because repository metadata can change independently of the checked-out source. Errors and unrecognized diagnostics still fail.", ""])
     return "\n".join(lines)
 
 

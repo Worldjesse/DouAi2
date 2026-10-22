@@ -60,6 +60,63 @@ class LintBudgetTest(unittest.TestCase):
         self.report_warnings([{**self.warning, "message": " Avoid\n  allocation during\t draw "}])
         self.assertTrue(self.evaluate()["passed"])
 
+    def test_dependency_updates_are_visible_advisories_not_code_additions(self):
+        notice = dict(id="GradleDependency", file="app/build.gradle.kts",
+                      message="A newer version of androidx.test:runner than 1.5.2 is available: 1.7.0")
+        self.report_warnings([self.warning, notice, notice])
+        result = self.evaluate()
+        self.assertTrue(result["passed"])
+        self.assertEqual(3, result["warnings"])
+        self.assertEqual(1, result["budgetWarnings"])
+        self.assertEqual([], result["newWarnings"])
+        self.assertEqual([{**notice, "count": 2}], result["advisoryWarnings"])
+        self.assertIn(notice["message"], lint_budget.summary(result))
+
+    def test_latest_version_drift_for_upgrade_notices_does_not_change_budget(self):
+        for issue in ("GradleDependency", "NewerVersionAvailable", "AndroidGradlePluginVersion"):
+            for version in ("1.7.0", "99.0.0"):
+                with self.subTest(issue=issue, version=version):
+                    notice = dict(id=issue, file="app/build.gradle.kts",
+                                  message=f"A newer version of sample:dependency than 1.0 is available: {version}")
+                    self.report_warnings([self.warning, notice])
+                    self.assertTrue(self.evaluate()["passed"])
+
+    def test_unrecognized_issue_or_message_is_still_gated(self):
+        for notice in (
+                dict(id="OtherIssue", file="app/build.gradle.kts",
+                     message="A newer version of sample:dependency than 1.0 is available: 2.0"),
+                dict(id="GradleDependency", file="app/build.gradle.kts", message="Unrecognized dependency problem")):
+            with self.subTest(notice=notice):
+                self.report_warnings([self.warning, notice])
+                self.assertFalse(self.evaluate()["passed"])
+
+    def test_real_warning_addition_is_not_hidden_by_update_notices(self):
+        notice = dict(id="GradleDependency", file="app/build.gradle.kts",
+                      message="A newer version of sample:dependency than 1.0 is available: 2.0")
+        self.report_warnings([self.warning, self.warning, notice])
+        result = self.evaluate()
+        self.assertFalse(result["passed"])
+        self.assertEqual([{**self.warning, "count": 1}], result["newWarnings"])
+
+    def test_missing_update_notice_is_not_reported_as_code_reduction(self):
+        notice = dict(id="NewerVersionAvailable", file="app/build.gradle.kts",
+                      message="A newer version of sample:dependency than 1.0 is available: 2.0")
+        self.report_warnings([self.warning, notice])
+        lint_budget.update(self.report, self.root, self.baseline, "Recorded update advice")
+        self.report_warnings([self.warning])
+        result = self.evaluate()
+        self.assertTrue(result["passed"])
+        self.assertEqual([], result["removedWarnings"])
+
+    def test_upgrade_issue_with_error_severity_still_fails(self):
+        for severity in ("Error", "Fatal"):
+            with self.subTest(severity=severity):
+                self.report_warnings([self.warning, dict(id="GradleDependency", file="app/build.gradle.kts",
+                    message="A newer version of sample:dependency than 1.0 is available: 2.0", severity=severity)])
+                result = self.evaluate()
+                self.assertFalse(result["passed"])
+                self.assertEqual(["GradleDependency"], result["errors"])
+
     def test_review_reason_is_required_and_persists(self):
         with self.assertRaisesRegex(lint_budget.BudgetError, "requires --reason"):
             lint_budget.update(self.report, self.root, self.baseline, "  ")
