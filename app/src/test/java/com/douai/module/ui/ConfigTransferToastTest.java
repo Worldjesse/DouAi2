@@ -9,6 +9,7 @@ import android.widget.Toast;
 import com.douai.module.config.ConfigTransfer;
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.SettingsStore;
+import com.douai.module.diagnostics.DouAiLog;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
@@ -31,7 +32,6 @@ import org.robolectric.annotation.Config;
 import org.robolectric.annotation.Implementation;
 import org.robolectric.annotation.Implements;
 import org.robolectric.annotation.LooperMode;
-import org.robolectric.shadows.ShadowLog;
 import org.robolectric.shadows.ShadowLooper;
 import org.robolectric.shadows.ShadowToast;
 import org.robolectric.util.ReflectionHelpers;
@@ -49,8 +49,12 @@ public final class ConfigTransferToastTest {
     private Worker worker;
     private ConfigTransferDialog page;
     private int changes;
+    private final java.util.List<String> evidence = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     @Before public void setup() {
+        assertTrue(DouAiLog.awaitIdle(5000));
+        DouAiLog.clearPending();
+        DouAiLog.setFrameworkSink((priority, line) -> evidence.add(line));
         activity = Robolectric.buildActivity(Activity.class).setup().get();
         store = new Store(); files = new Files(); picker = new Picker(); worker = new Worker();
         show(() -> changes++);
@@ -60,6 +64,7 @@ public final class ConfigTransferToastTest {
     @After public void close() {
         page.close(); page.dialog().dismiss();
         activity.finish(); ShadowLooper.idleMainLooper(); ShadowToast.reset();
+        assertTrue(DouAiLog.awaitIdle(5000)); DouAiLog.setFrameworkSink(null);
     }
 
     @Test public void successfulApplyShowsOneHostToastOnMainBeforeChangedCanCloseThePage() throws Exception {
@@ -137,16 +142,23 @@ public final class ConfigTransferToastTest {
 
     @Test @Config(shadows = RejectingToast.class)
     public void platformToastFailureCannotUndoTheImportOrBlockItsChangedCallback() throws Exception {
-        ShadowLog.clear();
         preview(); view("confirm").performClick(); finish();
         assertEquals(1, store.applies);
         assertEquals(1, changes);
         assertEquals(0, ShadowToast.shownToastCount());
-        assertTrue(ShadowLog.getLogsForTag("DouAi").stream().anyMatch(log ->
-                "ConfigTransfer import_success_toast_unavailable".equals(log.msg)));
-        for (ShadowLog.LogItem log : ShadowLog.getLogsForTag("DouAi")) {
-            assertFalse(log.msg.contains("private-toast-platform-detail"));
-            assertNull(log.throwable);
+        assertTrue(DouAiLog.awaitIdle(5000));
+        java.util.List<org.json.JSONObject> events = new java.util.ArrayList<>();
+        for (String line : evidence) events.add(new org.json.JSONObject(line));
+        assertTrue(events.stream().anyMatch(log -> "config_transfer".equals(log.optString("feature_id"))
+                && "operation_finished".equals(log.optString("event")) && "success".equals(log.optString("outcome"))
+                && "backup_applied".equals(log.optString("reason_code"))));
+        String diagnosticReference = DouAiLog.reference("ConfigTransfer import_success_toast_unavailable");
+        assertTrue(events.stream().anyMatch(log -> "legacy_diagnostic".equals(log.optString("event"))
+                && log.optString("evidence").contains("ref=" + diagnosticReference)
+                && log.optString("evidence").contains("source_level=5")));
+        for (org.json.JSONObject log : events) {
+            assertFalse(log.toString().contains("private-toast-platform-detail"));
+            assertFalse(log.has("exception_class"));
         }
     }
 

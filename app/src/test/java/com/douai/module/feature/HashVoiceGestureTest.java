@@ -1,5 +1,6 @@
 package com.douai.module.feature;
 
+import com.douai.module.diagnostics.DouAiLog;
 import org.junit.Test;
 
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -8,6 +9,37 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.Assert.*;
 
 public final class HashVoiceGestureTest {
+    @Test public void deferredNativeConfirmationLinksToItsOriginAfterTheClickHasFinished() throws Exception {
+        java.util.List<String> lines = new java.util.concurrent.CopyOnWriteArrayList<>();
+        assertTrue(DouAiLog.awaitIdle(5000));
+        DouAiLog.setFrameworkSink((priority, line) -> lines.add(line));
+        try {
+            DouAiLog.Operation click = DouAiLog.begin("hash_long_press_voice", "hash_long_click");
+            java.util.concurrent.atomic.AtomicReference<HashVoiceGesture> saved = new java.util.concurrent.atomic.AtomicReference<>();
+            click.wrap(() -> saved.set(gesture(() -> true, () -> true))).run();
+            click.finish(DouAiLog.Outcome.UNCONFIRMED, "native_click_handoff", "final_publication=unobserved");
+            java.util.concurrent.atomic.AtomicReference<DouAiLog.Operation> confirmed = new java.util.concurrent.atomic.AtomicReference<>();
+            AtomicBoolean contextRestored = new AtomicBoolean();
+            Thread nativeConfirmation = new Thread(() -> {
+                confirmed.set(saved.get().beginSpeechOperation());
+                contextRestored.set(DouAiLog.current() == null);
+            });
+            nativeConfirmation.start(); nativeConfirmation.join(5000);
+            assertFalse(nativeConfirmation.isAlive());
+            assertNotNull(confirmed.get());
+            assertTrue(contextRestored.get());
+            assertNotEquals(click.traceId(), confirmed.get().traceId());
+            confirmed.get().finish(DouAiLog.Outcome.UNCONFIRMED, "native_audio_comment_submitted", "remote_ack=false");
+            assertTrue(DouAiLog.awaitIdle(5000));
+            assertTrue(lines.stream().anyMatch(line -> line.contains("\"trace_id\":\"" + confirmed.get().traceId() + "\"")
+                    && line.contains("\"linked_trace_id\":\"" + click.traceId() + "\"")));
+            assertTrue(saved.get().claim());
+            assertFalse(saved.get().claim());
+        } finally {
+            DouAiLog.awaitIdle(5000); DouAiLog.setFrameworkSink(null);
+        }
+    }
+
     @Test public void confirmationCanClaimLaterButNeverTwice() {
         HashVoiceGesture token = gesture(() -> true, () -> true);
         assertTrue(token.matches("#draft", "work", "service", "reply"));

@@ -13,6 +13,7 @@ import android.os.Handler;
 import android.os.Looper;
 
 import com.douai.module.config.ExtendedSettings;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.ComponentHideSettings;
 import com.douai.module.config.CustomViewLocator;
 import com.douai.module.config.ComponentHideSettings.Component;
@@ -859,8 +860,23 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         if (target.isClickable() != clickable) target.setClickable(clickable);
         if (target.isFocusable() != focusable) target.setFocusable(focusable);
         original.recordApplied(target);
+        if (first || reset) recordComponentState(target, visibility, value, clickable, focusable, reset);
         if (reset) hostStateResets.incrementAndGet();
         return first ? 1 : 0;
+    }
+
+    private static void recordComponentState(View view, int visibility, float alpha,
+                                             boolean clickable, boolean focusable, boolean reset) {
+        try {
+            boolean matches = view.getVisibility() == visibility && Math.abs(view.getAlpha() - alpha) <= 0.001f
+                    && view.isClickable() == clickable && view.isFocusable() == focusable;
+            DouAiLog.Operation operation = DouAiLog.begin("feed_ui", reset ? "host_state_changed" : "component_matched");
+            operation.finish(matches ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.UNCONFIRMED,
+                    matches ? "view_properties_readback" : "view_properties_differ",
+                    "resource_id=" + view.getId() + ";expected_visibility=" + visibility
+                            + ";actual_visibility=" + view.getVisibility() + ";expected_alpha=" + alpha
+                            + ";actual_alpha=" + view.getAlpha() + ";result_scope=current_view;later_layout=unobserved");
+        } catch (Throwable ignored) { }
     }
 
     private static Map<Component, int[]> componentIds() {

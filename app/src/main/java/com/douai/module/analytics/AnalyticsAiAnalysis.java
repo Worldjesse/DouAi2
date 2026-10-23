@@ -5,6 +5,7 @@ import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.feature.ChatCompletionClient;
 import com.douai.module.feature.ChatMediaLoader;
+import com.douai.module.diagnostics.DouAiLog;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -99,7 +100,7 @@ public final class AnalyticsAiAnalysis {
     }
 
     private static Consumer<String> diagnosticSink(Consumer<String> sink) {
-        return sink == null ? value -> android.util.Log.i("DouAi.Analytics", value) : sink;
+        return sink == null ? value -> DouAiLog.legacy(4, "DouAi.Analytics", value, null) : sink;
     }
 
     private static void diagnostic(Consumer<String> sink, String stage, AnalysisFailure.Kind kind, int status, int chars) {
@@ -296,6 +297,7 @@ public final class AnalyticsAiAnalysis {
 
     public static AnalysisRequest prepare(SettingsStore store, AnalyticsSnapshot snapshot, int days,
                                           String purpose, Consumer<String> diagnostics) {
+        DouAiLog.Operation operation = DouAiLog.begin("analytics_ai_analysis", "explicit_user_analysis");
         Consumer<String> sink = diagnosticSink(diagnostics);
         diagnostic(sink, "prepare", null, 0, 0);
         try {
@@ -304,11 +306,18 @@ public final class AnalyticsAiAnalysis {
                 throw new IllegalArgumentException();
             // Config values are immutable; only the selected profile is retained for this request.
             AiModelSettings settings = new AiModelSettings(Collections.singletonList(config), config.id);
-            return new Request(settings, label(config), aggregate(snapshot, days, purpose, sink), sink);
+            String document = aggregate(snapshot, days, purpose, sink);
+            operation.stage("prepared", "days=" + days + "; document_chars=" + document.length()
+                    + "; model_ref=" + DouAiLog.reference(config.id) + "; network_started=false");
+            return new Request(settings, label(config), document, sink, operation);
         } catch (AnalysisFailure failure) {
+            operation.error("prepare", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, failure.kind().name().toLowerCase(java.util.Locale.ROOT), "network_started=false");
             diagnostic(sink, "failed", failure.kind(), failure.httpStatus(), 0);
             throw failure;
         } catch (RuntimeException failure) {
+            operation.error("prepare", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "configuration_or_aggregation_failed", "network_started=false");
             diagnostic(sink, "failed", AnalysisFailure.Kind.PREPARE, 0, 0);
             throw new AnalysisFailure(AnalysisFailure.Kind.PREPARE);
         }
@@ -497,22 +506,47 @@ public final class AnalyticsAiAnalysis {
         private final String document;
         private final ChatCompletionClient client;
         private final Consumer<String> diagnostics;
+        private final DouAiLog.Operation operation;
         private boolean cancelled;
         private boolean started;
         private boolean finished;
         private Thread running;
 
-        Request(AiModelSettings settings, String label, String document, Consumer<String> diagnostics) {
+        Request(AiModelSettings settings, String label, String document, Consumer<String> diagnostics, DouAiLog.Operation operation) {
             this.settings = settings;
             this.label = label;
             this.document = document;
             this.diagnostics = diagnostics;
+            this.operation = operation;
             this.client = new ChatCompletionClient(null, diagnostics);
         }
 
         @Override public String modelLabel() { return label; }
 
         @Override public String run() throws Exception {
+            String[] result = new String[1];
+            Exception[] error = new Exception[1];
+            operation.wrap(() -> {
+                try { result[0] = runChecked(); }
+                catch (Exception failure) { error[0] = failure; }
+            }).run();
+            if (error[0] != null) {
+                Exception failure = error[0];
+                if (failure instanceof CancellationException) operation.finish(DouAiLog.Outcome.CANCELLED, "owner_cancelled", "analysis_returned=false");
+                else {
+                    operation.error("analysis", failure);
+                    AnalysisFailure safe = failure instanceof AnalysisFailure ? (AnalysisFailure) failure : null;
+                    operation.finish(safe != null && safe.kind() == AnalysisFailure.Kind.TIMEOUT
+                                    ? DouAiLog.Outcome.TIMED_OUT : DouAiLog.Outcome.FAILED,
+                            safe == null ? "analysis_failed" : safe.kind().name().toLowerCase(java.util.Locale.ROOT),
+                            "http_status=" + (safe == null ? 0 : safe.httpStatus()) + "; analysis_returned=false");
+                }
+                throw failure;
+            }
+            return result[0];
+        }
+
+        private String runChecked() throws Exception {
             synchronized (lock) {
                 ensureActive();
                 if (started) throw new IllegalStateException("本次分析已发起，请重新创建请求");
@@ -522,9 +556,11 @@ public final class AnalyticsAiAnalysis {
             long startedAt = System.nanoTime();
             try {
                 requestDiagnostic(diagnostics, "start", null, 0, 0, startedAt);
+                operation.stage("request_started", "business_result=pending");
                 String result = client.replyStructuredAnalysis("local-analytics", PROMPT, settings,
                         SECONDARY_PROMPT, document);
                 requestDiagnostic(diagnostics, "received", null, 0, result == null ? 0 : result.length(), startedAt);
+                operation.stage("response_received", "chars=" + (result == null ? 0 : result.length()) + "; business_result=validating");
                 synchronized (lock) {
                     ensureActive();
                     if (result == null || result.trim().isEmpty()) throw new AnalysisFailure(AnalysisFailure.Kind.EMPTY);
@@ -535,6 +571,8 @@ public final class AnalyticsAiAnalysis {
                     try { LocalAnalytics.feature("analytics_ai_analysis", "AI 分析完成"); }
                     catch (RuntimeException ignored) { /* Collection must not affect the requested analysis. */ }
                     requestDiagnostic(diagnostics, "complete", null, 0, parsed.toJson().length(), startedAt);
+                    operation.finish(DouAiLog.Outcome.SUCCESS, "analysis_schema_validated",
+                            "fields=11; portrait_present=true; chars=" + parsed.toJson().length() + "; displayed_to_user=unconfirmed");
                     return parsed.toJson();
                 }
             } catch (Exception failure) {
@@ -579,6 +617,7 @@ public final class AnalyticsAiAnalysis {
                 // Interrupt closes the race before ChatCompletionClient creates its ActiveRequest.
                 if (running != null) running.interrupt();
                 client.cancelCurrentRequest();
+                operation.finish(DouAiLog.Outcome.CANCELLED, "owner_cancelled", "analysis_returned=false; started=" + started);
             }
         }
 

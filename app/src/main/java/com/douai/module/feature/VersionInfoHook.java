@@ -5,6 +5,7 @@ import android.content.pm.PackageManager;
 import android.os.Parcel;
 
 import com.douai.module.config.ExtendedSettings;
+import com.douai.module.diagnostics.DouAiLog;
 
 import io.github.libxposed.api.XposedInterface;
 
@@ -71,8 +72,15 @@ public final class VersionInfoHook implements AutoCloseable {
         Object result = chain.proceed();
         ExtendedSettings current = settings;
         if (!current.spoofVersion || !TARGET_PACKAGE.equals(chain.getArg(0))
-                || !(result instanceof PackageInfo)) return result;
-        if (current.fakeVersionName.isEmpty() && current.fakeVersionCode.isEmpty()) return result;
+                || !(result instanceof PackageInfo)) {
+            DouAiLog.event("version", "decision", !current.spoofVersion ? "disabled" : "package_not_applicable", "original_package_info_retained=true");
+            return result;
+        }
+        if (current.fakeVersionName.isEmpty() && current.fakeVersionCode.isEmpty()) {
+            DouAiLog.event("version", "decision", "empty_version_override", "original_package_info_retained=true");
+            return result;
+        }
+        DouAiLog.Operation operation = DouAiLog.begin("version", "package_info_read");
 
         PackageInfo copy;
         Parcel parcel = Parcel.obtain();
@@ -81,6 +89,8 @@ public final class VersionInfoHook implements AutoCloseable {
             parcel.setDataPosition(0);
             copy = PackageInfo.CREATOR.createFromParcel(parcel);
         } catch (RuntimeException failure) {
+            operation.error("copy_package_info", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "package_info_copy_failed", "original_package_info_retained=true");
             safeLog("Could not copy PackageInfo: " + failure.getMessage());
             return result;
         } finally {
@@ -93,9 +103,16 @@ public final class VersionInfoHook implements AutoCloseable {
                 copy.versionCode = (int) versionCode;
                 if (android.os.Build.VERSION.SDK_INT >= 28) copy.setLongVersionCode(versionCode);
             } catch (NumberFormatException ignored) {
+                operation.stage("invalid_code_retained", "configured_code_numeric=false");
                 safeLog("Version code setting is not numeric; existing value kept");
             }
         }
+        boolean nameChanged = !java.util.Objects.equals(copy.versionName, ((PackageInfo) result).versionName);
+        boolean codeChanged = copy.versionCode != ((PackageInfo) result).versionCode;
+        operation.finish(nameChanged || codeChanged ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.SKIPPED,
+                nameChanged || codeChanged ? "local_package_info_returned" : "no_valid_override_change",
+                "version_name_changed=" + nameChanged + ";version_code_changed=" + codeChanged
+                        + ";result_scope=returned_package_info;installed_package_unchanged=true");
         return copy;
     }
 

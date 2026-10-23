@@ -1,4 +1,5 @@
 package com.douai.module.feature;
+import com.douai.module.diagnostics.DouAiLog;
 
 import java.io.Closeable;
 import java.net.HttpURLConnection;
@@ -29,6 +30,20 @@ final class DownloadTransfer {
     volatile int totalFiles = 1;
     Runnable changed = () -> { };
     private long lastProgress;
+    volatile DouAiLog.Operation operation;
+    volatile int savedEvidenceCount;
+    volatile boolean transportTimedOut;
+    private String loggedPhase;
+
+    void evidence(String stage, String evidence) {
+        DouAiLog.Operation current = operation;
+        if (current != null) current.stage(stage, evidence);
+    }
+    void saved(String destination, String identifier, long count) {
+        savedEvidenceCount++;
+        evidence("output_committed", "destination=" + destination + "; output_ref=" + DouAiLog.reference(identifier)
+                + "; bytes=" + count + "; streams_closed=true; read_back_verified=false");
+    }
 
     DownloadTransfer() { this(TIMEOUT_MILLIS, System::nanoTime); }
     DownloadTransfer(long timeoutMillis, LongSupplier clock) {
@@ -89,7 +104,14 @@ final class DownloadTransfer {
     boolean isCancelled() { return cancelled; }
     boolean isTimedOut() { return timedOut; }
     synchronized boolean hasResources() { return connection != null || stopAction != null || !resources.isEmpty(); }
-    void phase(String value) { phase = value; changed.run(); }
+    void phase(String value) {
+        phase = value;
+        if (!java.util.Objects.equals(value, loggedPhase)) {
+            loggedPhase = value;
+            evidence("transfer_phase", "phase=" + value + "; completedFiles=" + completedFiles + "; totalFiles=" + totalFiles);
+        }
+        changed.run();
+    }
     void file(String value, int count) throws Exception {
         check();
         name = value; totalFiles = count; bytes = 0; totalBytes = -1;
@@ -104,7 +126,12 @@ final class DownloadTransfer {
             lastProgress = now; changed.run();
         }
     }
-    void fileDone() throws Exception { check(); completedFiles++; changed.run(); }
+    void fileDone() throws Exception {
+        check(); completedFiles++;
+        evidence("file_closed", "completedFiles=" + completedFiles + "; totalFiles=" + totalFiles
+                + "; bytes=" + bytes + "; expectedBytes=" + totalBytes);
+        changed.run();
+    }
     int timeout(int maximum) throws Exception {
         check();
         if (deadline == 0) return maximum;

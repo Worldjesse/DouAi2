@@ -6,6 +6,7 @@ import android.os.Looper;
 import android.text.SpannableStringBuilder;
 import android.widget.Toast;
 
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.scan.HostScanReport;
 
@@ -35,6 +36,7 @@ public final class NativeCommentSpeechHook implements AutoCloseable {
     private volatile LocalOptions options;
     private volatile boolean closed;
     private SpeechSynthesis pending;
+    private DouAiLog.Operation pendingTrace;
     private HashVoiceGesture pendingGesture;
     private final List<HashVoiceGesture> longPresses = new ArrayList<>();
     private long generation;
@@ -91,7 +93,7 @@ public final class NativeCommentSpeechHook implements AutoCloseable {
         this.options = options;
         if (changed || pending != null && !speechEnabled(options, pendingGesture != null)) {
             generation++;
-            if (pending != null) { pending.close(); pending = null; }
+            if (pending != null) { if (pendingTrace != null) pendingTrace.finish(DouAiLog.Outcome.CANCELLED, "speech_settings_changed", "native_submit_observed=false"); pendingTrace = null; pending.close(); pending = null; }
             if (pendingGesture != null) pendingGesture.cancel();
             pendingGesture = null;
         }
@@ -137,7 +139,7 @@ public final class NativeCommentSpeechHook implements AutoCloseable {
             return chain.proceed();
         }
         synchronized (this) {
-            if (longPresses.isEmpty() && (!current.enabled("comment_tts") || context == null)) return chain.proceed();
+            if (longPresses.isEmpty() && (!current.enabled("comment_tts") || context == null)) { DouAiLog.event("comment_tts", "eligibility", "disabled_or_not_ready", "enabled=" + current.enabled("comment_tts") + ";context_ready=" + (context != null)); return chain.proceed(); }
         }
         Object original = chain.getArg(0);
         if (original == null) return chain.proceed();
@@ -177,6 +179,9 @@ public final class NativeCommentSpeechHook implements AutoCloseable {
             toast("评论语音入口未就绪，草稿已保留"); return null;
         }
         String speechText = text.substring(1).trim();
+        DouAiLog.Operation trace = gesture == null ? DouAiLog.begin("comment_tts", "native_publish_action")
+                : gesture.beginSpeechOperation();
+        trace.stage("speech_prepare", "chars=" + speechText.length() + ";attachment_text_only=true");
         Object model;
         Object copied;
         try {
@@ -184,6 +189,8 @@ public final class NativeCommentSpeechHook implements AutoCloseable {
             copied = attachmentCopy.invoke(attachment);
             attachmentField.set(model, copied);
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            trace.error("copy_comment_model", failure);
+            trace.finish(DouAiLog.Outcome.FAILED, "model_copy_failed", "native_submit_observed=false");
             if (gesture == null) throw failure;
             gesture.cancel();
             safeLog("Long-press comment model rejected; exception=" + failure.getClass().getSimpleName());
@@ -193,6 +200,7 @@ public final class NativeCommentSpeechHook implements AutoCloseable {
         Object receiver = chain.getThisObject();
         synchronized (this) {
             if (pending != null) {
+                trace.finish(DouAiLog.Outcome.SKIPPED, "speech_busy", "native_submit_observed=false");
                 if (gesture != null) gesture.cancel();
                 toast("语音正在生成，请稍候");
                 return null;
@@ -200,45 +208,57 @@ public final class NativeCommentSpeechHook implements AutoCloseable {
             toast("正在生成评论语音");
             long epoch = generation;
             pendingGesture = gesture;
-            pending = SpeechSynthesis.synthesize(context, speechText, current, (result, failure) -> {
+            pendingTrace = trace;
+            trace.wrap(() -> { pending = SpeechSynthesis.synthesize(context, speechText, current, (result, failure) -> {
                 synchronized (NativeCommentSpeechHook.this) {
                     if (closed || epoch != generation || !speechEnabled(options, gesture != null)) {
+                        trace.finish(DouAiLog.Outcome.CANCELLED, "speech_callback_invalidated", "closed=" + closed + ";epoch_current=" + (epoch == generation));
                         if (result != null) result.file.delete();
                         return;
                     }
                     pending = null;
+                    pendingTrace = null;
                     pendingGesture = null;
                 }
                 if (gesture != null && !gesture.canSend()) {
+                    trace.finish(DouAiLog.Outcome.CANCELLED, "draft_or_target_changed", "native_submit_observed=false");
                     if (result != null) result.file.delete();
                     gesture.cancel();
                     toast("评论或草稿已变化，已取消语音发送");
                     return;
                 }
                 if (result == null) {
+                    trace.finish(DouAiLog.Outcome.FAILED, "speech_synthesis_failed", "failure_ref=" + DouAiLog.reference(failure) + ";native_submit_observed=false");
                     if (gesture != null) gesture.cancel();
                     toast(failure); safeLog("Comment speech failed: " + failure); return;
                 }
+                boolean nativeSubmitStarted = false;
                 try {
+                    trace.stage("speech_ready", "bytes=" + result.file.length() + ";duration_ms=" + result.durationMillis);
                     Object audio = audioConstructor.newInstance(result.file, CommentAudioWaveform.nativeFallback(), result.durationMillis);
                     audioField.set(copied, audio);
                     HostTargets.field(copied.getClass(), "text").set(copied, new SpannableStringBuilder());
                     textField.set(model, "");
                     HostTargets.field(model.getClass(), "d").set(model, Collections.emptyList());
                     reentry.set(Boolean.TRUE);
+                    trace.stage("native_submit", "media=voice;business_success=false");
+                    nativeSubmitStarted = true;
                     submit.invoke(receiver, model);
+                    trace.finish(DouAiLog.Outcome.UNCONFIRMED, "native_audio_comment_submitted", "native_method_returned=true;owned_remote_ack_observed=false");
                     com.douai.module.analytics.LocalAnalytics.feature("comment_tts", "评论语音提交");
                     safeLog("Submitted synthesized audio through the native comment publish workflow");
                 } catch (ReflectiveOperationException | RuntimeException error) {
                     if (gesture != null) gesture.cancel();
                     Throwable cause = error instanceof InvocationTargetException ? ((InvocationTargetException) error).getCause() : error;
+                    trace.error("native_speech_publish", cause);
+                    trace.finish(nativeSubmitStarted ? DouAiLog.Outcome.UNCONFIRMED : DouAiLog.Outcome.FAILED, nativeSubmitStarted ? "native_submit_threw" : "audio_attachment_failed", "remote_side_effect_unknown=" + nativeSubmitStarted);
                     safeLog("Native comment speech publish failed: " + cause);
                     toast("评论语音提交失败，请重试");
                 } finally {
                     reentry.remove();
                     new Handler(Looper.getMainLooper()).postDelayed(result.file::delete, 600_000);
                 }
-            });
+            }); }).run();
         }
         return null;
     }
@@ -256,7 +276,7 @@ public final class NativeCommentSpeechHook implements AutoCloseable {
         closed = true;
         generation++;
         options = new LocalOptions(Collections.emptyMap());
-        if (pending != null) { pending.close(); pending = null; }
+        if (pending != null) { if (pendingTrace != null) pendingTrace.finish(DouAiLog.Outcome.CANCELLED, "hook_closed", "native_submit_observed=false"); pendingTrace = null; pending.close(); pending = null; }
         for (HashVoiceGesture gesture : longPresses) gesture.cancel();
         longPresses.clear();
         pendingGesture = null;

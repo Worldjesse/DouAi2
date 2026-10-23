@@ -11,6 +11,7 @@ import android.view.ViewTreeObserver;
 import android.view.Window;
 
 import com.douai.module.config.ExtendedSettings;
+import com.douai.module.diagnostics.DouAiLog;
 
 import java.lang.ref.WeakReference;
 import java.util.Map;
@@ -161,6 +162,11 @@ public final class ImmersiveModeController implements Application.ActivityLifecy
             if (hideStatusBar) windowFlags |= FULLSCREEN_FLAG;
             window.getDecorView().setSystemUiVisibility(visibility);
             window.setFlags(windowFlags, FULLSCREEN_FLAG);
+            DouAiLog.event("immersive", "window_state", "flags_readback",
+                    "hide_status=" + hideStatusBar + ";hide_navigation=" + hideNavigationBar
+                            + ";requested_ui_flags=" + visibility + ";actual_ui_flags=" + window.getDecorView().getSystemUiVisibility()
+                            + ";fullscreen=" + ((window.getAttributes().flags & FULLSCREEN_FLAG) != 0)
+                            + ";result_scope=window_flags;rom_rendering=unobserved");
         } catch (RuntimeException failure) {
             safeLog("Could not apply system bar visibility: " + failure.getMessage());
         }

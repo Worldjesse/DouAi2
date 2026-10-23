@@ -2,6 +2,7 @@ package com.douai.module.feature;
 
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.LocalOptions;
+import com.douai.module.diagnostics.DouAiLog;
 import org.json.JSONObject;
 import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
@@ -14,6 +15,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -190,49 +192,94 @@ public final class FeedAdFilterHook implements AutoCloseable {
     private Object intercept(XposedInterface.Chain chain) throws Throwable {
         FeatureSettings current = settings;
         if (!enabled || current == null || !current.feedFilterEnabled || !hasActiveFilter(current, options)) {
+            DouAiLog.event("feed_filter", "decision", "disabled_or_no_active_filter", "host_response_forwarded=true");
             return chain.proceed();
         }
         Object body = chain.getArg(0);
         Object rawResponse = chain.getArg(1);
         if (body == null || rawResponse == null || !feedItemListClass.isInstance(body)) {
+            DouAiLog.event("feed_filter", "decision", "response_not_applicable", "host_response_forwarded=true");
             return chain.proceed();
         }
 
         try {
             String url = (String) responseUrl.invoke(rawResponse);
-            if (!FeedResponseFilter.isMainFeedUrl(url)) return chain.proceed();
+            if (!FeedResponseFilter.isMainFeedUrl(url)) {
+                DouAiLog.event("feed_filter", "decision", "not_main_feed_endpoint", "host_response_forwarded=true");
+                return chain.proceed();
+            }
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            DouAiLog.failure("feed_filter", "response_endpoint_inspection", failure);
             return chain.proceed();
         }
 
+        DouAiLog.Operation operation = DouAiLog.begin("feed_filter", "main_feed_response");
+        operation.stage("classify", "list_fields=" + responseLists.size());
+
         ArrayList<ListChange> changes = new ArrayList<>();
         int removed = 0;
+        FilterEvidence counts = new FilterEvidence();
         try {
             for (Field field : responseLists) {
                 Object value = field.get(body);
                 if (!(value instanceof List<?>)) continue;
                 @SuppressWarnings("unchecked")
                 List<Object> source = (List<Object>) value;
+                int input = source.size();
+                FilterEvidence listCounts = new FilterEvidence();
+                listCounts.input = input;
+                boolean allowEmpty = field != itemsField || !options.enabled("filter_interrupt", true);
                 List<Object> filtered = FeedResponseFilter.filter(source, true,
-                        item -> shouldHide(item, current), field != itemsField
-                                || !options.enabled("filter_interrupt", true));
+                        item -> {
+                            try {
+                                FeedFilterPolicy.Reason reason = hideReason(item, current);
+                                listCounts.classified++;
+                                if (reason.hides()) { listCounts.matched++; listCounts.rules.merge(reason, 1, Integer::sum); }
+                                return reason.hides();
+                            } catch (Exception unavailable) {
+                                listCounts.classificationFailures++;
+                                operation.error("classify_item", unavailable);
+                                throw unavailable; // FeedResponseFilter keeps its existing fail-open behavior.
+                            }
+                        }, allowEmpty);
+                listCounts.output = source == filtered ? input : filtered.size();
+                listCounts.removed = input - listCounts.output;
+                if (!allowEmpty && input > 0 && source == filtered && listCounts.classificationFailures == 0
+                        && listCounts.matched == input) { listCounts.emptyGuards++; listCounts.emptyGuardRetained += input; }
+                counts.add(listCounts);
                 if (source != filtered) {
                     changes.add(new ListChange(field, source, filtered));
-                    removed += source.size() - filtered.size();
+                    removed += listCounts.removed;
                 }
             }
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            operation.error("classify", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "classification_failed", "host_response_forwarded=true;mutated=false;counts_complete=false;" + counts.summary(false));
             return chain.proceed();
         }
-        if (changes.isEmpty()) return chain.proceed();
+        if (changes.isEmpty()) {
+            String reason = counts.classificationFailures > 0 ? "classification_unavailable_fail_open"
+                    : counts.emptyGuards > 0 ? "empty_page_guard" : counts.input == 0 ? "empty_input" : "no_items_matched";
+            operation.finish(counts.classificationFailures > 0 ? DouAiLog.Outcome.UNCONFIRMED : DouAiLog.Outcome.SKIPPED,
+                    reason, "lists_changed=0;host_response_forwarded=true;" + counts.summary(true));
+            return chain.proceed();
+        }
+        operation.stage("mutate_response", "lists_changed=" + changes.size() + ";counts_scope=planned_response_lists;" + counts.summary(true));
         try {
             for (ListChange change : changes) change.field.set(body, change.filtered);
         } catch (ReflectiveOperationException | RuntimeException failure) {
             rollbackLists(body, changes, failure);
+            operation.error("mutate_response", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "mutation_failed", "rollback_attempted=true;host_response_forwarded=true;" + counts.summary(false));
             return chain.proceed();
         }
         try {
             Object result = chain.proceed();
+            boolean readback = readbackChanges(body, changes);
+            operation.finish(readback ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.UNCONFIRMED,
+                    readback ? "response_list_readback" : "response_changed_after_forwarding",
+                    "lists_changed=" + changes.size() + ";readback=" + readback + ";" + counts.summary(readback)
+                            + ";result_scope=response_lists;readback_basis=changed_list_reference_only;post_forward_counts=unobserved;rendered_feed=unobserved");
             int page = filteredPages.incrementAndGet();
             // One successful filtered response, irrespective of how many overlapping preload lists it has.
             com.douai.module.analytics.LocalAnalytics.feature("feed_filter", "内容过滤生效批次");
@@ -241,12 +288,21 @@ public final class FeedAdFilterHook implements AutoCloseable {
             }
             return result;
         } catch (Throwable failure) {
+            operation.error("forward_response", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "response_rejected", "rollback_attempted=true;" + counts.summary(false));
             rollbackLists(body, changes, failure);
             throw failure;
         }
     }
 
-    private boolean shouldHide(Object item, FeatureSettings current) throws Exception {
+    private static boolean readbackChanges(Object body, List<ListChange> changes) {
+        try {
+            for (ListChange change : changes) if (change.field.get(body) != change.filtered) return false;
+            return true;
+        } catch (Throwable unavailable) { return false; }
+    }
+
+    private FeedFilterPolicy.Reason hideReason(Object item, FeatureSettings current) throws Exception {
         if (!awemeClass.isInstance(item)) {
             throw new IllegalArgumentException("Feed list contains a non-Aweme value");
         }
@@ -279,7 +335,7 @@ public final class FeedAdFilterHook implements AutoCloseable {
         }
         FeedItem attributes = new FeedItem(ad, live, image,
                 recommendationCard, desc, durationMillis, likeCount);
-        return FeedFilterPolicy.shouldHide(attributes, current,
+        return FeedFilterPolicy.reason(attributes, current,
                 recommendationCard, recommendationMerchant,
                 isMiniGame(anchorInfoField.get(item)), type, options);
     }
@@ -340,6 +396,32 @@ public final class FeedAdFilterHook implements AutoCloseable {
             this.field = field;
             this.original = original;
             this.filtered = filtered;
+        }
+    }
+
+    private static final class FilterEvidence {
+        int input, matched, removed, output, classified, classificationFailures, emptyGuards, emptyGuardRetained, lists;
+        final EnumMap<FeedFilterPolicy.Reason, Integer> rules = new EnumMap<>(FeedFilterPolicy.Reason.class);
+        void add(FilterEvidence item) {
+            lists++; input += item.input; matched += item.matched; removed += item.removed; output += item.output;
+            classified += item.classified; classificationFailures += item.classificationFailures;
+            emptyGuards += item.emptyGuards; emptyGuardRetained += item.emptyGuardRetained;
+            for (java.util.Map.Entry<FeedFilterPolicy.Reason, Integer> rule : item.rules.entrySet()) rules.merge(rule.getKey(), rule.getValue(), Integer::sum);
+        }
+        String summary(boolean classifiedSnapshotApplies) {
+            StringBuilder evidence = new StringBuilder("input=").append(input).append(";matched=").append(matched);
+            if (classifiedSnapshotApplies) evidence.append(";removed=").append(removed).append(";retained=").append(input - removed).append(";output=").append(output);
+            else evidence.append(";removed=unconfirmed;retained=unconfirmed;output=unconfirmed;planned_removed=").append(removed).append(";planned_output=").append(output);
+            evidence.append(";empty_guard_count=").append(emptyGuards).append(";empty_guard_retained=").append(emptyGuardRetained)
+                    .append(";classified=").append(classified).append(";classification_failures=").append(classificationFailures)
+                    .append(";matched_basis=").append(classificationFailures == 0 ? "complete_classification" : "observed_before_fail_open")
+                    .append(";lists=").append(lists).append(";count_scope=response_list_entries_not_unique_items;counts_basis=classification_snapshot;rule_matches={");
+            boolean first = true;
+            for (java.util.Map.Entry<FeedFilterPolicy.Reason, Integer> rule : rules.entrySet()) {
+                if (!first) evidence.append(','); first = false;
+                evidence.append(rule.getKey().name().toLowerCase(java.util.Locale.ROOT)).append('=').append(rule.getValue());
+            }
+            return evidence.append("};rule_count_basis=first_matching_rule_per_entry").toString();
         }
     }
 

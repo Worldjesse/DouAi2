@@ -11,6 +11,7 @@ import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.SubmissionLedger;
+import com.douai.module.diagnostics.DebugLog;
 import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
@@ -107,6 +108,45 @@ public final class AutoCommentHookTest {
         assertEquals("waiting", ring.getPhase());
         assertFalse(ring.getContentDescription().toString().contains("固定评论"));
         assertFalse(ring.getContentDescription().toString().contains("作品描述"));
+    }
+
+    @Test public void queuedCommentKeepsItsActualOptionsRevisionWhenTheProcessRevisionAlreadyMovedOn() throws Throwable {
+        com.douai.module.diagnostics.DouAiLog.awaitIdle(3000);
+        boolean previousDebug = DebugLog.isEnabled();
+        DebugLog.setEnabled(true);
+        List<String> records = Collections.synchronizedList(new ArrayList<>());
+        com.douai.module.diagnostics.DouAiLog.setFrameworkSink((priority, json) -> records.add(json));
+        try {
+            LocalOptions captured = options(false);
+            setOptions(captured);
+            com.douai.module.diagnostics.DouAiLog.configRevision("newer-process-snapshot");
+            selectWork();
+            com.douai.module.diagnostics.DouAiLog.configRevision("another-process-publication");
+            advanceSeconds(3);
+            advanceSeconds(8);
+            assertEquals(1, Request.attempts);
+            assertEquals("固定评论", Request.models.get(0).a);
+            assertEquals("sent", entry("work").status);
+            assertTrue(com.douai.module.diagnostics.DouAiLog.awaitIdle(3000));
+            String started = records.stream().filter(line -> line.contains("\"feature_id\":\"auto_comment\"")
+                    && line.contains("\"event\":\"operation_started\"")).findFirst().orElseThrow();
+            JSONObject root = new JSONObject(started);
+            String traceId = root.getString("trace_id");
+            assertEquals(captured.diagnosticRevision(), root.getString("config_revision"));
+            assertEquals("newer-process-snapshot", root.getString("process_config_revision"));
+            int traced = 0;
+            for (String line : records) {
+                JSONObject event = new JSONObject(line);
+                if (!traceId.equals(event.optString("trace_id"))) continue;
+                traced++;
+                assertEquals(line, captured.diagnosticRevision(), event.getString("config_revision"));
+            }
+            assertTrue("The fixture must exercise generation and the owned host callback", traced > 4);
+        } finally {
+            com.douai.module.diagnostics.DouAiLog.awaitIdle(3000);
+            com.douai.module.diagnostics.DouAiLog.setFrameworkSink(null);
+            DebugLog.setEnabled(previousDebug);
+        }
     }
 
     @Test public void openingRingBeforeGenerationHoldsPublicationUntilManualConfirmation() throws Throwable {

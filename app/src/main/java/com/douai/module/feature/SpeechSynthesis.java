@@ -7,6 +7,7 @@ import android.os.Looper;
 
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.SpeechSettings;
+import com.douai.module.diagnostics.DouAiLog;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -39,10 +40,12 @@ public final class SpeechSynthesis implements AutoCloseable {
     private LocalSpeechSynthesis.Result pendingResult;
     private String pendingFailure;
     private boolean callbackDelivered;
+    private final DouAiLog.Operation operation;
 
     private SpeechSynthesis(BiConsumer<LocalSpeechSynthesis.Result, String> callback) {
         if (callback == null) throw new IllegalArgumentException("Speech callback is missing");
         this.callback = callback;
+        operation = DouAiLog.begin("speech_synthesis", "prepare_audio");
     }
 
     public static SpeechSynthesis synthesize(Context context, String text, LocalOptions options,
@@ -53,8 +56,10 @@ public final class SpeechSynthesis implements AutoCloseable {
             return request;
         }
         SpeechSettings settings = new SpeechSettings(options);
+        request.operation.stage("provider_selected", "provider=" + (settings.minimax ? "minimax" : settings.thirdParty ? "third_party" : "local")
+                + "; text_chars=" + (text == null ? 0 : text.length()));
         if (!settings.thirdParty && !settings.minimax) {
-            request.local = LocalSpeechSynthesis.synthesize(context, text, options, request::complete);
+            request.operation.wrap(() -> request.local = LocalSpeechSynthesis.synthesize(context, text, options, request::complete)).run();
             return request;
         }
         if (context == null || text == null || text.trim().isEmpty()) {
@@ -63,10 +68,11 @@ public final class SpeechSynthesis implements AutoCloseable {
         }
         Context application = context.getApplicationContext();
         Context use = application == null ? context : application;
-        request.main.postDelayed(() -> request.complete(null,
-                settings.minimax ? "MiniMax 语音生成超时" : "第三方语音生成超时"), 60_000);
+        request.main.postDelayed(request.operation.wrap(() -> request.complete(null,
+                settings.minimax ? "MiniMax 语音生成超时" : "第三方语音生成超时")), 60_000);
         try {
-            request.worker = WORKERS.submit(() -> request.generate(use, text, settings));
+            request.operation.stage("queued", "business_result=pending; timeout_ms=60000");
+            request.worker = WORKERS.submit(request.operation.wrap(() -> request.generate(use, text, settings)));
             if (request.finished.get()) request.worker.cancel(true);
         } catch (RejectedExecutionException ignored) {
             request.complete(null, "语音生成任务过多，请稍后重试");
@@ -76,6 +82,7 @@ public final class SpeechSynthesis implements AutoCloseable {
 
     private void generate(Context context, String text, SpeechSettings settings) {
         try {
+            operation.stage("provider_request", "provider=" + (settings.minimax ? "minimax" : "third_party"));
             SpeechHttpClient.Resource response;
             if (settings.minimax) {
                 response = MiniMaxSpeechClient.synthesize(http, text, settings);
@@ -83,6 +90,7 @@ public final class SpeechSynthesis implements AutoCloseable {
                 String url = SpeechHttpClient.resolveTemplate(settings.getTemplate, text, settings.selectedVoice);
                 response = http.fetchResource(url, settings.headers);
                 if (!response.isAudio()) {
+                    operation.stage("audio_url_resolved", "response=non_audio; requires_audio_fetch=true");
                     String audioUrl = SpeechHttpClient.audioUrl(response.text(), settings.audioField);
                     // API authentication belongs to its origin, not an unrelated media/CDN host.
                     response = http.fetchResource(audioUrl,
@@ -91,6 +99,7 @@ public final class SpeechSynthesis implements AutoCloseable {
             }
             http.ensureActive();
             if (!response.isAudio()) throw new IllegalArgumentException("第三方语音链接未返回音频文件");
+            operation.stage("audio_received", "bytes=" + response.bytes.length + "; business_result=validating");
             File cache = new File(context.getCacheDir(), "douai-tts");
             if (!cache.isDirectory() && !cache.mkdirs()) throw new IllegalArgumentException("无法创建语音缓存");
             cleanOldFiles(cache);
@@ -99,11 +108,14 @@ public final class SpeechSynthesis implements AutoCloseable {
             try (FileOutputStream stream = new FileOutputStream(output)) { stream.write(response.bytes); }
             http.ensureActive();
             long duration = audioDuration(output);
+            operation.stage("audio_validated", "bytes=" + output.length() + "; duration_ms=" + duration
+                    + "; output_ref=" + DouAiLog.reference(output.getAbsolutePath()) + "; has_audio=true; has_video=false");
             http.ensureActive();
             complete(new LocalSpeechSynthesis.Result(output, duration), null);
         } catch (CancellationException ignored) {
             complete(null, "语音生成已停止");
         } catch (Exception failure) {
+            operation.error("provider_or_audio_validation", failure);
             String message = failure.getMessage();
             // Parsing/IO failures must not leak text, credentials or provider response content.
             if (message == null || !(message.startsWith("第三方语音") || message.startsWith("MiniMax 语音") || message.startsWith("所选语音字段")
@@ -158,6 +170,7 @@ public final class SpeechSynthesis implements AutoCloseable {
         }
         synchronized (completionLock) {
             if (!finished.compareAndSet(false, true)) {
+                operation.stage("duplicate_or_late_completion", "ignored=true; audio_returned=" + (result != null));
                 if (result != null && result != pendingResult) delete(result.file);
                 return;
             }
@@ -166,7 +179,8 @@ public final class SpeechSynthesis implements AutoCloseable {
             if (result != null) output = null;
         }
         stopRequests();
-        main.post(this::deliver);
+        operation.stage("callback_pending", "audio_ready=" + (result != null));
+        main.post(operation.wrap(this::deliver));
     }
 
     private void stopRequests() {
@@ -190,6 +204,11 @@ public final class SpeechSynthesis implements AutoCloseable {
         local = null;
         if (engine != null) try { engine.close(); } catch (Exception ignored) { }
         deleteFailedOutput();
+        operation.finish(result != null ? DouAiLog.Outcome.SUCCESS : outcome(failure),
+                result != null ? "validated_audio_ready" : reason(failure),
+                result == null ? "audio_ready=false; sent=false" : "audio_ready=true; duration_ms=" + result.durationMillis
+                        + "; bytes=" + result.file.length() + "; output_ref=" + DouAiLog.reference(result.file.getAbsolutePath())
+                        + "; evidence=local_audio_metadata; sent=false");
         callback.accept(result, failure);
     }
 
@@ -210,6 +229,22 @@ public final class SpeechSynthesis implements AutoCloseable {
         }
         if (abandoned != null) delete(abandoned.file);
         stopRequests();
-        main.post(this::deliver);
+        operation.stage("cancel_requested", "origin=owner; pending_audio_deleted=" + (abandoned != null));
+        main.post(operation.wrap(this::deliver));
+    }
+
+    static DouAiLog.Outcome outcome(String failure) {
+        return failure != null && failure.contains("超时") ? DouAiLog.Outcome.TIMED_OUT
+                : failure != null && failure.contains("已停止") ? DouAiLog.Outcome.CANCELLED : DouAiLog.Outcome.FAILED;
+    }
+    static String reason(String failure) {
+        if (failure == null) return "missing_audio_result";
+        if (failure.contains("超时")) return "timeout";
+        if (failure.contains("已停止")) return "owner_cancelled";
+        if (failure.contains("任务过多")) return "queue_full";
+        if (failure.contains("设置不可用")) return "configuration_unavailable";
+        if (failure.contains("内容为空")) return "invalid_text";
+        if (failure.contains("文件无效")) return "invalid_audio";
+        return "provider_or_audio_failure";
     }
 }

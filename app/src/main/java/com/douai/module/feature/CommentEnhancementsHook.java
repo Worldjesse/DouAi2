@@ -1,6 +1,7 @@
 package com.douai.module.feature;
 
 import com.douai.module.config.LocalOptions;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostScanReport;
 
 import org.json.JSONArray;
@@ -75,12 +76,30 @@ public final class CommentEnhancementsHook implements AutoCloseable {
         try {
             replacement = prepare(chain.getThisObject(), arguments, current);
         } catch (ReflectiveOperationException | RuntimeException | JSONException failure) {
+            DouAiLog.failure("comment_enhancements", "request_fields", failure);
             safeLog("Comment request fields unchanged: " + failure.getMessage());
             replacement = null;
         }
-        if (replacement == null) return chain.proceed();
+        if (replacement == null) {
+            DouAiLog.event("comment_enhancements", "decision", "no_applicable_field_change",
+                    "suffix_enabled=" + current.enabled("comment_append_suffix")
+                            + ";color_enabled=" + current.enabled("colored_comment") + ";original_request_retained=true");
+            return chain.proceed();
+        }
+        DouAiLog.Operation operation = DouAiLog.begin("comment_enhancements", "native_comment_request");
+        operation.stage("request_fields_transformed", "argument_count=" + replacement.length
+                + ";suffix_enabled=" + current.enabled("comment_append_suffix") + ";color_enabled=" + current.enabled("colored_comment"));
         arguments[1] = replacement;
-        Object result = chain.proceed(arguments);
+        Object result;
+        try {
+            result = chain.proceed(arguments);
+            operation.finish(DouAiLog.Outcome.UNCONFIRMED, "request_transformed_publish_unobserved",
+                    "native_request_returned=true;publish_callback_observed=false");
+        } catch (Throwable failure) {
+            operation.error("forward_request", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "native_request_threw", "publish_result=unknown");
+            throw failure;
+        }
         if (logged++ < 5) safeLog("Applied configured fields to a native comment publish request");
         return result;
     }

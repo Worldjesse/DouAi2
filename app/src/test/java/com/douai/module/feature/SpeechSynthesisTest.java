@@ -7,6 +7,7 @@ import android.speech.tts.TextToSpeech;
 
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.SpeechSettings;
+import com.douai.module.diagnostics.DebugLog;
 
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -53,6 +54,44 @@ public final class SpeechSynthesisTest {
     }
 
     @Before public void resetMetadata() { AudioMetadata.duration = "1000"; AudioMetadata.hasVideo = "no"; }
+
+    @Test public void http200AudioBytesRequireMetadataEvidenceBeforeBusinessSuccess() throws Exception {
+        java.util.List<String> records = new java.util.concurrent.CopyOnWriteArrayList<>();
+        // A prior request's identical HTTP status must not hide this operation's evidence.
+        com.douai.module.diagnostics.DouAiLog.event("speech_transport", "http_response", "transport_only", "status=200; result=validating");
+        java.util.concurrent.CountDownLatch priorDrained = new java.util.concurrent.CountDownLatch(1);
+        com.douai.module.diagnostics.DouAiLog.flush(priorDrained::countDown);
+        assertTrue(priorDrained.await(5, TimeUnit.SECONDS));
+        boolean previousDebug = DebugLog.isEnabled(); DebugLog.setEnabled(true);
+        com.douai.module.diagnostics.DouAiLog.setFrameworkSink((level, json) -> records.add(json));
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(wav()); server.start(); AudioMetadata.hasVideo = "yes";
+            AtomicInteger calls = new AtomicInteger();
+            SpeechSynthesis.synthesize(context(), "private-text", settings(server.url("/tts") + "?apikey=private-key"),
+                    (audio, error) -> { assertNull(audio); calls.incrementAndGet(); });
+            await(calls);
+            java.util.concurrent.CountDownLatch drained = new java.util.concurrent.CountDownLatch(1);
+            com.douai.module.diagnostics.DouAiLog.flush(drained::countDown);
+            assertTrue(drained.await(5, TimeUnit.SECONDS));
+            org.json.JSONObject terminal = null;
+            for (String line : records) {
+                org.json.JSONObject event = new org.json.JSONObject(line);
+                if ("speech_synthesis".equals(event.optString("feature_id")) && "failed".equals(event.optString("outcome"))) terminal = event;
+                assertFalse("invalid audio cannot be a synthesis success", "speech_synthesis".equals(event.optString("feature_id"))
+                        && "success".equals(event.optString("outcome")));
+            }
+            assertNotNull(terminal); assertEquals("invalid_audio", terminal.getString("reason_code"));
+            String trace = terminal.getString("trace_id");
+            assertTrue(records.stream().anyMatch(line -> line.contains(trace) && line.contains("http_response") && line.contains("200")));
+            String text = String.join("\n", records);
+            assertFalse(text.contains("private-text")); assertFalse(text.contains("private-key"));
+            assertEquals(0, cachedAudioCount());
+        } finally {
+            com.douai.module.diagnostics.DouAiLog.awaitIdle(5000);
+            com.douai.module.diagnostics.DouAiLog.setFrameworkSink(null);
+            DebugLog.setEnabled(previousDebug);
+        }
+    }
 
     @Test public void directBinarySpeechReturnsAnOwnedValidatedFileExactlyOnce() throws Exception {
         try (MockWebServer server = new MockWebServer()) {

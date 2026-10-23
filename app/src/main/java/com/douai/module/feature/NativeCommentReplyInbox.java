@@ -1,5 +1,7 @@
 package com.douai.module.feature;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import com.douai.module.scan.HostScanReport;
 import io.github.libxposed.api.XposedInterface;
 
@@ -246,6 +248,7 @@ final class NativeCommentReplyInbox implements AutoCloseable {
             if (!page.more || seconds(page.min) > 0 && seconds(page.min) < newest) {
                 verifyAccount(account, valid);
                 baselineIds = new ArrayList<>(ids);
+                DouAiLog.event("comment_reply_inbox", "baseline_ready", "host_pages_evaluated", "pages=" + (index + 1) + ";notices=" + progress.totalItems + ";existing_comments=" + ids.size());
                 safeLog("Comment reply inbox baseline ready: pages=" + (index + 1)
                         + "; notices=" + progress.totalItems + "; existing_comments=" + ids.size() + models.diagnostic());
                 return newest > 0 ? newest : System.currentTimeMillis() / 1000;
@@ -320,6 +323,7 @@ final class NativeCommentReplyInbox implements AutoCloseable {
                 long through = newestNotice;
                 for (NativeCommentThreadLookup.Hint hint : hints.values()) through = Math.min(through, Math.max(0, hint.createdAt - 1));
                 scannedThrough = through;
+                DouAiLog.event("comment_reply_inbox", "scan_ready", "host_pages_evaluated", "pages=" + (index + 1) + ";notices=" + progress.totalItems + ";replies=" + ordered.size() + ";thread_recovered=" + threadRecovered + ";thread_pending=" + hints.size() + ";watermark_held=" + (through < newestNotice));
                 safeLog("Comment reply inbox scan complete: pages=" + (index + 1)
                         + "; notices=" + progress.totalItems + "; replies=" + ordered.size()
                         + "; before_start=" + beforeStart + "; notice_before_start=" + noticeBeforeStart
@@ -344,6 +348,7 @@ final class NativeCommentReplyInbox implements AutoCloseable {
         }
         verifyAccount(account, valid);
         int group = (Integer) value;
+        DouAiLog.event("comment_reply_inbox", "route_resolved", "host_received_comments", "group=" + group);
         safeLog("Comment reply inbox route: source=host_received_comments; group=" + group);
         return group;
     }
@@ -728,7 +733,7 @@ final class NativeCommentReplyInbox implements AutoCloseable {
         }
     }
 
-    private CommentReplyEvent skip(String nid, String reason) { safeLog("Comment reply notice skipped; nid=" + nid + "; " + reason); return null; }
+    private CommentReplyEvent skip(String nid, String reason) { DouAiLog.event("comment_reply_inbox", "notice_skipped", reason.replace(' ', '_'), "notice_ref=" + DouAiLog.reference(nid)); safeLog("Comment reply notice skipped; nid=" + nid + "; " + reason); return null; }
     private void safeLog(String message) { try { log.accept(message); } catch (RuntimeException ignored) { } }
     private static String string(Object value) { return value instanceof String ? (String) value : ""; }
     private static String id(Object value) { String text = string(value); return "0".equals(text) ? "" : text; }

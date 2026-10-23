@@ -1,5 +1,7 @@
 package com.douai.module.feature;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import java.util.ArrayDeque;
 import java.util.LinkedHashSet;
 import java.util.function.Consumer;
@@ -43,29 +45,31 @@ final class AutoCommentQueue<T> implements AutoCloseable {
     }
 
     void offer(String identity, T target, long delayMillis) {
-        scheduler.post(() -> {
-            if (closed || seen.contains(identity)) return;
+        DouAiLog.Operation trace = AutomationTrace.capture("auto_comment", "queue_offer");
+        scheduler.post(trace.wrap(() -> {
+            if (closed || seen.contains(identity)) { trace.finish(closed ? DouAiLog.Outcome.CANCELLED : DouAiLog.Outcome.SKIPPED, closed ? "queue_closed" : "duplicate", "queue_size=" + jobs.size()); return; }
             if (jobs.size() >= MAX_PENDING) { observer.finished(target, "failed", 0); return; }
             seen.add(identity);
             while (seen.size() > 256) seen.remove(seen.iterator().next());
-            jobs.add(new Job<>(target, Math.max(0, delayMillis)));
+            jobs.add(new Job<>(target, Math.max(0, delayMillis), trace));
             if (jobs.size() == 1) schedule(jobs.peek(), jobs.peek().delay);
             else notifyState();
-        });
+        }));
     }
 
     private void schedule(Job<T> job, long delay) {
         long expected = epoch;
         job.phase = job.attempts == 0 ? "waiting" : "retrying";
+        job.trace.stage(job.phase, "delay_ms=" + delay + ";queue_size=" + jobs.size());
         notifyState();
-        scheduler.later(() -> {
+        scheduler.later(job.trace.wrap(() -> {
             if (closed || epoch != expected || jobs.peek() != job) return;
             int attempt = ++job.attempts;
             job.phase = "running";
             notifyState();
             try {
-                processor.run(job.target, attempt, result -> scheduler.post(() -> {
-                    if (closed || epoch != expected || jobs.peek() != job || job.attempts != attempt || job.completedAttempt == attempt) return;
+                processor.run(job.target, attempt, result -> scheduler.post(job.trace.wrap(() -> {
+                    if (closed || epoch != expected || jobs.peek() != job || job.attempts != attempt || job.completedAttempt == attempt) { job.trace.stage("callback_ignored", "attempt=" + attempt + ";current_attempt=" + job.attempts + ";completed_attempt=" + job.completedAttempt + ";epoch_current=" + (epoch == expected)); return; }
                     job.completedAttempt = attempt;
                     if ("failed".equals(result) && retryPolicy.retry(job.target, attempt)) {
                         schedule(job, retryDelay(attempt)); return;
@@ -75,11 +79,12 @@ final class AutoCommentQueue<T> implements AutoCloseable {
                     observer.finished(job.target, status, attempt);
                     if (!jobs.isEmpty()) schedule(jobs.peek(), jobs.peek().delay);
                     else notifyState();
-                }));
+                })));
             } catch (RuntimeException failure) {
-                scheduler.post(() -> failSynchronously(job, expected, attempt));
+                job.trace.error("queue_processor", failure);
+                scheduler.post(job.trace.wrap(() -> failSynchronously(job, expected, attempt)));
             }
-        }, delay);
+        }), delay);
     }
 
     private void failSynchronously(Job<T> job, long expected, int attempt) {
@@ -146,10 +151,11 @@ final class AutoCommentQueue<T> implements AutoCloseable {
 
     private static final class Job<T> {
         final T target;
+        final DouAiLog.Operation trace;
         final long delay;
         int attempts;
         int completedAttempt;
         String phase = "waiting";
-        Job(T target, long delay) { this.target = target; this.delay = delay; }
+        Job(T target, long delay, DouAiLog.Operation trace) { this.target = target; this.delay = delay; this.trace = trace; }
     }
 }

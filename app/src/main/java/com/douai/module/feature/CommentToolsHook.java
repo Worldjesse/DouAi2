@@ -13,6 +13,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.douai.module.config.ExtendedSettings;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
@@ -119,7 +120,10 @@ public final class CommentToolsHook implements AutoCloseable {
     private Object afterBind(XposedInterface.Chain chain) throws Throwable {
         Object result = chain.proceed();
         ExtendedSettings current = settings;
-        if (!current.copyCommentText && !current.commentMediaTools && !current.copySourceData) return result;
+        if (!current.copyCommentText && !current.commentMediaTools && !current.copySourceData) {
+            DouAiLog.event("comment_tools", "decision", "disabled", "tools_attached=false");
+            return result;
+        }
         Object presenter = chain.getThisObject();
         Object qModel = chain.getArg(0);
         try {
@@ -151,6 +155,7 @@ public final class CommentToolsHook implements AutoCloseable {
                 contextsByRow.put(row, new RowContext(comment, nativeImageSaveAction));
             }
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            DouAiLog.failure("comment_tools", "attach_row_tools", failure);
             safeLog("Could not attach comment tools: " + failure.getMessage());
         }
         return result;
@@ -168,7 +173,10 @@ public final class CommentToolsHook implements AutoCloseable {
         if (current.commentMediaTools && nativeImageSaveAction != null && hasCommentImages(comment)) {
             actions.add(new Action("使用抖音保存评论图片", nativeImageSaveAction, true));
         }
-        if (actions.isEmpty()) return false;
+        if (actions.isEmpty()) {
+            DouAiLog.event("comment_tools", "decision", "no_applicable_actions", "menu_shown=false");
+            return false;
+        }
 
         String[] labels = new String[actions.size()];
         for (int index = 0; index < actions.size(); index++) labels[index] = actions.get(index).title;
@@ -179,14 +187,18 @@ public final class CommentToolsHook implements AutoCloseable {
                     .setNegativeButton("取消", null)
                     .show();
             ModuleTheme.bind(dialog.getWindow().getDecorView());
+            DouAiLog.event("comment_tools", "menu", "menu_show_returned", "action_count=" + actions.size() + ";action_selected=false");
             return true;
         } catch (Throwable failure) {
+            DouAiLog.failure("comment_tools", "show_menu", failure);
             safeLog("Could not show comment tools: " + failure.getMessage());
             return false;
         }
     }
 
     private void runAction(Context context, Action action) {
+        DouAiLog.event("comment_tools", "action", "user_selected", "kind=" + (action.nativeImageSaveAction != null
+                ? "native_image_save" : action.viewData ? "view_data" : action.text != null ? "copy_text" : "copy_source"));
         if (action.nativeImageSaveAction != null) {
             invokeNativeImageSaveAction(context, action.nativeImageSaveAction);
         } else if (action.viewData) {
@@ -417,17 +429,23 @@ public final class CommentToolsHook implements AutoCloseable {
     }
 
     private void invokeNativeImageSaveAction(Context context, Object nativeAction) {
+        DouAiLog.Operation operation = DouAiLog.begin("comment_tools", "save_comment_image");
         try {
             Method click = nativeAction.getClass().getMethod("LJJI", int.class);
             if (click.getReturnType() != void.class) {
                 throw new NoSuchMethodException("Unexpected native image-save action signature");
             }
             click.invoke(nativeAction, 0);
+            operation.finish(DouAiLog.Outcome.UNCONFIRMED, "native_save_dispatched", "native_call_returned=true;file_readback=false");
         } catch (InvocationTargetException failure) {
             Throwable cause = failure.getCause() == null ? failure : failure.getCause();
+            operation.error("native_image_save", cause);
+            operation.finish(DouAiLog.Outcome.FAILED, "native_save_threw", "file_result=unknown");
             safeLog("Native comment image save failed: " + cause.getMessage());
             showToast(context, "抖音原生图片保存入口调用失败");
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            operation.error("native_image_save", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "native_save_unavailable", "file_result=unknown");
             safeLog("Native comment image save is unavailable: " + failure.getMessage());
             showToast(context, "抖音原生图片保存入口不可用");
         }
@@ -530,12 +548,17 @@ public final class CommentToolsHook implements AutoCloseable {
     }
 
     private void copyText(Context context, String value, String label) {
+        DouAiLog.Operation operation = DouAiLog.begin("comment_tools", "copy");
         try {
             ClipboardManager clipboard = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
             if (clipboard == null) throw new IllegalStateException("系统剪贴板不可用");
             clipboard.setPrimaryClip(ClipData.newPlainText(label, value));
+            operation.finish(DouAiLog.Outcome.UNCONFIRMED, "clipboard_write_returned", "chars=" + value.length()
+                    + ";content_ref=" + DouAiLog.reference(value) + ";clipboard_readback=false");
             showToast(context, "已复制" + label);
         } catch (Throwable failure) {
+            operation.error("clipboard_write", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "clipboard_unavailable", "clipboard_readback=false");
             safeLog("Could not copy comment: " + failure.getClass().getSimpleName());
             showToast(context, "复制失败");
         }

@@ -1,6 +1,7 @@
 package com.douai.module.feature;
 
 import com.douai.module.config.ThirdPartyDownloadSettings;
+import com.douai.module.diagnostics.DouAiLog;
 
 import org.json.JSONObject;
 
@@ -83,6 +84,8 @@ public final class ThirdPartyGetClient {
                 started = true;
             }
             try {
+                if (transfer != null) transfer.evidence("parser_request", "template_ref=" + DouAiLog.reference(template)
+                        + "; signature=" + signatureMode + "; business_result=pending");
                 String response = performRequest(template, shareText, appId, appSecret, headersJson,
                         signatureMode, signatureHeader, legacyPrefix, this);
                 ensureActive();
@@ -163,6 +166,7 @@ public final class ThirdPartyGetClient {
             if (signature != null) connection.setRequestProperty(signatureHeader, signature);
             active.ensureActive();
             int status = connection.getResponseCode();
+            if (active.transfer != null) active.transfer.evidence("parser_http_response", "status=" + status + "; result=transport_only");
             active.ensureActive();
             if (status >= 300 && status < 400) {
                 throw new IllegalStateException("Third-party GET redirects are disabled; use the final API URL");
@@ -189,11 +193,17 @@ public final class ThirdPartyGetClient {
             try {
                 String text = charset.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                         .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString();
+                if (active.transfer != null) active.transfer.evidence("parser_text_decoded", "bytes=" + bytes.length
+                        + "; chars=" + text.length() + "; plan_validated=false; saved=false");
                 return text.startsWith("\uFEFF") ? text.substring(1) : text;
             } catch (CharacterCodingException ignored) {
                 throw new IllegalStateException("Third-party GET response has invalid text encoding");
             }
         } catch (SocketTimeoutException ignored) {
+            if (active.transfer != null) {
+                active.transfer.transportTimedOut = true;
+                active.transfer.evidence("parser_timeout", "origin=transport; response_incomplete=true");
+            }
             active.ensureActive();
             throw new IOException("Third-party GET request timed out");
         } catch (IOException ignored) {

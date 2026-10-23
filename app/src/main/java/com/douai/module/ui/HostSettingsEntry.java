@@ -1,5 +1,7 @@
 package com.douai.module.ui;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.app.Activity;
 import android.view.Gravity;
 import android.view.View;
@@ -20,7 +22,7 @@ final class HostSettingsEntry {
         View content = activity.findViewById(android.R.id.content);
         List<ViewGroup> scrolls = new ArrayList<>();
         findScrolls(content, scrollClass, scrolls);
-        if (scrolls.size() != 1) return null;
+        if (scrolls.size() != 1) { DouAiLog.event("settings_entry", "target_lookup", "ambiguous_or_missing", "candidate_count=" + scrolls.size()); return null; }
         ViewGroup scroll = scrolls.get(0);
         if (scroll.getChildCount() != 1 || !(scroll.getChildAt(0) instanceof LinearLayout)) return null;
         LinearLayout container = (LinearLayout) scroll.getChildAt(0);
@@ -40,11 +42,16 @@ final class HostSettingsEntry {
         entry.setCompoundDrawablesRelativeWithIntrinsicBounds(android.R.drawable.ic_menu_preferences,
                 0, 0, 0);
         entry.setCompoundDrawablePadding(dp(activity, 12));
-        entry.setOnClickListener(ignored -> openSettings.run());
+        entry.setOnClickListener(ignored -> {
+            DouAiLog.Operation trace = DouAiLog.begin("settings_entry", "entry_click");
+            try { openSettings.run(); trace.finish(DouAiLog.Outcome.UNCONFIRMED, "open_requested", "settings_render_result=unobserved"); }
+            catch (RuntimeException failure) { trace.error("open_settings", failure); trace.finish(DouAiLog.Outcome.FAILED, "open_failed", ""); throw failure; }
+        });
         entry.setFocusable(true);
         container.addView(entry, Math.min(1, container.getChildCount()),
                 new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT));
+        DouAiLog.event("settings_entry", "view_attached", "parent_readback", "parent_matches=" + (entry.getParent() == container));
         return entry;
     }
 

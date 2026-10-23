@@ -1,5 +1,7 @@
 package com.douai.module.feature;
 
+import com.douai.module.diagnostics.DouAiLog;
+import com.douai.module.diagnostics.DebugLog;
 import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
@@ -77,6 +79,124 @@ public final class NativeCommentReplyPublisherTest {
         assertEquals(Collections.singletonList("sent"), outcomes);
         model.a = "已被更改";
         assertFalse(publisher.ownsPublish(model));
+    }
+
+    @Test public void duplicateAndExpiredCallbacksKeepVerifiedTraceWithoutChangingBusinessOutcomes() throws Throwable {
+        DouAiLog.awaitIdle(3000);
+        boolean previousDebug = DebugLog.isEnabled();
+        DebugLog.setEnabled(true);
+        List<String> records = Collections.synchronizedList(new ArrayList<>());
+        DouAiLog.setFrameworkSink((priority, json) -> records.add(json));
+        try {
+            DouAiLog.Operation first = DouAiLog.begin("auto_comment_reply", "callback_duplicate_fixture");
+            List<String> outcomes = new ArrayList<>();
+            first.wrap(() -> publisher.sendReply(event("incoming", "root"), "正文", () -> true,
+                    () -> true, () -> { }, outcomes::add)).run();
+            ShadowLooper.idleMainLooper();
+            complete(0, wireResponse(0));
+            first.finish(DouAiLog.Outcome.SUCCESS, "fixture_ack", "target_verified=true");
+            complete(0, wireResponse(0));
+            assertEquals(Collections.singletonList("sent"), outcomes);
+
+            DouAiLog.Operation second = DouAiLog.begin("auto_comment_reply", "callback_retention_fixture");
+            List<String> late = new ArrayList<>();
+            second.wrap(() -> publisher.sendReply(event("incoming-2", "root"), "正文", () -> true,
+                    () -> true, () -> { }, late::add)).run();
+            ShadowLooper.idleMainLooper();
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(120_001));
+            assertEquals(Collections.singletonList("submitted"), late);
+            second.finish(DouAiLog.Outcome.UNCONFIRMED, "fixture_timeout", "remote_outcome=unknown");
+            complete(1, wireResponse(1));
+            assertEquals(Collections.singletonList("submitted"), late);
+            assertTrue(DouAiLog.awaitIdle(3000));
+            assertTrue(records.toString(), records.stream().anyMatch(line -> line.contains(first.traceId())
+                    && line.contains("\"event\":\"callback_ignored\"") && line.contains("callback_already_processed")
+                    && line.contains("ownership_identity_match=true")));
+            assertTrue(records.toString(), records.stream().anyMatch(line -> line.contains(second.traceId())
+                    && line.contains("\"event\":\"callback_ignored\"") && line.contains("\"reason_code\":\"retention_expired\"")));
+        } finally { DouAiLog.awaitIdle(3000); DouAiLog.setFrameworkSink(null); DebugLog.setEnabled(previousDebug); }
+    }
+
+    @Test public void aQueuedCallbackAfterCloseHasKnownOwnershipWhileForeignCallbackStaysUnknown() throws Throwable {
+        DouAiLog.awaitIdle(3000);
+        boolean previousDebug = DebugLog.isEnabled();
+        DebugLog.setEnabled(true);
+        List<String> records = Collections.synchronizedList(new ArrayList<>());
+        DouAiLog.setFrameworkSink((priority, json) -> records.add(json));
+        try {
+            framework.invoke(Request.class.getMethod("success", Response.class), new Request(), response("work", "root", "incoming"));
+            ShadowLooper.idleMainLooper();
+            DouAiLog.Operation trace = DouAiLog.begin("auto_comment_reply", "callback_close_fixture");
+            List<String> outcomes = new ArrayList<>();
+            trace.wrap(() -> publisher.sendReply(event("incoming", "root"), "正文", () -> true,
+                    () -> true, () -> { }, outcomes::add)).run();
+            ShadowLooper.idleMainLooper();
+            framework.invoke(Request.class.getMethod("success", Response.class), Request.instances.get(0), wireResponse(0));
+            publisher.close();
+            ShadowLooper.idleMainLooper();
+            assertTrue(outcomes.isEmpty());
+            trace.finish(DouAiLog.Outcome.UNCONFIRMED, "fixture_closed", "remote_outcome=unknown");
+            assertTrue(DouAiLog.awaitIdle(3000));
+            assertTrue(records.toString(), records.stream().anyMatch(line -> line.contains("\"event\":\"callback_ignored\"")
+                    && line.contains("\"reason_code\":\"ownership_unknown\"") && line.contains("ownership_identity_match=false")));
+            assertTrue(records.toString(), records.stream().anyMatch(line -> line.contains(trace.traceId())
+                    && line.contains("\"event\":\"callback_ignored\"") && line.contains("\"reason_code\":\"publisher_closed\"")
+                    && line.contains("ownership_identity_match=true")));
+        } finally { DouAiLog.awaitIdle(3000); DouAiLog.setFrameworkSink(null); DebugLog.setEnabled(previousDebug); }
+    }
+
+    @Test public void retainedLateReceiptKeepsItsActualStatusAfterTheRootWasMarkedUnconfirmed() throws Throwable {
+        DouAiLog.awaitIdle(3000);
+        boolean previousDebug = DebugLog.isEnabled();
+        DebugLog.setEnabled(true);
+        List<String> records = Collections.synchronizedList(new ArrayList<>());
+        DouAiLog.setFrameworkSink((priority, json) -> records.add(json));
+        DouAiLog.Operation trace = DouAiLog.begin("auto_comment_reply", "retained_late_callback_fixture");
+        try {
+            List<String> outcomes = new ArrayList<>();
+            trace.wrap(() -> publisher.sendReply(event("incoming", "root"), "正文", () -> true,
+                    () -> true, () -> { }, outcomes::add)).run();
+            ShadowLooper.idleMainLooper();
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofMillis(30_001));
+            assertEquals(Collections.singletonList("submitted"), outcomes);
+            trace.finish(DouAiLog.Outcome.UNCONFIRMED, "fixture_ack_timeout", "remote_outcome=unknown");
+            complete(0, wireResponse(0));
+            assertEquals(Arrays.asList("submitted", "sent"), outcomes);
+            assertTrue(DouAiLog.awaitIdle(3000));
+            assertTrue(records.toString(), records.stream().anyMatch(line -> line.contains(trace.traceId())
+                    && line.contains("\"event\":\"late_native_ack\"") && line.contains("status=sent")
+                    && line.contains("timed_out=true")));
+            assertEquals(1, records.stream().filter(line -> line.contains(trace.traceId())
+                    && line.contains("\"event\":\"operation_finished\"")).count());
+        } finally {
+            trace.finish(DouAiLog.Outcome.UNCONFIRMED, "fixture_cleanup", "");
+            DouAiLog.awaitIdle(3000); DouAiLog.setFrameworkSink(null);
+            DebugLog.setEnabled(previousDebug);
+        }
+    }
+
+    @Test public void callbackEvidenceHistoryUsesIdentityAndExplicitlyForgetsExpiredAndEvictedOwners() {
+        java.util.concurrent.atomic.AtomicLong now = new java.util.concurrent.atomic.AtomicLong();
+        NativeCommentPublisher.CallbackHistory history = new NativeCommentPublisher.CallbackHistory(2, 100, now::get);
+        DouAiLog.Operation trace = DouAiLog.begin("auto_comment_reply", "callback_history_fixture");
+        Object first = new String("same-business-id"), differentIdentity = new String("same-business-id");
+        Object second = new Object(), third = new Object();
+        try {
+            history.remember(first, trace, "retention_expired", "unknown");
+            assertSame(trace, history.find(first).trace);
+            assertNull("Equal business data cannot prove request identity", history.find(differentIdentity));
+            history.remember(second, trace, "publisher_closed", "unknown");
+            history.remember(third, trace, "callback_already_processed", "sent");
+            assertEquals(2, history.size());
+            assertNull(history.find(first));
+            assertTrue(history.diagnostic().contains("history_evicted=1"));
+            assertEquals("publisher_closed", history.find(second).reason);
+            now.set(100);
+            assertNull(history.find(second));
+            assertNull(history.find(third));
+            assertEquals(0, history.size());
+            assertTrue(history.diagnostic().contains("history_expired=2"));
+        } finally { trace.finish(DouAiLog.Outcome.CANCELLED, "fixture_done", ""); }
     }
 
     @Test public void legacyTargetsWithoutARepeatedWorkIdStillFailBeforeNativeSubmission() {

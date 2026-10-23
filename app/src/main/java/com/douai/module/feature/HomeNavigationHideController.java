@@ -13,6 +13,7 @@ import android.view.ViewTreeObserver;
 import com.douai.module.config.ComponentHideSettings;
 import com.douai.module.config.ComponentHideSettings.Component;
 import com.douai.module.config.ExtendedSettings;
+import com.douai.module.diagnostics.DouAiLog;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
@@ -165,11 +166,15 @@ public final class HomeNavigationHideController implements Application.ActivityL
                 View view = root.get();
                 if (view == null || current == null || !current.configured || !current.enabled
                         || temporarilyShown) {
+                    DouAiLog.event("home_navigation", "decision", temporarilyShown ? "temporarily_shown" : "disabled_or_not_ready",
+                            "restore_requested=true");
                     restore();
                     return;
                 }
                 View top = uniqueTarget(view, TOP_CLASS);
                 View bottom = uniqueTarget(view, bottomClassName);
+                if (top == null || bottom == null) DouAiLog.event("home_navigation", "decision", "navigation_target_not_unique_or_missing",
+                        "top_unique=" + (top != null) + ";bottom_unique=" + (bottom != null));
                 for (View old : new ArrayList<>(originals.keySet())) {
                     if (old != top && old != bottom) {
                         Original original = originals.remove(old);
@@ -228,16 +233,27 @@ public final class HomeNavigationHideController implements Application.ActivityL
             float nextAlpha = value < 0 ? alpha : alpha * value / 255f;
             boolean nextClickable = value < 0 ? false : clickable;
             boolean nextFocusable = value < 0 ? false : focusable;
+            boolean changed = view.getVisibility() != nextVisibility || Math.abs(view.getAlpha() - nextAlpha) > 0.001f
+                    || view.isClickable() != nextClickable || view.isFocusable() != nextFocusable;
             if (view.getVisibility() != nextVisibility) view.setVisibility(nextVisibility);
             if (Math.abs(view.getAlpha() - nextAlpha) > 0.001f) view.setAlpha(nextAlpha);
             if (view.isClickable() != nextClickable) view.setClickable(nextClickable);
             if (view.isFocusable() != nextFocusable) view.setFocusable(nextFocusable);
+            if (changed) observeApplied(view, nextVisibility, nextAlpha);
         }
         void restore(View view) {
             if (view.getVisibility() != visibility) view.setVisibility(visibility);
             if (Math.abs(view.getAlpha() - alpha) > 0.001f) view.setAlpha(alpha);
             if (view.isClickable() != clickable) view.setClickable(clickable);
             if (view.isFocusable() != focusable) view.setFocusable(focusable);
+        }
+        private static void observeApplied(View view, int visibility, float alpha) {
+            try {
+                DouAiLog.event("home_navigation", "view_state", "navigation_properties_readback",
+                        "resource_id=" + view.getId() + ";expected_visibility=" + visibility
+                                + ";actual_visibility=" + view.getVisibility() + ";expected_alpha=" + alpha
+                                + ";actual_alpha=" + view.getAlpha() + ";result_scope=current_view");
+            } catch (Throwable unavailable) { }
         }
     }
 

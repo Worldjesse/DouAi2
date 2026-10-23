@@ -9,6 +9,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
 
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.LocalOptions;
@@ -192,6 +193,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
 
     private void selected(Object selected) {
         if (closed) return;
+        DouAiLog.Operation selectionTrace = null;
         try {
             boolean video = holderAweme.getDeclaringClass().isInstance(selected);
             Object work = (video ? holderAweme : imageAweme).invoke(selected);
@@ -202,29 +204,38 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
             Object view = (video ? holderRoot : imageRoot).get(selected);
             View selectedRoot = view instanceof View ? (View) view : null;
             root = new WeakReference<>(selectedRoot);
-            if (!enabled()) return;
+            if (!enabled()) { DouAiLog.event("auto_comment", "eligibility", "disabled_or_closed", "enabled=" + options.enabled("native_auto_comment")); return; }
             long account = ownAccount();
-            if (!NativeFollowLists.ensureAccount(Long.toString(account))) return;
+            if (!NativeFollowLists.ensureAccount(Long.toString(account))) { DouAiLog.event("auto_comment", "eligibility", "account_not_ready", "account_present=" + (account > 0)); return; }
             Activity activity = activity(selectedRoot);
-            if (aid.isEmpty() || account <= 0 || selectedRoot == null || !selectedRoot.isAttachedToWindow()
-                    || !selectedRoot.isShown() || activity == null || !dispatcher.isForeground(activity)
-                    || Boolean.TRUE.equals(HostTargets.invoke(work, "getIsAdAweme"))) {
+            String rejected = aid.isEmpty() ? "target_missing" : account <= 0 ? "account_unavailable"
+                    : selectedRoot == null ? "view_missing" : !selectedRoot.isAttachedToWindow() ? "view_detached"
+                    : !selectedRoot.isShown() ? "view_hidden" : activity == null ? "activity_missing"
+                    : !dispatcher.isForeground(activity) ? "activity_background"
+                    : Boolean.TRUE.equals(HostTargets.invoke(work, "getIsAdAweme")) ? "advertisement" : "";
+            if (!rejected.isEmpty()) {
+                DouAiLog.event("auto_comment", "eligibility", rejected, "target_present=" + !aid.isEmpty() + ";account_present=" + (account > 0) + ";view_present=" + (selectedRoot != null) + ";activity_present=" + (activity != null));
                 safeLog("Automatic comment selection skipped: target/account/foreground unavailable"); return;
             }
             String identity = "comment:" + account + ':' + aid;
             if (context.getSharedPreferences("douai_comment_state", Context.MODE_PRIVATE).contains(identity)
-                    || submissions.contains(SubmissionLedger.identity(identity))) return;
+                    || submissions.contains(SubmissionLedger.identity(identity))) { DouAiLog.event("auto_comment", "eligibility", "previous_submission", "target_ref=" + DouAiLog.reference(aid)); return; }
             Task task = new Task(generation.get(), account, aid, identity, work, workInput(work),
                     workAuthor(work), options);
+            selectionTrace = task.trace;
             String authorId = string(modelValue(author, "uid", "getUid"));
-            if (!rateLimiter.canSend(AutomationHistoryStore.COMMENT, account, authorId, options)) return;
+            if (!rateLimiter.canSend(AutomationHistoryStore.COMMENT, account, authorId, options)) { task.trace.finish(DouAiLog.Outcome.SKIPPED, "allowance_or_cooldown", "daily_limit=" + options.integer("comment_daily_limit", 0) + ";cooldown_minutes=" + options.integer("comment_user_cooldown_minutes", 0)); return; }
             if (!ContentScopePolicy.allows("comment", options, authorId, task.name,
                     workDescription(work), workTitle(work), AutomationScopePolicy.fromUser(author))) {
+                task.trace.finish(DouAiLog.Outcome.SKIPPED, "scope_rejected", "policy=ContentScopePolicy;target_ref=" + DouAiLog.reference(aid));
                 safeLog("Automatic comment skipped by author scope");
                 return;
             }
-            queue.offer(identity, task, Math.max(2, Math.min(3600, options.integer("comment_delay_seconds", 3))) * 1000L);
+            task.trace.stage("queue_admitted", "target_ref=" + DouAiLog.reference(aid) + ";delay_seconds=" + options.integer("comment_delay_seconds", 3));
+            task.trace.wrap(() -> queue.offer(identity, task, Math.max(2, Math.min(3600, options.integer("comment_delay_seconds", 3))) * 1000L)).run();
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            if (selectionTrace != null) { selectionTrace.error("selection", failure); selectionTrace.finish(DouAiLog.Outcome.FAILED, "selection_failed", "queue_admitted=false"); }
+            else DouAiLog.failure("auto_comment", "selection", failure);
             safeLog("Automatic comment selection unavailable: " + failure.getClass().getSimpleName());
         }
     }
@@ -233,15 +244,24 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         long account = ownAccount();
         boolean accountCurrent = NativeFollowLists.ensureAccount(Long.toString(account));
         Object author = modelValue(task.work, "author", "getAuthor");
-        return accountCurrent && enabled() && !task.cancelled && task.epoch == generation.get() && task.account == account
-                && task.aid.equals(HostTargets.invoke(task.work, "getAid"))
-                && rateLimiter.canSend(AutomationHistoryStore.COMMENT, task.account, task.authorId, options)
-                && ContentScopePolicy.allows("comment", options,
+        String rejected = !accountCurrent ? "relationship_account_changed" : !enabled() ? "disabled_or_closed"
+                : task.cancelled ? "task_cancelled" : task.epoch != generation.get() ? "configuration_changed"
+                : task.account != account ? "account_changed"
+                : !task.aid.equals(HostTargets.invoke(task.work, "getAid")) ? "work_changed"
+                : !rateLimiter.canSend(AutomationHistoryStore.COMMENT, task.account, task.authorId, options) ? "allowance_or_cooldown"
+                : !ContentScopePolicy.allows("comment", options,
                 string(modelValue(author, "uid", "getUid")), workAuthor(task.work),
-                workDescription(task.work), workTitle(task.work), AutomationScopePolicy.fromUser(author));
+                workDescription(task.work), workTitle(task.work), AutomationScopePolicy.fromUser(author)) ? "scope_rejected" : "";
+        if (!rejected.isEmpty()) {
+            task.lastGateReason = rejected;
+            task.trace.wrap(() -> DouAiLog.event("auto_comment", "eligibility_rejected", rejected, "attempt=" + task.attempt)).run();
+        }
+        return rejected.isEmpty();
     }
 
     private void attempt(Task task, int attempt, Consumer<String> result) {
+        task.trace.attempt(attempt);
+        task.trace.stage("eligibility_recheck", "epoch_current=" + (task.epoch == generation.get()) + ";cancelled=" + task.cancelled);
         if (!valid(task)) { result.accept("cancelled"); return; }
         if (task.queueMillis < 0) task.queueMillis = Math.max(0, android.os.SystemClock.elapsedRealtime() - task.createdElapsed);
         task.reason = AutomationHistoryStore.Reason.NONE;
@@ -268,6 +288,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         task.textFallback = true;
         task.fallbackAfterAttempt = attempts;
         if (task.audio != null) { task.audio.delete(); task.audio = null; }
+        task.trace.stage("voice_fallback", "voice_failures=" + task.voiceFailures + ";selected_fallback=text");
         safeLog("Automatic comment voice attempts exhausted; retrying the same comment as text");
         return true;
     }
@@ -294,10 +315,12 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                         AiModelSettings models = AiModelSettings.read(task.options);
                         task.model = models.selected().modelName;
                         task.stage = AutomationHistoryStore.Stage.MEDIA;
+                        task.trace.stage("media", "recognize_images=" + task.options.enabled(AutomationCommentMedia.RECOGNIZE_IMAGES, true) + ";recognize_video=" + task.options.enabled(AutomationCommentMedia.RECOGNIZE_VIDEO));
                         long mediaStarted = android.os.SystemClock.elapsedRealtime();
                         List<ChatImage> images = AutomationCommentMedia.load(context, task.work, task.options,
                                 operation.mediaCancellation);
                         task.mediaMillis = Math.max(0, android.os.SystemClock.elapsedRealtime() - mediaStarted);
+                        task.trace.stage("media_ready", "images=" + images.size() + ";duration_ms=" + task.mediaMillis);
                         if (!valid(task)) { result.accept("cancelled"); return; }
                         if (!hasWorkContent(task.work) && images.isEmpty()) {
                             safeLog("Automatic comment skipped: captured work has no usable content");
@@ -311,16 +334,19 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                         operation.check();
                         stage = "model_request";
                         task.stage = AutomationHistoryStore.Stage.GENERATION;
+                        task.trace.stage("model_request", "images=" + images.size() + ";model_ref=" + DouAiLog.reference(task.model));
                         String output = ai.reply(task.identity, task.input, images, models,
                                 CommentOutputPolicy.task(task.options.text("comment_prompt",
                                         "根据当前作品自然地写一条评论。")), false, "", imageCount -> {
                                     task.requestImageCount = imageCount;
                                     task.modelRequestSent = true;
+                                    task.trace.stage("model_request_sent", "images=" + imageCount + ";business_success=false");
                                     safeLog("Automatic comment model request sent; images=" + imageCount + "; work=" + task.aid);
                                     dispatcher.commentRequestSent(task.id, imageCount);
                                 });
                         operation.check();
                         stage = "model_output";
+                        task.trace.stage("model_output", "protocol_reply_received=true;business_success=false");
                         characters = output == null ? 0 : output.length();
                         String comment = CommentOutputPolicy.parse(output, task.options.enabled(LocalOptions.COMMENT_VOICE));
                         if (comment.isEmpty()) {
@@ -343,6 +369,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                     task.voiceAttempt = task.attempt;
                     dispatcher.commentStage(task.id, "generating");
                     stage = "speech";
+                    task.trace.stage("speech", "chars=" + text.length() + ";cached_audio=false");
                     task.stage = AutomationHistoryStore.Stage.SPEECH;
                     SpeechPreparation.Audio prepared = speechPreparer.prepare(context, text, task.options, Long.MAX_VALUE,
                             () -> !operation.cancelled && valid(task));
@@ -376,6 +403,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                 if ("; HTTP=401".equals(http) || "; HTTP=403".equals(http)) task.reason = AutomationHistoryStore.Reason.AI_AUTH_FAILED;
                 else if ("; HTTP=429".equals(http)) task.reason = AutomationHistoryStore.Reason.AI_RATE_LIMITED;
                 else if (!http.isEmpty()) task.reason = AutomationHistoryStore.Reason.AI_HTTP_ERROR;
+                task.trace.error(stage, failure);
                 String detail = failure instanceof SpeechPreparation.Failure
                         ? ((SpeechPreparation.Failure) failure).diagnostic() : "stage=" + stage;
                 safeLog("Automatic comment generation failed: " + failure.getClass().getSimpleName() + http
@@ -389,8 +417,9 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
     }
 
     private void prepare(Task task, Consumer<String> result) {
-        dispatcher.prepareComment(entry(task, "pending"), task.approved, () -> valid(task),
-                done -> { task.approved = true; publish(task, done); }, result);
+        task.trace.stage("preview", "approved=" + task.approved + ";delivery=" + deliveryMode(task));
+        task.trace.wrap(() -> dispatcher.prepareComment(entry(task, "pending"), task.approved, () -> valid(task),
+                done -> { task.approved = true; task.trace.wrap(() -> publish(task, done)).run(); }, task.trace.wrapConsumer(result))).run();
     }
 
     private void queueChanged(Task current, int count, int attempts, String phase) {
@@ -425,6 +454,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         if (voice(task)) task.voiceAttempt = task.attempt;
         dispatcher.commentStage(task.id, "publishing");
         task.stage = AutomationHistoryStore.Stage.SEND;
+        task.trace.stage("submission_barrier", "delivery=" + deliveryMode(task));
         AutomationRateLimiter.Reservation[] reservation = new AutomationRateLimiter.Reservation[1];
         if (voice(task) && task.audio == null || !voice(task) && (task.text == null
                 || task.text.trim().isEmpty() || !task.textFallback && task.text.length() > 1000)) {
@@ -441,10 +471,12 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
             task.reason = reserved == SubmissionLedger.ReserveResult.FULL ? AutomationHistoryStore.Reason.LEDGER_FULL
                     : reserved == SubmissionLedger.ReserveResult.DUPLICATE ? AutomationHistoryStore.Reason.DUPLICATE
                     : AutomationHistoryStore.Reason.PERSISTENCE_FAILED;
+            task.trace.stage("submission_rejected", "ledger_result=" + reserved.name());
             safeLog("Automatic comment reservation rejected: " + reserved.name());
             result.accept("cancelled");
             return;
         }
+        task.trace.stage("submission_reserved", "durable=true;invoked=false");
         task.uncertain = false;
         task.sendStarted = android.os.SystemClock.elapsedRealtime();
         long previousSendMillis = Math.max(0, task.sendMillis);
@@ -458,8 +490,11 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                 return false;
             }
             invoked.set(true);
+            task.nativeBoundaryPassed = true;
+            task.trace.stage("native_invoking", "reservation=true;business_success=false");
             return true;
         }, () -> {
+            task.trace.stage("native_accepted", "business_success=false;awaiting_callback=true");
             inFlight.put(task.identity, task.id);
             rememberSubmission(task);
             main.postDelayed(() -> inFlight.remove(task.identity, task.id), 120_000);
@@ -473,10 +508,14 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         }, status -> {
             try {
                 RESULTS_IO.execute(() -> {
+                    task.trace.stage("native_callback", "status=" + status + ";invoked=" + invoked.get() + ";uncertain=" + task.uncertain);
                     String outcome = status;
                     task.sendMillis = previousSendMillis + Math.max(0, android.os.SystemClock.elapsedRealtime() - task.sendStarted);
                     if ("cancelled".equals(status) && !invoked.get()) submissions.abandon(identity, attempt);
-                    else if ("sent".equals(status)) submissions.complete(identity, attempt, "sent", System.currentTimeMillis());
+                    else if ("sent".equals(status)) {
+                        boolean persisted = submissions.complete(identity, attempt, "sent", System.currentTimeMillis());
+                        task.trace.stage("submission_ledger_result", "native_ack=true;completion_persisted=" + persisted);
+                    }
                     else if ("failed".equals(status) && !task.uncertain
                             && submissions.complete(identity, attempt, "failed", System.currentTimeMillis())) {
                         // Only a definite failure with a durably released reservation can retry.
@@ -497,10 +536,11 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
 
     private void publishResult(Task task, String status, AutomationRateLimiter.Reservation reservation,
                                Consumer<String> result) {
+        task.trace.stage(task.terminal ? "late_publish_result" : "publish_result", "status=" + status + ";reason=" + task.reason);
         if ("submitted".equals(status)) {
             task.uncertain = true;
             task.reason = AutomationHistoryStore.Reason.SUBMITTED_UNCONFIRMED;
-        } else if ("failed".equals(status)) task.reason = AutomationHistoryStore.Reason.SEND_FAILED;
+        } else if ("failed".equals(status)) { task.reason = AutomationHistoryStore.Reason.SEND_FAILED; if (!task.uncertain) task.nativeBoundaryPassed = false; }
         else if ("sent".equals(status)) { task.reason = AutomationHistoryStore.Reason.NONE; task.stage = AutomationHistoryStore.Stage.COMPLETE; }
         if ("failed".equals(status) || "cancelled".equals(status)) rateLimiter.release(reservation);
         if ("failed".equals(status) && inFlight.remove(task.identity, task.id)) {
@@ -525,6 +565,8 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
             task.reason = AutomationHistoryStore.Reason.SUBMITTED_UNCONFIRMED;
         }
         if (task.audio != null && !"submitted".equals(status)) { task.audio.delete(); task.audio = null; }
+        String loggedStatus = "cancelled".equals(status) && task.nativeBoundaryPassed ? "submitted" : status;
+        AutomationTrace.outcome(task.trace, loggedStatus, task.reason.name().toLowerCase(java.util.Locale.ROOT), "business_status=" + status + ";native_boundary_passed=" + task.nativeBoundaryPassed + ";last_gate=" + task.lastGateReason + ";queue_terminal=true;attempts=" + attempts + ";native_evidence=" + ("sent".equals(status) ? "owned_native_success_callback;ledger_completion_attempted=true" : "submitted".equals(status) ? "no_definite_acknowledgment" : "local_state_or_definite_failure") + ";queue_ms=" + task.queueMillis + ";generation_ms=" + task.generationMillis + ";send_ms=" + task.sendMillis);
         safeLog("Automatic comment queue outcome=" + status + "; attempts=" + attempts);
         if ("sent".equals(status) || "submitted".equals(status)) rememberSubmission(task);
         AutomationHistoryStore.Entry entry = entry(task, status);
@@ -662,6 +704,8 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
     }
 
     private static final class Task {
+        final DouAiLog.Operation trace;
+        volatile String lastGateReason = "";
         final long epoch;
         final long account;
         final String aid;
@@ -689,6 +733,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         volatile int fallbackAfterAttempt;
         volatile boolean terminal;
         volatile boolean uncertain;
+        volatile boolean nativeBoundaryPassed;
         volatile boolean cancelled;
         volatile GenerationAttempt generationAttempt;
         volatile SpeechPreparation.Audio audio;
@@ -696,6 +741,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
             this.epoch = epoch; this.account = account; this.aid = aid; this.identity = identity;
             this.id = identity + ':' + java.util.UUID.randomUUID(); this.work = work; this.input = input;
             this.name = name; this.options = options;
+            trace = AutomationTrace.start("auto_comment", id, "feed_selection", options.diagnosticRevision());
             this.authorId = string(modelValue(modelValue(work, "author", "getAuthor"), "uid", "getUid"));
         }
     }
@@ -713,11 +759,13 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
             this.task = task;
             Consumer<String> complete = status -> {
                 if (delivered.compareAndSet(false, true)) result.accept(status);
+                else task.trace.stage("generation_callback_ignored", "duplicate_or_late=true;status=" + status);
             };
-            future = new FutureTask<>(() -> { generate(task, attempt, complete, this); return null; });
+            future = new FutureTask<>(() -> { task.trace.wrap(() -> generate(task, attempt, complete, this)).run(); return null; });
             timeout = () -> {
                 synchronized (this) {
                     if (future.isDone() || generated || cancelled) return;
+                    task.trace.stage("attempt_timeout", "stage=generation;attempt=" + attempt + ";remote_model_result_unknown=true");
                     safeLog("Automatic comment generation deadline reached; attempt=" + attempt + "/3");
                     task.reason = AutomationHistoryStore.Reason.GENERATION_TIMEOUT;
                     cancel();

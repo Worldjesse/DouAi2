@@ -15,6 +15,7 @@ import android.widget.Toast;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.ThirdPartyDownloadSettings;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
+import com.douai.module.diagnostics.DouAiLog;
 
 import java.lang.ref.WeakReference;
 import java.util.Collections;
@@ -39,6 +40,8 @@ public final class ThirdPartyDownload {
         catch (RuntimeException ignored) { return null; }
         LocalOptions current = options == null ? new LocalOptions(Collections.emptyMap()) : options;
         ThirdPartyDownloadSettings config = new ThirdPartyDownloadSettings(current);
+        DouAiLog.event("third_party_download", "provider_selected", "configuration", "mode=" + (config.direct ? "direct" : "selection")
+                + "; tree_selected=" + !current.downloadSaveTree().isEmpty());
         if (config.direct) { startDirect(source, aweme, current, log); return () -> { }; }
         Activity activity = activity(source);
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
@@ -52,7 +55,7 @@ public final class ThirdPartyDownload {
         }
         Session session = new Session(activity, config, link, current.downloadSaveTree(),
                 log == null ? ignored -> { } : log, active, AnalyticsActionCapture.capture(source, aweme));
-        onMain(session::begin);
+        onMain(session.operation.wrap(session::begin));
         return session;
     }
 
@@ -98,10 +101,12 @@ public final class ThirdPartyDownload {
         private final ThirdPartyDownloadSettings config;
         private final String link, tree;
         private final AnalyticsActionCapture analytics;
+        private final DouAiLog.Operation operation = DouAiLog.begin("third_party_selection", "user_download_picker");
         private Consumer<String> log;
         private BooleanSupplier valid;
         private volatile boolean closed;
         private boolean registered;
+        private boolean selectionFinished;
         private DownloadTasks.Task parsing;
         private AlertDialog loading;
         private ThirdPartyDownloadDialog selection;
@@ -113,6 +118,7 @@ public final class ThirdPartyDownload {
             application = activity.getApplication();
             this.config = config; this.link = link; this.tree = tree; this.log = log; this.valid = valid;
             this.analytics = analytics;
+            operation.stage("ready", "template_configured=" + !config.getTemplate.isEmpty() + "; tree_selected=" + !tree.isEmpty());
         }
 
         private String key() { return config.getTemplate + '\n' + link + '\n' + tree; }
@@ -139,6 +145,7 @@ public final class ThirdPartyDownload {
             WeakReference<Session> reference = new WeakReference<>(this);
             ThirdPartyDownloadSettings capturedConfig = config;
             String capturedLink = link;
+            DouAiLog.Operation parseOperation = operation;
             parsing = DownloadTasks.submit(application, "third-party\nparse\n" + key(), "第三方解析", transfer -> {
                 try {
                     transfer.file("第三方解析", 0);
@@ -149,16 +156,18 @@ public final class ThirdPartyDownload {
                     ThirdPartyDownloadPlan plan = ThirdPartyDownloadPlan.create(
                             ThirdPartyResponse.parse(body), capturedConfig, System.currentTimeMillis());
                     transfer.complete();
-                    MAIN.post(() -> {
+                    parseOperation.stage("parse_result", "assets=" + plan.assets.size() + "; business_result=awaiting_selection");
+                    MAIN.post(parseOperation.wrap(() -> {
                         Session session = reference.get();
                         if (session != null) session.parsed(plan);
-                    });
+                    }));
                     return "解析完成，请选择保存内容";
                 } catch (Exception failure) {
-                    MAIN.post(() -> {
+                    parseOperation.error("parse", failure);
+                    MAIN.post(parseOperation.wrap(() -> {
                         Session session = reference.get();
                         if (session != null) session.failed();
-                    });
+                    }));
                     throw failure;
                 }
             }, log);
@@ -168,10 +177,12 @@ public final class ThirdPartyDownload {
 
         private void parsed(ThirdPartyDownloadPlan plan) {
             if (!usable()) return;
+            operation.stage("awaiting_selection", "available_assets=" + plan.assets.size() + "; saved=false");
             parsing = null;
             dismissLoading();
             try {
-                selection = new ThirdPartyDownloadDialog(owner.get(), plan, this::selected, this::close, this::usable);
+                selection = new ThirdPartyDownloadDialog(owner.get(), plan, operation.wrapConsumer(this::selected),
+                        operation.wrap(this::close), this::usable);
                 selection.show();
             } catch (RuntimeException | LinkageError failure) {
                 close(); toast(application, "无法显示第三方下载选择");
@@ -190,6 +201,9 @@ public final class ThirdPartyDownload {
             StringBuilder selectedKey = new StringBuilder("third-party\nselected\n").append(key());
             for (ThirdPartyDownloadPlan.Asset asset : plan.assets) selectedKey.append('\n').append(asset.url).append('\n').append(asset.name);
             Application target = application;
+            selectionFinished = true;
+            operation.finish(DouAiLog.Outcome.SUCCESS, "selection_confirmed", "selected_assets=" + plan.assets.size()
+                    + "; evidence=user_selected_assets; media_save_result=pending");
             close();
             analytics.manual("download_request", "下载任务请求", "request");
             boolean accepted = DownloadTasks.submit(target, selectedKey.toString(), plan.baseName, transfer -> {
@@ -203,6 +217,8 @@ public final class ThirdPartyDownload {
 
         private void failed() {
             if (closed) return;
+            selectionFinished = true;
+            operation.finish(DouAiLog.Outcome.FAILED, "parser_failed", "selection_ready=false; saved=false");
             close(); toast(application, "第三方解析失败，请检查 GET 和下载字段");
         }
 
@@ -223,6 +239,8 @@ public final class ThirdPartyDownload {
         }
 
         @Override public void close() {
+            if (!closed && !selectionFinished) operation.finish(DouAiLog.Outcome.CANCELLED, "picker_closed_or_owner_invalid",
+                    "selection_or_save_handoff_incomplete; closed_by_lifecycle_or_user=true");
             closed = true;
             onMain(() -> {
                 DownloadTasks.Task current = parsing;

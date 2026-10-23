@@ -1,5 +1,7 @@
 package com.douai.module.ui;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.app.Activity;
 import android.content.Intent;
 import android.content.UriPermission;
@@ -23,6 +25,8 @@ final class HostDownloadDirectoryPicker implements AutoCloseable {
     private Object launcher;
     private Class<?> launcherType;
     private boolean closed;
+    private boolean resultReceived;
+    private final DouAiLog.Operation trace = DouAiLog.begin("media_picker", "HostDownloadDirectoryPicker");
 
     private HostDownloadDirectoryPicker(Activity activity) { this.activity = activity; }
 
@@ -58,17 +62,21 @@ final class HostDownloadDirectoryPicker implements AutoCloseable {
                     return "DouAiDownloadDirectorySelection";
                 }
                 if (!"onActivityResult".equals(method.getName()) || picker.closed) return null;
+                picker.resultReceived = true;
+                picker.trace.stage("selection_callback", "callback_received=true");
                 picker.close();
                 Object value = arguments == null || arguments.length == 0 ? null : arguments[0];
                 try {
                     if (!resultType.isInstance(value)
                             || !Integer.valueOf(Activity.RESULT_OK).equals(resultCode.invoke(value))) {
-                        selected.accept(null);
+                        picker.trace.finish(DouAiLog.Outcome.CANCELLED, "selection_empty_or_cancelled", "uri_present=false");
+                        picker.trace.wrapConsumer(selected).accept(null);
                         return null;
                     }
                     Object data = resultData.invoke(value);
                     if (!(data instanceof Intent) || ((Intent) data).getData() == null) {
-                        selected.accept(null);
+                        picker.trace.finish(DouAiLog.Outcome.CANCELLED, "selection_empty_or_cancelled", "uri_present=false");
+                        picker.trace.wrapConsumer(selected).accept(null);
                         return null;
                     }
                     Intent intent = (Intent) data;
@@ -81,8 +89,11 @@ final class HostDownloadDirectoryPicker implements AutoCloseable {
                     requireWritableDirectory(activity, uri);
                     activity.getContentResolver().takePersistableUriPermission(uri, GRANT_FLAGS);
                     requirePersistedPermission(activity, uri);
-                    selected.accept(uri);
+                    picker.trace.finish(DouAiLog.Outcome.SUCCESS, "persistent_permission_verified", "read=true;write=true;persisted=true;writable_directory=true");
+                    picker.trace.wrapConsumer(selected).accept(uri);
                 } catch (ReflectiveOperationException | RuntimeException failure) {
+                    picker.trace.error("permission_validation", failure);
+                    picker.trace.finish(DouAiLog.Outcome.FAILED, "directory_permission_failed", "permission_or_directory_validation_failed");
                     if (failed != null) failed.accept("无法使用所选文件夹，请选择可写且支持持久授权的文件夹");
                 }
                 return null;
@@ -97,6 +108,8 @@ final class HostDownloadDirectoryPicker implements AutoCloseable {
             picker.launcherType.getMethod("launch", Object.class).invoke(picker.launcher, intent);
             return picker;
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            picker.resultReceived = true;
+            picker.trace.finish(DouAiLog.Outcome.FAILED, "picker_unavailable", "selection_not_started");
             picker.close();
             return null;
         }
@@ -138,6 +151,7 @@ final class HostDownloadDirectoryPicker implements AutoCloseable {
     @Override public void close() {
         if (closed) return;
         closed = true;
+        if (!resultReceived) trace.finish(DouAiLog.Outcome.CANCELLED, "picker_closed", "no_selection_consumed");
         if (PENDING.get(activity) == this) PENDING.remove(activity);
         if (launcher != null) {
             try { launcherType.getMethod("unregister").invoke(launcher); }

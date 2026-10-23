@@ -1,5 +1,7 @@
 package com.douai.module.ui;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.app.Dialog;
 import android.app.Activity;
 import android.content.Context;
@@ -169,7 +171,7 @@ final class AiTestChatDialog extends Dialog {
                 private synchronized ChatCompletionClient client() {
                     if (client == null) client = new ChatCompletionClient(messageContact
                             ? TestChatMemory.messageConversation(context, config) : new TestChatMemory(context, config),
-                            diagnostic -> android.util.Log.i(messageContact ? "DouAi.AiContact" : "DouAi.ModelTest", diagnostic));
+                            diagnostic -> DouAiLog.legacy(4, messageContact ? "DouAi.AiContact" : "DouAi.ModelTest", diagnostic, null));
                     return client;
                 }
                 @Override public String reply(String message, List<ChatImage> images) throws Exception {
@@ -596,7 +598,9 @@ final class AiTestChatDialog extends Dialog {
     private void sendMessage(String prompt, List<ChatImage> images, List<Document> documents, ChatMessage retryAnswer) {
         List<PendingAttachment> selected = new ArrayList<>(retryAnswer == null ? draftPending : retryAnswer.retryPending);
         if (disposed || busy
-                || (prompt.isEmpty() && images.isEmpty() && documents.isEmpty() && selected.isEmpty())) return;
+                || (prompt.isEmpty() && images.isEmpty() && documents.isEmpty() && selected.isEmpty())) {
+            DouAiLog.event("ai_chat", "eligibility", disposed ? "closed" : busy ? "busy" : "empty_input", ""); return;
+        }
         cancelRestore();
         ChatMessage answer = retryAnswer;
         if (answer == null) {
@@ -626,7 +630,8 @@ final class AiTestChatDialog extends Dialog {
         state.setText(answer.text);
         updateSend();
         scrollToBottom();
-        request = worker.submit(() -> {
+        turn.trace.stage("queued", "input_chars=" + prompt.length() + ";images=" + images.size() + ";documents=" + documents.size() + ";attachments=" + selected.size());
+        request = worker.submit(turn.trace.wrap(() -> {
             String reply = null;
             Exception error = null;
             try {
@@ -637,12 +642,14 @@ final class AiTestChatDialog extends Dialog {
                 if (clearBarrier != null) clearBarrier.get();
                 turn.checkStopped();
                 if (!selected.isEmpty()) {
+                    turn.trace.stage("media_read", "attachments=" + selected.size());
                     turn.reading = true;
                     prepareMedia(turn);
                     turn.reading = false;
                     main.post(() -> showPreparedMedia(turn));
                 }
                 turn.checkStopped();
+                turn.trace.stage("provider_request", "images=" + turn.preparedImages.size() + ";documents=" + turn.preparedDocuments.size());
                 reply = active.reply(prompt, turn.preparedImages, documentText(turn.preparedDocuments, turn.preparedImages));
             }
             catch (InterruptedException cancelled) {
@@ -653,8 +660,8 @@ final class AiTestChatDialog extends Dialog {
             catch (OutOfMemoryError failure) { error = new IllegalArgumentException("附件过大，无法读取"); }
             String result = reply;
             Exception failure = error;
-            main.post(() -> finishRequest(turn, result, failure));
-        });
+            main.post(turn.trace.wrap(() -> finishRequest(turn, result, failure)));
+        }));
     }
 
     private void prepareMedia(RequestTurn turn) throws Exception {
@@ -682,13 +689,13 @@ final class AiTestChatDialog extends Dialog {
             if (media == null) {
                 long started = android.os.SystemClock.elapsedRealtime();
                 boolean completed = false;
-                android.util.Log.i("DouAi.ChatAttachment", "read_started kind=" + attachment.kind + " imageBudget=" + budget);
+                DouAiLog.legacy(4, "DouAi.ChatAttachment", "read_started kind=" + attachment.kind + " imageBudget=" + budget, null);
                 try {
                     media = mediaLoader.load(getContext(), attachment.uri, attachment.kind, budget);
                     completed = media != null;
                 } finally {
-                    android.util.Log.i("DouAi.ChatAttachment", "read_finished kind=" + attachment.kind
-                            + " completed=" + completed + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started));
+                    DouAiLog.legacy(4, "DouAi.ChatAttachment", "read_finished kind=" + attachment.kind
+                            + " completed=" + completed + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started), null);
                 }
             }
             turn.checkStopped();
@@ -710,7 +717,9 @@ final class AiTestChatDialog extends Dialog {
     }
 
     private void showPreparedMedia(RequestTurn turn) {
-        if (disposed || turn.ticket != generation) return;
+        if (disposed || turn.ticket != generation) {
+            turn.trace.finish(DouAiLog.Outcome.CANCELLED, "conversation_invalidated", "late_response=true"); return;
+        }
         ChatMessage user = turn.answer.sourceUser;
         if (user != null && transcript.contains(user)) {
             visibleImageBytes -= imageBytes(user.images);
@@ -766,12 +775,18 @@ final class AiTestChatDialog extends Dialog {
         messageRows.notifyDataSetChanged();
         updateSend();
         scrollToBottom();
+        if (failure != null) turn.trace.error(turn.reading ? "media_read" : "provider_request", failure);
+        turn.trace.finish(turn.stopRequested ? DouAiLog.Outcome.CANCELLED : failure == null ? DouAiLog.Outcome.SUCCESS
+                        : failure instanceof java.net.SocketTimeoutException ? DouAiLog.Outcome.TIMED_OUT : DouAiLog.Outcome.FAILED,
+                turn.stopRequested ? "user_cancelled" : failure == null ? "response_rendered" : "request_failed",
+                "response_chars=" + (reply == null ? 0 : reply.length()) + ";view_notified=true;remote_delivery=not_applicable");
     }
 
     private void stopRequest() {
         if (!busy || pending.stopRequested) return;
         synchronized (pending) {
             pending.stopRequested = true;
+            pending.trace.finish(DouAiLog.Outcome.CANCELLED, "user_cancelled", "provider_result=unknown");
             if (pending.started && request != null) request.cancel(true);
         }
         session.cancel();
@@ -813,6 +828,7 @@ final class AiTestChatDialog extends Dialog {
     }
 
     private void cancelRequest() {
+        if (pending != null) pending.trace.finish(DouAiLog.Outcome.CANCELLED, "conversation_closed_or_cleared", "provider_result=unknown");
         ++generation;
         if (request != null) request.cancel(true);
         session.cancel();
@@ -1216,6 +1232,7 @@ final class AiTestChatDialog extends Dialog {
     }
 
     private static final class RequestTurn {
+        final DouAiLog.Operation trace = DouAiLog.begin("ai_chat", "send_or_retry");
         final int ticket;
         final String prompt;
         final List<ChatImage> images;
@@ -1283,7 +1300,7 @@ final class AiTestChatDialog extends Dialog {
                 if (nativeViews == null) throw failure;
                 if (!nativeFailure) {
                     nativeFailure = true;
-                    android.util.Log.w("DouAi.AiContact", "Native message unavailable", failure);
+                    DouAiLog.legacy(5, "DouAi.AiContact", "Native message unavailable", failure);
                     main.post(() -> {
                         android.widget.Toast.makeText(getContext(), "原生消息控件不可用，请查看模块适配信息",
                                 android.widget.Toast.LENGTH_LONG).show();

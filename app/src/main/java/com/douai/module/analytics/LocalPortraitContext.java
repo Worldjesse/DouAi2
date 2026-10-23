@@ -1,6 +1,7 @@
 package com.douai.module.analytics;
 
 import android.content.Context;
+import com.douai.module.diagnostics.DouAiLog;
 import org.json.JSONObject;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -34,7 +35,10 @@ public final class LocalPortraitContext {
                 JSONObject json = new JSONObject(new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8));
                 if (json.getInt("version") != 1) throw new IllegalArgumentException();
                 loaded = new State(purpose(json.getString("purpose")), feedback(json.getString("feedback")));
-            } catch (Exception failure) { throw new IllegalStateException("本地侧写自述无法读取，可清空后重新填写"); }
+            } catch (Exception failure) {
+                DouAiLog.failure("portrait_context", "read", failure);
+                throw new IllegalStateException("本地侧写自述无法读取，可清空后重新填写");
+            }
             STATES.put(key, loaded);
             return loaded;
         }
@@ -86,6 +90,7 @@ public final class LocalPortraitContext {
         return value;
     }
     private static void save(Context context, State next) {
+        DouAiLog.Operation operation = DouAiLog.begin("portrait_context", "save_self_description");
         File root = root(context);
         File pending = new File(root, "portrait-context.json.pending");
         try {
@@ -101,7 +106,13 @@ public final class LocalPortraitContext {
                 Files.move(pending.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING);
             }
             STATES.put(root.getAbsolutePath(), next);
-        } catch (Exception failure) { throw new IllegalStateException("侧写自述未能保存，请重试"); }
+            operation.finish(DouAiLog.Outcome.SUCCESS, "file_replaced", "purpose_chars=" + next.purpose.length()
+                    + "; feedback_present=" + !next.feedback.isEmpty() + "; file_synced=true; read_back_verified=false");
+        } catch (Exception failure) {
+            operation.error("write_or_replace", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "self_description_not_saved", "");
+            throw new IllegalStateException("侧写自述未能保存，请重试");
+        }
         finally { if (pending.exists()) pending.delete(); }
     }
 }

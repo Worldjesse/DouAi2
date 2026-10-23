@@ -8,6 +8,7 @@ import com.douai.module.config.FrameworkConfigSync;
 import com.douai.module.config.ModuleConfigRuntime;
 import com.douai.module.diagnostics.ScanDiagnosticsChannel;
 import com.douai.module.diagnostics.HostAdaptationDiagnostics;
+import com.douai.module.diagnostics.DebugLog;
 import com.douai.module.ui.ModuleStatusScreen;
 import com.douai.module.ui.ScanStatus;
 
@@ -37,6 +38,7 @@ public final class MainActivity extends ComponentActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        DebugLog.initialize(getApplicationContext());
 
         configRuntime = ModuleConfigRuntime.get(this);
         configStatusListener = (connected, message, error) -> {

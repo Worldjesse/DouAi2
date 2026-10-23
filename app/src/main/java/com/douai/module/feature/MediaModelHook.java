@@ -1,6 +1,7 @@
 package com.douai.module.feature;
 
 import com.douai.module.config.LocalOptions;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostScanReport;
 
 import java.lang.ref.WeakReference;
@@ -43,9 +44,10 @@ public final class MediaModelHook implements AutoCloseable {
                             if (hook.options.enabled("remove_download_limits")) {
                                 try { hook.apply(chain.getArg(0)); }
                                 catch (ReflectiveOperationException | RuntimeException failure) {
+                                    DouAiLog.failure("media_model", "apply_flags", failure);
                                     hook.safeLog("Download model update failed: " + failure.getMessage());
                                 }
-                            }
+                            } else DouAiLog.event("media_model", "decision", "disabled", "model_mutated=false");
                             return chain.proceed();
                         });
                 if (handle == null) throw new IllegalStateException("Empty media model handle");
@@ -65,26 +67,45 @@ public final class MediaModelHook implements AutoCloseable {
     }
 
     void apply(Object aweme) throws ReflectiveOperationException {
-        if (aweme == null || DownloadActionHook.mediaAssets(aweme, false, options).isEmpty()) return;
+        if (aweme == null || DownloadActionHook.mediaAssets(aweme, false, options).isEmpty()) {
+            DouAiLog.event("media_model", "decision", "no_existing_media_assets", "model_mutated=false");
+            return;
+        }
         synchronized (changes) {
             if (changes.containsKey(aweme)) return;
             Object control = HostTargets.read(aweme, "videoControl");
             if (control == null) return;
             List<Change> pending = new ArrayList<>();
+            DouAiLog.Operation operation = DouAiLog.begin("media_model", "media_item_bind");
             try {
                 change(control, "allowDownload", Boolean.TRUE, pending);
                 change(control, "downloadIgnoreVisibility", Boolean.TRUE, pending);
                 change(control, "preventDownloadType", 0, pending);
                 changes.put(aweme, pending);
+                operation.finish(flagsReadback(pending) ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.UNCONFIRMED,
+                        "download_presentation_flags", "changed_fields=" + pending.size()
+                                + ";result_scope=local_model;media_saved=not_implied");
                 if (!logged) {
                     logged = true;
                     safeLog("Enabled local download presentation for an item with existing media URLs");
                 }
             } catch (ReflectiveOperationException | RuntimeException failure) {
+                operation.error("apply_flags", failure);
+                operation.finish(DouAiLog.Outcome.FAILED, "field_update_failed", "rollback_attempted=true");
                 for (Change change : pending) change.restore();
                 throw failure;
             }
         }
+    }
+
+    private static boolean flagsReadback(List<Change> changes) {
+        try {
+            for (Change change : changes) {
+                Object target = change.target.get();
+                if (target == null || !java.util.Objects.equals(change.field.get(target), change.applied)) return false;
+            }
+            return true;
+        } catch (Throwable unavailable) { return false; }
     }
 
     private static void change(Object target, String name, Object value, List<Change> changes)

@@ -15,6 +15,8 @@ import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.analytics.LocalAnalytics;
 import com.douai.module.analytics.LocalPortraitContext;
+import com.douai.module.diagnostics.DouAiLog;
+import com.douai.module.diagnostics.DebugLog;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -24,7 +26,6 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowDialog;
 import org.robolectric.shadows.ShadowLooper;
-import org.robolectric.shadows.ShadowLog;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
@@ -51,8 +52,12 @@ public final class ConfigTransferDialogTest {
     private ManualExecutor executor;
     private ConfigTransferDialog page;
     private int changes;
+    private final List<String> evidence = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     @Before public void setUp() {
+        assertTrue(DouAiLog.awaitIdle(5000));
+        DouAiLog.clearPending();
+        DouAiLog.setFrameworkSink((priority, line) -> evidence.add(line));
         activity = Robolectric.buildActivity(Activity.class).setup().get();
         store = new MemoryStore(); files = new Files(); picker = new Picker(); executor = new ManualExecutor();
         page = new ConfigTransferDialog(activity, store, false, () -> changes++, files, picker, executor);
@@ -60,6 +65,7 @@ public final class ConfigTransferDialogTest {
     }
     @After public void tearDown() {
         page.close(); page.dialog().dismiss(); activity.finish(); ShadowLooper.idleMainLooper();
+        assertTrue(DouAiLog.awaitIdle(5000)); DouAiLog.setFrameworkSink(null);
     }
 
     @Test public void exportExcludesSecretsUnlessExplicitlySelectedAndRunsOffTheUiCallback() throws Exception {
@@ -133,16 +139,17 @@ public final class ConfigTransferDialogTest {
     }
 
     @Test public void providerReadFailureReportsReadingRatherThanAnUnrelatedSizeLimit() {
-        files.fail = true;
-        view("import").performClick(); picker.select(); finish();
-        String status = ((TextView) view("status")).getText().toString();
-        assertTrue(status, status.contains("无法读取") || status.contains("读取失败"));
-        assertFalse(status, status.contains("2 MiB") || status.contains("32 MiB"));
-        assertFalse(status.contains("private-provider-key"));
-        assertTrue(ShadowLog.getLogsForTag("DouAi").stream().anyMatch(item ->
-                item.msg.contains("stage=read_file") && item.msg.contains("IllegalStateException")));
-        assertTrue(ShadowLog.getLogsForTag("DouAi").stream().noneMatch(item -> item.msg.contains("private-provider-key")));
-        assertEquals(0, store.applies);
+        boolean previousDebug = DebugLog.isEnabled(); DebugLog.setEnabled(true);
+        try {
+            files.fail = true;
+            view("import").performClick(); picker.select(); finish();
+            String status = ((TextView) view("status")).getText().toString();
+            assertTrue(status, status.contains("无法读取") || status.contains("读取失败"));
+            assertFalse(status, status.contains("2 MiB") || status.contains("32 MiB"));
+            assertFalse(status.contains("private-provider-key"));
+            assertReadFailureEvidence("java.lang.IllegalStateException", "private-provider-key");
+            assertEquals(0, store.applies);
+        } finally { DouAiLog.awaitIdle(5000); DebugLog.setEnabled(previousDebug); }
     }
 
     @Test public void smallInvalidUtf8ReportsEncodingRatherThanAnUnrelatedSizeLimit() {
@@ -155,17 +162,18 @@ public final class ConfigTransferDialogTest {
     }
 
     @Test public void linkageFailureDuringReadingCompletesWithASafeCompatibilityReasonInsteadOfStalling() {
-        files.linkageFailure = true;
-        view("import").performClick(); picker.select(); finish();
-        String status = ((TextView) view("status")).getText().toString();
-        assertTrue("Linkage failure must leave the busy state with a compatibility reason", status.contains("兼容"));
-        assertFalse(status.contains("private-linkage-key"));
-        assertFalse(view("confirm").isEnabled());
-        assertTrue(view("import").isEnabled());
-        assertTrue(ShadowLog.getLogsForTag("DouAi").stream().anyMatch(item ->
-                item.msg.contains("stage=read_file") && item.msg.contains("NoSuchMethodError")));
-        assertTrue(ShadowLog.getLogsForTag("DouAi").stream().noneMatch(item -> item.msg.contains("private-linkage-key")));
-        assertEquals(0, store.applies);
+        boolean previousDebug = DebugLog.isEnabled(); DebugLog.setEnabled(true);
+        try {
+            files.linkageFailure = true;
+            view("import").performClick(); picker.select(); finish();
+            String status = ((TextView) view("status")).getText().toString();
+            assertTrue("Linkage failure must leave the busy state with a compatibility reason", status.contains("兼容"));
+            assertFalse(status.contains("private-linkage-key"));
+            assertFalse(view("confirm").isEnabled());
+            assertTrue(view("import").isEnabled());
+            assertReadFailureEvidence("java.lang.NoSuchMethodError", "private-linkage-key");
+            assertEquals(0, store.applies);
+        } finally { DouAiLog.awaitIdle(5000); DebugLog.setEnabled(previousDebug); }
     }
 
     @Test public void successfulReadsLogOnlyByteCountAndSha256WithoutDocumentOrConfigurationContents() throws Exception {
@@ -175,18 +183,32 @@ public final class ConfigTransferDialogTest {
         files.input = ConfigTransfer.export(source, true).getBytes(StandardCharsets.UTF_8);
         byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(files.input);
         String expectedHash = String.format(java.util.Locale.ROOT, "%064X", new java.math.BigInteger(1, digest));
-        ShadowLog.clear();
-        view("import").performClick(); picker.select(); finish();
+        boolean previousDebug = DebugLog.isEnabled();
+        DebugLog.setEnabled(true);
+        try { view("import").performClick(); picker.select(); finish(); }
+        finally { DebugLog.setEnabled(previousDebug); }
         assertTrue(view("confirm").isEnabled());
-        java.util.List<org.robolectric.shadows.ShadowLog.LogItem> logs = ShadowLog.getLogsForTag("DouAi");
-        assertTrue(logs.stream().anyMatch(item -> item.msg.equals(
-                "ConfigTransfer read: bytes=" + files.input.length + "; sha256=" + expectedHash)));
-        for (org.robolectric.shadows.ShadowLog.LogItem item : logs) {
-            assertFalse(item.msg.contains("private-hash-fixture-key"));
-            assertFalse(item.msg.contains("content://"));
-            assertFalse(item.msg.contains("file.json"));
-            assertFalse(item.msg.contains("native_auto_reply"));
-            assertFalse(item.msg.contains("\"values\""));
+        List<org.json.JSONObject> logs = evidenceEvents();
+        org.json.JSONObject read = logs.stream().filter(item -> "config_transfer".equals(item.optString("feature_id"))
+                && "stage".equals(item.optString("event")) && "file_read".equals(item.optString("stage"))).findFirst().orElseThrow();
+        assertTrue(read.optString("evidence").contains("bytes=" + files.input.length));
+        assertTrue(read.optString("evidence").contains("file_contents_omitted=true"));
+        String trace = read.optString("trace_id");
+        assertFalse(trace.isEmpty());
+        assertTrue(logs.stream().anyMatch(item -> trace.equals(item.optString("trace_id"))
+                && "operation_finished".equals(item.optString("event")) && "success".equals(item.optString("outcome"))
+                && "preview_validated".equals(item.optString("reason_code"))));
+        String privateDiagnostic = "ConfigTransfer read: bytes=" + files.input.length + "; sha256=" + expectedHash;
+        assertTrue(logs.stream().anyMatch(item -> "legacy_diagnostic".equals(item.optString("event"))
+                && item.optString("evidence").contains("ref=" + DouAiLog.reference(privateDiagnostic))));
+        assertTrue(((TextView) view("status")).getText().toString().contains("SHA256=" + expectedHash.substring(0, 12)));
+        for (String item : evidence) {
+            assertFalse(item.contains("private-hash-fixture-key"));
+            assertFalse(item.contains("content://"));
+            assertFalse(item.contains("file.json"));
+            assertFalse(item.contains("native_auto_reply"));
+            assertFalse(item.contains("\"values\""));
+            assertFalse("Full document digest stays inside the private diagnostic reference", item.contains(expectedHash));
         }
         assertEquals(0, store.applies);
     }
@@ -471,6 +493,30 @@ public final class ConfigTransferDialogTest {
         screen.dismissChildPages(); ShadowLooper.idleMainLooper();
         assertFalse(reopenedBackup.isShowing()); assertFalse(extension.isShowing());
         assertEquals(0, store.applies);
+    }
+
+    private List<org.json.JSONObject> evidenceEvents() {
+        assertTrue(DouAiLog.awaitIdle(5000));
+        List<org.json.JSONObject> events = new java.util.ArrayList<>();
+        for (String line : evidence) {
+            try { events.add(new org.json.JSONObject(line)); }
+            catch (org.json.JSONException invalid) { throw new AssertionError("Structured log is not valid JSON", invalid); }
+        }
+        return events;
+    }
+
+    private void assertReadFailureEvidence(String exceptionClass, String privateMessage) {
+        List<org.json.JSONObject> events = evidenceEvents();
+        org.json.JSONObject exception = events.stream().filter(item -> "config_transfer".equals(item.optString("feature_id"))
+                && "exception".equals(item.optString("event")) && "read_file".equals(item.optString("reason_code"))
+                && exceptionClass.equals(item.optString("exception_class"))).findFirst().orElseThrow();
+        assertEquals(DouAiLog.reference(privateMessage), exception.optString("exception_message_ref"));
+        String trace = exception.optString("trace_id");
+        assertFalse(trace.isEmpty());
+        assertTrue(events.stream().anyMatch(item -> trace.equals(item.optString("trace_id"))
+                && "operation_finished".equals(item.optString("event")) && "failed".equals(item.optString("outcome"))
+                && "backup_action_failed".equals(item.optString("reason_code"))));
+        assertTrue(evidence.stream().noneMatch(item -> item.contains(privateMessage)));
     }
 
     private View view(String tag) { return page.dialog().getWindow().getDecorView().findViewWithTag("config.backup." + tag); }

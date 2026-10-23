@@ -9,6 +9,22 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 public final class DirectMessageSpeechHookTest {
+    @Test public void cancelledPendingSpeechRetainsItsTraceForALateWorker() throws Exception {
+        DirectMessageSpeechHook.Pending request = new DirectMessageSpeechHook.Pending(null, null, null, null,
+                "private-conversation-secret", "#private-body-secret");
+        String trace = request.trace.traceId();
+        request.cancel();
+        java.util.concurrent.atomic.AtomicReference<String> workerTrace = new java.util.concurrent.atomic.AtomicReference<>();
+        Thread callback = new Thread(request.trace.wrap(() -> {
+            workerTrace.set(com.douai.module.diagnostics.DouAiLog.current().traceId());
+            request.trace.stage("late_encoding_result", "must_not_reopen_terminal=true");
+        }));
+        callback.start(); callback.join();
+        assertEquals(trace, workerTrace.get());
+        assertTrue(request.cancelled);
+        assertNull(com.douai.module.diagnostics.DouAiLog.current());
+    }
+
     @Test public void hashPrefixIsExplicitAndTheOriginalDraftIsRetained() {
         String original = "#  今天下午见  ";
         assertEquals("今天下午见", DirectMessageSpeechHook.speechText(original));

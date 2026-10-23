@@ -7,6 +7,8 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.LocalOptions;
@@ -237,9 +239,9 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
     }
 
     void requestScan() {
-        if (!enabled() || !foreground) return;
+        if (!enabled() || !foreground) { DouAiLog.event("auto_comment_reply", "scan_eligibility", "disabled_or_background", "enabled=" + enabled() + ";foreground=" + foreground); return; }
         long account = account();
-        if (account <= 0) { diagnostic = "等待登录"; return; }
+        if (account <= 0) { DouAiLog.event("auto_comment_reply", "scan_eligibility", "account_unavailable", "ready=false"); diagnostic = "等待登录"; return; }
         if (sessionAccount != account) {
             invalidate();
             sessionAccount = account;
@@ -248,16 +250,21 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
         long epoch = generation.get();
         try {
             scanner.execute(() -> {
+                DouAiLog.Operation scanTrace = DouAiLog.begin("comment_reply_inbox", "foreground_poll_or_push");
                 String stage = "baseline";
+                int admitted = 0;
+                boolean completed = false;
                 try {
                     if (!valid(account, epoch)) return;
                     if (!ledger.initialized(account)) {
-                        long baseline = source.baseline(account, () -> valid(account, epoch));
+                        long baseline = scanTrace.call(() -> source.baseline(account, () -> valid(account, epoch)));
                         if (!valid(account, epoch)) return;
                         if (!ledger.initialize(account, baseline, source.baselineIds())) {
                             throw new IllegalStateException("Could not persist comment inbox baseline");
                         }
                         diagnostic = "已建立起点，等待新回复";
+                        completed = true;
+                        scanTrace.finish(DouAiLog.Outcome.SUCCESS, "baseline_persisted", "historical_reply_execution=false;baseline_ids=" + source.baselineIds().size());
                         return;
                     }
                     stage = "model_migration";
@@ -271,13 +278,16 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                     }
                     stage = "scan";
                     long since = Math.max(ledger.baseline(account), ledger.watermark(account) - 300);
-                    List<CommentReplyEvent> events = source.scan(account, since, () -> valid(account, epoch));
+                    scanTrace.stage("inbox_scan", "watermark_ref=" + DouAiLog.reference(Long.toString(since)));
+                    final long scanSince = since;
+                    List<CommentReplyEvent> events = scanTrace.call(() -> source.scan(account, scanSince, () -> valid(account, epoch)));
+                    scanTrace.stage("inbox_scan_ready", "events=" + events.size());
                     if (!valid(account, epoch)) return;
                     long newest = Math.max(ledger.watermark(account), source.scannedThrough());
                     boolean deferred = false;
                     for (CommentReplyEvent event : events) {
                         if (!valid(account, epoch)) return;
-                        if (event.createdAt < ledger.baseline(account)) continue;
+                        if (event.createdAt < ledger.baseline(account)) { DouAiLog.event("auto_comment_reply", "eligibility", "before_baseline", "eligible=false"); continue; }
                         newest = Math.max(newest, event.createdAt);
                         if ((event.text == null || event.text.trim().isEmpty()) && (!"ai".equals(options.text("reply_mode", "fixed"))
                                 || !options.enabled(LocalOptions.REPLY_RECOGNIZE_IMAGES, true)
@@ -285,18 +295,20 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                         String identity = account + ":" + event.incomingId;
                         if (tasks.containsKey(identity)) { deferred = true; continue; }
                         int threadLimit = MAX_THREAD_REPLIES;
-                        if (ledger.threadExhausted(account, event.rootId, threadLimit)) continue;
-                        if (ledger.contains(account, event.incomingId) && !ledger.retryable(account, event.incomingId)) continue;
+                        if (ledger.threadExhausted(account, event.rootId, threadLimit)) { DouAiLog.event("auto_comment_reply", "eligibility", "thread_limit", "limit=" + threadLimit); continue; }
+                        if (ledger.contains(account, event.incomingId) && !ledger.retryable(account, event.incomingId)) { DouAiLog.event("auto_comment_reply", "eligibility", "ledger_duplicate_or_not_retryable", "incoming_ref=" + DouAiLog.reference(event.incomingId)); continue; }
                         if (tasks.size() >= MAX_PENDING || !rateLimiter.canSend(KIND, account, event.senderUid, options)) {
                             deferred = true;
                             continue;
                         }
                         Task task = new Task(account, epoch, identity, event);
                         if (!ledger.claim(account, event.incomingId, event.rootId, threadLimit, task.id)) {
+                            task.trace.finish(DouAiLog.Outcome.SKIPPED, "durable_claim_rejected", "native_invoked=false");
                             deferred = true;
                             continue;
                         }
                         tasks.put(identity, task);
+                        admitted++;
                         deferred = true;
                         long delay = Math.max(2, Math.min(3600, options.integer("reply_delay_seconds", 2))) * 1000L;
                         main.postDelayed(() -> {
@@ -308,14 +320,24 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                     if (!deferred && tasks.isEmpty()) ledger.advance(account, Math.min(newest, source.watermarkCeiling()));
                     CommentReplyLedger.Health health = ledger.health();
                     diagnostic = health.blocked() ? health.diagnostic() : deferred ? "等待处理或发送额度" : "已检查新回复";
+                    completed = true;
+                    scanTrace.finish(DouAiLog.Outcome.SUCCESS, "scan_evaluated", "events=" + events.size() + ";admitted=" + admitted + ";deferred=" + deferred + ";ledger_blocked=" + health.blocked() + ";business_delivery_confirmed=false");
                 } catch (Exception failure) {
+                    completed = true;
+                    DouAiLog.Outcome outcome = scanFailureOutcome(failure);
+                    if (outcome != DouAiLog.Outcome.CANCELLED) scanTrace.error(stage, failure);
+                    scanTrace.finish(outcome, outcome == DouAiLog.Outcome.CANCELLED ? "scan_cancelled"
+                                    : outcome == DouAiLog.Outcome.TIMED_OUT ? "scan_timed_out" : "scan_failed",
+                            "stage=" + stage + ";admitted=" + admitted + ";evidence="
+                                    + NativeCommentReplyInbox.failureDiagnostic(failure));
                     if (valid(account, epoch)) {
                         CommentReplyLedger.Health health = ledger.health();
                         diagnostic = health.blocked() ? health.diagnostic() : "扫描暂未完成，稍后重试";
-                        safeLog("Comment reply scan failed: stage=" + stage + "; "
+                        safeLog("Comment reply scan " + (outcome == DouAiLog.Outcome.CANCELLED ? "cancelled" : "failed") + ": stage=" + stage + "; "
                                 + NativeCommentReplyInbox.failureDiagnostic(failure));
                     }
                 } finally {
+                    if (!completed) scanTrace.finish(DouAiLog.Outcome.CANCELLED, "scan_invalidated", "stage=" + stage + ";admitted=" + admitted);
                     scanQueued.set(false);
                     if (generation.get() != epoch && enabled() && foreground) signal();
                 }
@@ -323,7 +345,26 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
         } catch (RejectedExecutionException failure) { scanQueued.set(false); }
     }
 
+    /** Log classification only: callers retain the existing retry, ledger and scheduling decisions. */
+    static DouAiLog.Outcome scanFailureOutcome(Throwable failure) {
+        for (int depth = 0; failure != null && depth < 16; depth++) {
+            if (failure instanceof java.util.concurrent.CancellationException || failure instanceof InterruptedException) {
+                return DouAiLog.Outcome.CANCELLED;
+            }
+            if (failure instanceof java.util.concurrent.TimeoutException) return DouAiLog.Outcome.TIMED_OUT;
+            Throwable cause = failure.getCause();
+            if (cause == failure) break;
+            failure = cause;
+        }
+        return DouAiLog.Outcome.FAILED;
+    }
+
     private void generate(Task task) {
+        task.trace.wrap(() -> generateTraced(task)).run();
+    }
+
+    private void generateTraced(Task task) {
+        task.trace.stage("eligibility_recheck", "account_ref=" + DouAiLog.reference(Long.toString(task.account)) + ";epoch_current=" + (task.epoch == generation.get()));
         if (!valid(task)) { complete(task, "cancelled"); return; }
         if (!rateLimiter.canSend(KIND, task.account, task.event.senderUid, options)) { complete(task, "deferred"); return; }
         Runnable timeout = () -> {
@@ -331,6 +372,8 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                 if (task.finished.get() || task.submitted) return;
                 task.media.cancel();
                 generator.cancel();
+                task.timedOut = true;
+                task.trace.stage("generation_timeout", "deadline_ms=120000;remote_model_outcome=unknown");
                 fail(task, "生成超时");
             }
         };
@@ -339,24 +382,30 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
             synchronized (stateLock) {
                 if (!valid(task)) { complete(task, "cancelled"); return; }
                 task.settings = options;
+                task.trace.configuration(task.settings.diagnosticRevision(), "live_at_generation");
             }
             if ("ai".equals(task.settings.text("reply_mode", "fixed"))) {
                 task.stage = "media";
+            task.trace.stage("media", "submitted=" + task.submitted + ";generated_chars=" + task.generatedChars);
                 task.images = java.util.Collections.unmodifiableList(new java.util.ArrayList<>(
                         mediaLoader.load(application, task.event, task.settings, task.media)));
             }
             if (!valid(task)) { complete(task, "cancelled"); return; }
             if ((task.event.text == null || task.event.text.trim().isEmpty()) && task.images.isEmpty()) { complete(task, "cancelled"); return; }
             task.stage = "input";
+            task.trace.stage("input", "submitted=" + task.submitted + ";generated_chars=" + task.generatedChars);
             task.input = input(task.event, task.images.isEmpty() ? "" : AutomationReplyMedia.commentSourceLabel(task.event, task.settings));
             task.stage = "model";
+            task.trace.stage("model", "submitted=" + task.submitted + ";generated_chars=" + task.generatedChars);
             Generated generated = generator.generate(task.account, task.event, task.settings, task.images, task.input, count -> {
                 task.requestImageCount = count;
                 task.modelRequestSent = true;
+                task.trace.stage("model_request_sent", "images=" + count + ";business_success=false");
                 safeLog("Comment reply AI request sent: images=" + count);
             });
             if (!valid(task)) { complete(task, "cancelled"); return; }
             task.stage = "output";
+            task.trace.stage("output", "submitted=" + task.submitted + ";generated_chars=" + task.generatedChars);
             task.generatedChars = generated == null || generated.text == null ? 0 : generated.text.length();
             if (generated == null || generated.text == null || generated.text.trim().isEmpty()) {
                 complete(task, "cancelled");
@@ -369,14 +418,17 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
             safeLog("Comment reply generated: chars=" + task.generatedChars);
             if (task.settings.enabled(LocalOptions.REPLY_VOICE)) {
                 task.stage = "speech";
+            task.trace.stage("speech", "submitted=" + task.submitted + ";generated_chars=" + task.generatedChars);
                 SpeechPreparation.Audio audio = speechPreparer.prepare(application, task.text, task.settings, Long.MAX_VALUE, () -> valid(task));
                 task.audio = audio;
                 if (!valid(task)) { audio.delete(); complete(task, "cancelled"); return; }
             }
             task.stage = "dispatch";
+            task.trace.stage("dispatch", "submitted=" + task.submitted + ";generated_chars=" + task.generatedChars);
             dispatcher.prepare(entry(task, "pending"), () -> valid(task),
-                    done -> send(task, done), status -> complete(task, status));
+                    done -> task.trace.wrap(() -> send(task, done)).run(), task.trace.wrapConsumer(status -> complete(task, status)));
         } catch (Exception failure) {
+            task.trace.error(task.stage, failure);
             if (!task.finished.get()) {
                 if (valid(task)) fail(task, generationFailureDiagnostic(failure));
                 else complete(task, "cancelled");
@@ -386,10 +438,12 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
 
     private void send(Task task, Consumer<String> done) {
         task.stage = "publish";
+            task.trace.stage("publish", "submitted=" + task.submitted + ";generated_chars=" + task.generatedChars);
         // Persist both allowances and the submission barrier before the native publisher posts to main.
         submitLedger(() -> {
             if (!valid(task)) { task.deferCancellation = true; done.accept("cancelled"); return; }
             LocalOptions current = options;
+            task.trace.configuration(current.diagnosticRevision(), "live_send_guard");
             task.reservation = rateLimiter.tryReserve(KIND, task.account, task.event.senderUid, current);
             if (task.reservation == null) { task.boundaryFailed = true; done.accept("cancelled"); return; }
             if (!valid(task) || !ledger.submitted(task.account, task.event.incomingId, task.id)) {
@@ -400,6 +454,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                 return;
             }
             task.persistedSubmission = true;
+            task.trace.stage("submission_reserved", "durable=true;business_success=false");
             if (!valid(task)) { task.deferCancellation = true; done.accept("cancelled"); return; }
             sendReserved(task, done);
         }, () -> {
@@ -414,12 +469,15 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                 // No disk work or ledger lock on main. The worker already owns this durable attempt.
                 if (!valid(task) || !task.persistedSubmission || task.reservation == null) return false;
                 task.submitted = true;
+                task.trace.stage("native_invoking", "reserved=true;business_success=false");
                 if (task.audio != null) new Handler(Looper.getMainLooper()).postDelayed(task.audio::delete, 600_000);
                 return true;
             }
         }, () -> {
+            task.trace.stage("native_accepted", "awaiting_callback=true;business_success=false");
             safeLog("Comment reply native request accepted");
         }, status -> {
+            task.trace.stage(task.finished.get() ? "late_native_callback" : "native_callback", "status=" + status + ";submitted=" + task.submitted + ";uncertain=" + task.uncertain);
             if (task.finished.get() && !task.submitted) return;
             if ("submitted".equals(status)) task.uncertain = true;
             if ("cancelled".equals(status) && shouldDeferCancellation(task)) task.deferCancellation = true;
@@ -441,14 +499,16 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
     }
 
     private void submitLedger(Runnable action, Runnable rejected) {
-        try { ledgerWorker.execute(() -> {
+        DouAiLog.Operation trace = DouAiLog.current();
+        Runnable work = () -> {
             try { action.run(); }
             catch (RuntimeException failure) {
                 diagnostic = "评论回复账本处理失败，保留发送占位，稍后检查";
                 safeLog("Comment reply ledger task failed: " + failure.getClass().getSimpleName());
                 rejected.run();
             }
-        }); }
+        };
+        try { ledgerWorker.execute(trace == null ? work : trace.wrap(work)); }
         catch (RejectedExecutionException failure) {
             diagnostic = "评论回复账本处理繁忙，保留发送占位，稍后检查";
             safeLog("Comment reply ledger worker unavailable; durable claims remain protected");
@@ -522,11 +582,12 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
 
     private void complete(Task task, String status) {
         synchronized (stateLock) {
-            if (!task.finished.compareAndSet(false, true)) return;
+            if (!task.finished.compareAndSet(false, true)) { task.trace.stage("completion_ignored", "duplicate_or_late=true;status=" + status); return; }
             if ("submitted".equals(status) && task.submitted) task.uncertain = true;
             // Capture why cancellation happened before a later resume can change the foreground state.
             if ("cancelled".equals(status) && shouldDeferCancellation(task)) task.deferCancellation = true;
             task.media.cancel();
+            AutomationTrace.outcome(task.trace, status, task.timedOut ? "generation_timeout" : "comment_reply_" + status, "stage=" + task.stage + ";model_request_sent=" + task.modelRequestSent + ";generated=" + task.generated + ";submitted=" + task.submitted + ";durable_submission=" + task.persistedSubmission + ";acknowledged=" + "sent".equals(status));
         }
         submitLedger(() -> {
             // Keep this identity queued until its final durable transition; old callbacks carry its token.
@@ -608,6 +669,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
     }
 
     private static final class Task {
+        final DouAiLog.Operation trace;
         final long account, epoch, created = System.currentTimeMillis();
         final String identity, id = UUID.randomUUID().toString();
         final CommentReplyEvent event;
@@ -624,10 +686,12 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
         volatile int requestImageCount = -1;
         volatile boolean modelRequestSent;
         volatile String stage = "queued";
-        volatile boolean generated;
+        volatile boolean generated, timedOut;
         volatile int generatedChars;
         Task(long account, long epoch, String identity, CommentReplyEvent event) {
             this.account = account; this.epoch = epoch; this.identity = identity; this.event = event;
+            trace = AutomationTrace.start("auto_comment_reply", id, "comment_inbox");
+            trace.stage("queue_admitted", "target_ref=" + DouAiLog.reference(event.aid) + ";incoming_ref=" + DouAiLog.reference(event.incomingId));
             input = input(event);
         }
     }

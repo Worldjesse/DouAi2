@@ -1,5 +1,7 @@
 package com.douai.module.feature;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.os.Handler;
 import android.os.Looper;
 
@@ -240,18 +242,20 @@ public final class NativeFollowLists implements AutoCloseable {
         syncAccount(account);
         long now = System.currentTimeMillis();
         expire(now);
-        if (account == null || account.uid.isEmpty()) return;
+        if (account == null || account.uid.isEmpty()) { DouAiLog.event("relationship_lists", "eligibility", "account_unavailable", "ready=false"); return; }
         for (FollowListSnapshot.Kind kind : FollowListSnapshot.Kind.values()) {
             FollowListSnapshot.State state = FollowListSnapshot.current();
             boolean known = kind == FollowListSnapshot.Kind.FOLLOWING ? state.followingKnown : state.followersKnown;
             synchronized (this) {
-                if (!force && (!needed(options, kind) || known || now - attempts.getOrDefault(kind, 0L) < RETRY_MS)) continue;
+                if (!force && (!needed(options, kind) || known || now - attempts.getOrDefault(kind, 0L) < RETRY_MS)) { DouAiLog.event("relationship_lists", "eligibility", "not_needed_cached_or_retry_delay", "kind=" + kind + ";cached=" + known + ";retry_delay_ms=" + RETRY_MS); continue; }
                 attempts.put(kind, now);
                 errors.remove(kind);
                 loading = kind;
             }
             FollowListSnapshot.Refresh token = FollowListSnapshot.beginRefresh(account.uid, kind);
-            if (token == null) { loading = null; return; }
+            if (token == null) { DouAiLog.event("relationship_lists", "eligibility", "refresh_token_unavailable", "kind=" + kind); loading = null; return; }
+            DouAiLog.Operation trace = DouAiLog.begin("relationship_lists", force ? "manual_refresh" : "policy_refresh");
+            trace.stage("fetch_pages", "kind=" + kind + ";account_ref=" + DouAiLog.reference(account.uid) + ";deadline_minutes=10");
             try {
                 long deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(10);
                 Map<String, ProfileListEntry> result = FollowListPager.loadDetails(FollowListPager.Kind.valueOf(kind.name()),
@@ -267,7 +271,10 @@ public final class NativeFollowLists implements AutoCloseable {
                         names.put(kind, Collections.unmodifiableMap(loadedNames));
                         details.put(kind, result);
                         errors.remove(kind);
+                        trace.finish(DouAiLog.Outcome.SUCCESS, "snapshot_published", "kind=" + kind + ";members=" + result.size() + ";account_epoch_verified=true");
                         log.accept("Relationship list fetched: " + kind + " members=" + result.size());
+                    } else {
+                        trace.finish(DouAiLog.Outcome.CANCELLED, "stale_refresh_token", "kind=" + kind + ";snapshot_published=false");
                     }
                 }
             } catch (Exception failure) {
@@ -275,6 +282,8 @@ public final class NativeFollowLists implements AutoCloseable {
                 synchronized (this) {
                     if (account.uid.equals(FollowListSnapshot.current().accountUid)) errors.put(kind, "拉取失败，请重试");
                 }
+                trace.error("fetch_pages", failure);
+                trace.finish(DouAiLog.Outcome.FAILED, "relationship_fetch_failed", "kind=" + kind + ";snapshot_published=false");
                 log.accept("Relationship list fetch failed: " + kind + " " + failure.getClass().getSimpleName());
             } finally {
                 loading = null;

@@ -11,6 +11,7 @@ import android.speech.tts.Voice;
 
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.SpeechSettings;
+import com.douai.module.diagnostics.DouAiLog;
 
 import java.io.File;
 import java.util.Locale;
@@ -25,6 +26,7 @@ public final class LocalSpeechSynthesis implements AutoCloseable {
     private final BiConsumer<Result, String> callback;
     private volatile TextToSpeech engine;
     private volatile File output;
+    private final DouAiLog.Operation operation = DouAiLog.begin("local_speech_synthesis", "offline_audio");
 
     public static final class Result {
         public final File file;
@@ -37,7 +39,7 @@ public final class LocalSpeechSynthesis implements AutoCloseable {
     public static LocalSpeechSynthesis synthesize(Context context, String text, LocalOptions options,
                                                     BiConsumer<Result, String> callback) {
         LocalSpeechSynthesis request = new LocalSpeechSynthesis(callback);
-        request.main.post(() -> request.start(context, text, options));
+        request.main.post(request.operation.wrap(() -> request.start(context, text, options)));
         return request;
     }
 
@@ -64,11 +66,13 @@ public final class LocalSpeechSynthesis implements AutoCloseable {
         }
         output = new File(cache, UUID.randomUUID() + ".wav");
         String configured = options.text("tts_engine", "").trim();
+        operation.stage("engine_initializing", "engine_ref=" + DouAiLog.reference(configured) + "; text_chars=" + text.length());
         try {
-            engine = new TextToSpeech(context, status -> main.post(() -> initialize(status, text, options)),
+            engine = new TextToSpeech(context, status -> main.post(operation.wrap(() -> initialize(status, text, options))),
                     configured.isEmpty() ? null : configured);
             main.postDelayed(() -> complete(null, "本地语音生成超时"), 45_000);
         } catch (RuntimeException failure) {
+            operation.error("engine_initialize", failure);
             complete(null, "无法初始化本地语音引擎");
         }
     }
@@ -99,14 +103,17 @@ public final class LocalSpeechSynthesis implements AutoCloseable {
             return;
         }
         current.setVoice(selected);
+        operation.stage("engine_ready", "offline_voice_selected=true; language=" + language.getLanguage());
         SpeechSettings settings = new SpeechSettings(options);
         current.setSpeechRate(settings.rate);
         current.setPitch(settings.pitch);
         String id = UUID.randomUUID().toString();
         current.setOnUtteranceProgressListener(new UtteranceProgressListener() {
-            @Override public void onStart(String utteranceId) { }
+            @Override public void onStart(String utteranceId) { if (id.equals(utteranceId)) operation.stage("engine_started", "business_result=pending"); }
             @Override public void onDone(String utteranceId) {
-                if (!id.equals(utteranceId) || finished.get()) return;
+                if (!id.equals(utteranceId) || finished.get()) {
+                    operation.stage("late_or_foreign_engine_callback", "ignored=true"); return;
+                }
                 MediaMetadataRetriever metadata = new MediaMetadataRetriever();
                 try {
                     if (!output.isFile() || output.length() == 0) throw new IllegalStateException("Empty synthesis output");
@@ -115,6 +122,7 @@ public final class LocalSpeechSynthesis implements AutoCloseable {
                     if (duration <= 0) throw new IllegalStateException("Invalid synthesis duration");
                     complete(new Result(output, duration), null);
                 } catch (Exception failure) {
+                    operation.error("audio_metadata", failure);
                     complete(null, "生成的语音文件无效");
                 } finally {
                     try { metadata.release(); } catch (Exception ignored) { }
@@ -125,12 +133,14 @@ public final class LocalSpeechSynthesis implements AutoCloseable {
         });
         if (current.synthesizeToFile(text, new Bundle(), output, id) != TextToSpeech.SUCCESS) {
             complete(null, "语音引擎拒绝了生成请求");
-        }
+        } else operation.stage("engine_request_accepted", "business_result=pending");
     }
 
     private void complete(Result result, String failure) {
-        if (!finished.compareAndSet(false, true)) return;
-        main.post(() -> {
+        if (!finished.compareAndSet(false, true)) {
+            operation.stage("duplicate_or_late_completion", "ignored=true"); return;
+        }
+        main.post(operation.wrap(() -> {
             main.removeCallbacksAndMessages(null);
             TextToSpeech current = engine;
             engine = null;
@@ -140,8 +150,12 @@ public final class LocalSpeechSynthesis implements AutoCloseable {
             if (result == null && output != null) {
                 try { java.nio.file.Files.deleteIfExists(output.toPath()); } catch (Exception ignored) { }
             }
+            operation.finish(result != null ? DouAiLog.Outcome.SUCCESS : SpeechSynthesis.outcome(failure),
+                    result != null ? "validated_offline_audio" : SpeechSynthesis.reason(failure),
+                    result == null ? "audio_ready=false" : "duration_ms=" + result.durationMillis + "; bytes=" + result.file.length()
+                            + "; output_ref=" + DouAiLog.reference(result.file.getAbsolutePath()) + "; sent=false");
             callback.accept(result, failure);
-        });
+        }));
     }
 
     @Override public void close() { complete(null, "语音生成已停止"); }

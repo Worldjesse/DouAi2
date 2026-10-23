@@ -1,5 +1,7 @@
 package com.douai.module.ui;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.app.AlertDialog;
 import android.app.Activity;
 import android.app.Dialog;
@@ -55,6 +57,7 @@ final class AiModelEditor implements AutoCloseable {
     private AlertDialog dialog;
     private ChatCompletionClient.ModelCatalogRequest modelRequest;
     private Future<?> modelFetch;
+    private DouAiLog.Operation catalogTrace;
     private Future<?> avatarLoad;
     private HostImagePicker avatarPicker;
     private Bitmap avatarPreview;
@@ -135,6 +138,7 @@ final class AiModelEditor implements AutoCloseable {
     }
 
     private void cancelCatalog() {
+        if (catalogTrace != null) { catalogTrace.finish(DouAiLog.Outcome.CANCELLED, "model_catalog_cancelled", "dialog_closed_or_request_replaced"); catalogTrace = null; }
         ChatCompletionClient.ModelCatalogRequest pending = modelRequest;
         modelRequest = null;
         if (pending != null) pending.cancel();
@@ -152,7 +156,15 @@ final class AiModelEditor implements AutoCloseable {
     }
 
     private AiModelSettings aiSettings() { return AiModelSettings.read(repository); }
-    private void saveAiSettings(AiModelSettings settings) { settings.save(repository); }
+    private void saveAiSettings(AiModelSettings settings) {
+        DouAiLog.Operation trace = DouAiLog.begin("model_settings", "save_model_configuration");
+        try {
+            settings.save(repository);
+            trace.finish(DouAiLog.Outcome.UNCONFIRMED, "settings_save_returned", "persistent_readback=not_performed;credentials_omitted=true");
+        } catch (RuntimeException failure) {
+            trace.error("save", failure); trace.finish(DouAiLog.Outcome.FAILED, "model_settings_failed", "credentials_omitted=true"); throw failure;
+        }
+    }
 
     private void build(AiModelConfig original) {
         LinearLayout form = form();
@@ -394,13 +406,18 @@ final class AiModelEditor implements AutoCloseable {
                 status.setText("正在获取模型列表…");
                 ChatCompletionClient.ModelCatalogRequest request = new ChatCompletionClient.ModelCatalogRequest();
                 modelRequest = request;
-                modelFetch = requests.submit(() -> {
+                DouAiLog.Operation trace = DouAiLog.begin("model_settings", "fetch_model_catalog");
+                catalogTrace = trace;
+                modelFetch = requests.submit(trace.wrap(() -> {
                     try {
+                        trace.stage("catalog_request", "credentials_omitted=true");
                         List<String> fetched = request.fetch(draft);
-                        status.post(() -> {
-                            if (closed || !dialog.isShowing() || modelRequest != request) return;
+                        status.post(trace.wrap(() -> {
+                            if (closed || !dialog.isShowing() || modelRequest != request) { trace.finish(DouAiLog.Outcome.CANCELLED, "model_editor_invalidated", "catalog_result_discarded=true"); return; }
                             modelRequest = null;
                             modelFetch = null;
+                            catalogTrace = null;
+                            trace.finish(DouAiLog.Outcome.SUCCESS, "model_catalog_parsed", "model_count=" + fetched.size());
                             fetchModels.setEnabled(true);
                             if (fetched.isEmpty()) { status.setText("接口未返回模型，请手动填写模型名称。"); return; }
                             String[] values = fetched.toArray(new String[0]);
@@ -408,17 +425,20 @@ final class AiModelEditor implements AutoCloseable {
                                     .setItems(values, (child, selected) -> modelName.setText(values[selected]))
                                     .setNegativeButton("取消", null).create());
                             status.setText("已获取 " + fetched.size() + " 个模型");
-                        });
+                        }));
                     } catch (Exception failure) {
-                        status.post(() -> {
+                        trace.error("catalog_request", failure);
+                        trace.finish(failure instanceof java.net.SocketTimeoutException ? DouAiLog.Outcome.TIMED_OUT : DouAiLog.Outcome.FAILED, "model_catalog_failed", "response_content_omitted=true");
+                        status.post(trace.wrap(() -> {
                             if (closed || !dialog.isShowing() || modelRequest != request) return;
                             modelRequest = null;
                             modelFetch = null;
+                            catalogTrace = null;
                             fetchModels.setEnabled(true);
                             status.setText("获取失败：" + safeError(failure));
-                        });
+                        }));
                     }
-                });
+                }));
             } catch (Exception failure) {
                 cancelCatalog();
                 fetchModels.setEnabled(true);

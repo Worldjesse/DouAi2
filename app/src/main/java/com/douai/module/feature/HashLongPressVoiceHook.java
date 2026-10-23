@@ -10,6 +10,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.douai.module.config.LocalOptions;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostScanReport;
 
 import java.lang.ref.WeakReference;
@@ -184,13 +185,32 @@ public final class HashLongPressVoiceHook implements AutoCloseable {
         View view = (View) chain.getThisObject();
         Binding binding;
         synchronized (bindings) { binding = bindings.get(view); }
-        if (binding == null || closed || !options.enabled(OPTION)) return chain.proceed();
+        if (binding == null || closed || !options.enabled(OPTION)) {
+            DouAiLog.event("hash_long_press_voice", "decision", "disabled_or_binding_unavailable",
+                    "binding=" + (binding != null) + ";enabled=" + options.enabled(OPTION) + ";native_forwarded=true");
+            return chain.proceed();
+        }
         EditText input = editor(binding);
         String draft = input == null ? null : input.getText().toString();
-        if (!handles(options, draft)) return chain.proceed();
+        if (!handles(options, draft)) {
+            DouAiLog.event("hash_long_press_voice", "decision", "draft_has_no_hash_prefix", "native_forwarded=true");
+            return chain.proceed();
+        }
+        DouAiLog.Operation operation = DouAiLog.begin("hash_long_press_voice", "hash_long_click");
+        operation.stage("validate_draft", "draft_ref=" + DouAiLog.reference(draft) + ";message=" + binding.message);
         // From this point the gesture is consumed even when validation or synthesis fails.
-        try { start(view, binding, input, draft); }
+        try {
+            // Keep the downstream voice operation on the same trace without changing its asynchronous contract.
+            final ReflectiveOperationException[] reflected = new ReflectiveOperationException[1];
+            operation.wrap(() -> {
+                try { start(view, binding, input, draft, operation); }
+                catch (ReflectiveOperationException failure) { reflected[0] = failure; }
+            }).run();
+            if (reflected[0] != null) throw reflected[0];
+        }
         catch (ReflectiveOperationException | RuntimeException failure) {
+            operation.error("voice_handoff", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "voice_handoff_failed", "draft_retained=true");
             bindingFailed(failure);
             toast("语音入口不可用，草稿已保留");
         }
@@ -247,12 +267,18 @@ public final class HashLongPressVoiceHook implements AutoCloseable {
         return null;
     }
 
-    private void start(View view, Binding binding, EditText editor, String draft) throws ReflectiveOperationException {
+    private void start(View view, Binding binding, EditText editor, String draft, DouAiLog.Operation operation) throws ReflectiveOperationException {
         if (editor == null || !view.isShown() || !view.hasWindowFocus() || !editor.isShown()) {
+            DouAiLog.event("hash_long_press_voice", "decision", "editor_not_ready", "voice_handoff=false;draft_retained=true");
+            operation.finish(DouAiLog.Outcome.SKIPPED, "editor_not_ready", "draft_retained=true");
             toast("当前输入框未就绪，草稿已保留");
             return;
         }
-        if (draft.substring(1).trim().isEmpty()) { toast("语音内容为空，草稿已保留"); return; }
+        if (draft.substring(1).trim().isEmpty()) {
+            DouAiLog.event("hash_long_press_voice", "decision", "empty_voice_text", "voice_handoff=false;draft_retained=true");
+            operation.finish(DouAiLog.Outcome.SKIPPED, "empty_voice_text", "draft_retained=true");
+            toast("语音内容为空，草稿已保留"); return;
+        }
         String[] key = key(binding);
         WeakReference<View> target = new WeakReference<>(view);
         WeakReference<EditText> input = new WeakReference<>(editor);
@@ -261,16 +287,28 @@ public final class HashLongPressVoiceHook implements AutoCloseable {
                 () -> target.get() != null && target.get().hasWindowFocus(),
                 () -> restore(binding, target, input, draft, key));
         if (binding.message) {
-            if (messages == null) { toast("聊天语音入口未就绪，草稿已保留"); return; }
+            if (messages == null) {
+                DouAiLog.event("hash_long_press_voice", "decision", "message_voice_not_ready", "draft_retained=true");
+                operation.finish(DouAiLog.Outcome.SKIPPED, "message_voice_not_ready", "draft_retained=true");
+                toast("聊天语音入口未就绪，草稿已保留"); return;
+            }
             messages.startLongPress(binding.owner.get(), gesture);
+            operation.finish(DouAiLog.Outcome.UNCONFIRMED, "message_voice_handoff_returned", "gesture_consumed=true;final_publication=unobserved");
         } else {
             if (comments == null || !comments.armLongPress(gesture)) {
+                DouAiLog.event("hash_long_press_voice", "decision", "comment_voice_busy_or_not_ready", "draft_retained=true");
+                operation.finish(DouAiLog.Outcome.SKIPPED, "comment_voice_busy_or_not_ready", "draft_retained=true");
                 toast("评论语音正在处理或此草稿已接管，请修改草稿后重试");
                 return;
             }
             // Native code builds the real attachment/model and may confirm asynchronously.
             try {
-                if (!view.performClick()) toast("原生发送入口未就绪，草稿已保留");
+                boolean accepted = view.performClick();
+                DouAiLog.event("hash_long_press_voice", "native_click", accepted ? "click_accepted" : "click_rejected",
+                        "native_click_returned=" + accepted + ";voice_publication=unobserved");
+                operation.finish(accepted ? DouAiLog.Outcome.UNCONFIRMED : DouAiLog.Outcome.SKIPPED,
+                        accepted ? "native_click_handoff" : "native_click_rejected", "native_click_returned=" + accepted + ";final_publication=unobserved");
+                if (!accepted) toast("原生发送入口未就绪，草稿已保留");
             } finally { gesture.restoreAfterNativeClick(); }
         }
     }

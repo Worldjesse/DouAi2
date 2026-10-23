@@ -8,6 +8,8 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.widget.Toast;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.AiModelSettings;
 import com.douai.module.config.AutomationHistoryStore;
@@ -273,10 +275,14 @@ public final class NativeMessagingHooks implements AutoCloseable {
                     } catch (org.json.JSONException ignored) { }
                 }
                 ContentValues replacement = MessageRecallPolicy.protect(identified, ownUid(), options);
-                if (replacement == identified) return chain.proceed();
+                if (replacement == identified) { DouAiLog.event("prevent_message_recall", "decision", "policy_passthrough", "enabled=" + options.enabled("prevent_message_recall")); return chain.proceed(); }
+                DouAiLog.Operation trace = DouAiLog.begin("prevent_message_recall", "message_db_update");
+                trace.stage("db_update_replaced", "policy=MessageRecallPolicy;contents_logged=false");
                 Object[] arguments = chain.getArgs().toArray();
                 arguments[1] = replacement;
-                Object result = chain.proceed(arguments);
+                Object result;
+                try { result = chain.proceed(arguments); } catch (Throwable failure) { trace.error("db_update", failure); trace.finish(DouAiLog.Outcome.UNCONFIRMED, "db_update_threw", "write_result_unknown=true"); throw failure; }
+                trace.finish(result instanceof Number && ((Number) result).intValue() > 0 ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.UNCONFIRMED, "protected_db_update_returned", "rows_positive=" + (result instanceof Number && ((Number) result).intValue() > 0) + ";scope=local_database");
                 if (result instanceof Number && ((Number) result).intValue() > 0) {
                     String uuid = MessageRecallPolicy.uuid(original, chain.getArg(2), chain.getArg(3));
                     if (uuid != null) markRecall(ownUid(), uuid);
@@ -304,6 +310,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                     }
                     if (!MessageRecallPolicy.shouldProtect(values, ownUid(), options)) return result;
                     if (id != null) markRecall(ownUid(), id);
+                    DouAiLog.event("prevent_message_recall", "result", "recalled_state_overridden", "native_result=true;module_result=false;message_ref=" + DouAiLog.reference(id));
                     return false;
                 } catch (Exception failure) { recall.fail(failure); return result; }
             });
@@ -416,9 +423,10 @@ public final class NativeMessagingHooks implements AutoCloseable {
 
     private void onIncoming(ContentValues values, String source) {
         LocalOptions current = options;
-        if (!automatic("native_auto_reply", current)) return;
+        if (!automatic("native_auto_reply", current)) { DouAiLog.event("auto_reply", "eligibility", "disabled_or_not_ready", "source=" + source + ";enabled=" + current.enabled("native_auto_reply")); return; }
         long account = ownUid();
         if (account <= 0) {
+            DouAiLog.event("auto_reply", "receipt_skipped", "account_unavailable", "source=" + source);
             safeLog("Automatic reply receipt skipped source=" + source + " reason=account_unavailable");
             return;
         }
@@ -437,16 +445,19 @@ public final class NativeMessagingHooks implements AutoCloseable {
             if (!profile.name.isEmpty()) values.put("sender_name", profile.name);
         }
         if (!NativeFollowLists.ensureAccount(Long.toString(account))) {
+            DouAiLog.event("auto_reply", "receipt_skipped", "account_changed", "source=" + source);
             safeLog("Automatic reply receipt skipped source=" + source + " reason=account_changed");
             return;
         }
         ReplyPolicy.Incoming incoming = ReplyPolicy.incoming(values, account, startedAt, current);
         if (incoming == null) {
+            DouAiLog.event("auto_reply", "receipt_skipped", "policy", "source=" + source);
             safeLog("Automatic reply receipt skipped source=" + source + " reason=policy");
             return;
         }
         String recipient = Long.toString(incoming.sender);
         if (!rateLimiter.canSend(AutomationHistoryStore.REPLY, account, recipient, current)) {
+            DouAiLog.event("auto_reply", "receipt_skipped", "allowance", "source=" + source);
             safeLog("Automatic reply receipt skipped source=" + source + " reason=allowance");
             return;
         }
@@ -454,11 +465,13 @@ public final class NativeMessagingHooks implements AutoCloseable {
         String text = incoming.text;
         String identity = account + ":" + conversation + ":" + incoming.serverId;
         if (replyLedger.contains(SubmissionLedger.identity(identity))) {
+            DouAiLog.event("auto_reply", "receipt_skipped", "submission_claimed", "source=" + source);
             safeLog("Automatic reply receipt skipped source=" + source + " reason=submission_claimed");
             return;
         }
         synchronized (seen) {
             if (seen.put(identity, true) != null) {
+                DouAiLog.event("auto_reply", "receipt_skipped", "duplicate", "source=" + source);
                 safeLog("Automatic reply receipt skipped source=" + source + " reason=duplicate");
                 return;
             }
@@ -471,6 +484,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 synchronized (seen) { seen.remove(identity); }
                 operation.reason = Reason.QUEUE_FULL;
                 operation.reportFailure();
+                DouAiLog.event("auto_reply", "receipt_skipped", "queue_full", "source=" + source);
                 safeLog("Automatic reply receipt skipped source=" + source + " reason=queue_full");
                 return;
             }
@@ -526,6 +540,10 @@ public final class NativeMessagingHooks implements AutoCloseable {
     }
 
     private void generateReply(ReplyTask operation) {
+        operation.trace.wrap(() -> generateReplyTraced(operation)).run();
+    }
+
+    private void generateReplyTraced(ReplyTask operation) {
         long account = operation.account;
         long epoch = operation.epoch;
         ReplyPolicy.Incoming incoming = operation.incoming;
@@ -537,11 +555,12 @@ public final class NativeMessagingHooks implements AutoCloseable {
         ContentValues values = operation.values;
         if (!operation.begin()) { operation.release(); return; }
         try {
-            if (!replyStillAllowed(values, account, current)) return;
-            if (!rateLimiter.canSend(AutomationHistoryStore.REPLY, account, recipient, options)) return;
+            if (!replyStillAllowed(values, account, current)) { operation.trace.stage("eligibility_rejected", "reason=receipt_policy_changed"); return; }
+            if (!rateLimiter.canSend(AutomationHistoryStore.REPLY, account, recipient, options)) { operation.trace.stage("eligibility_rejected", "reason=allowance_or_cooldown"); return; }
             operation.conversation = resolveReplyConversation(operation);
             if (operation.conversation == null) {
                 synchronized (seen) { seen.remove(identity); }
+                operation.trace.stage("conversation_unavailable", "lookup_completed=true;ready=false");
                 safeLog("Automatic reply skipped reason=conversation_unavailable");
                 return;
             }
@@ -576,12 +595,13 @@ public final class NativeMessagingHooks implements AutoCloseable {
                         secondary, false, "", imageCount -> {
                             operation.requestImageCount = imageCount;
                             operation.modelRequestSent = true;
+                            operation.trace.stage("model_request_sent", "images=" + imageCount + ";business_success=false");
                         });
             } else response = ReplyPolicy.reply(text, current, random);
             operation.generationMillis = SystemClock.elapsedRealtime() - generationStarted;
             if (!operation.current()) return;
             if (!replyStillAllowed(values, account, current)) return;
-            if (response == null || response.trim().isEmpty()) return;
+            if (response == null || response.trim().isEmpty()) { operation.trace.stage("generation_empty", "usable_output=false"); return; }
             SpeechPreparation.Audio audio;
             if (current.enabled("reply_voice")) {
                 if (audioSender == null) throw new IllegalStateException("Native audio sender unavailable");
@@ -594,6 +614,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
             if (!operation.handoff()) { if (audio != null) audio.delete(); return; }
             java.util.concurrent.atomic.AtomicBoolean submitted = new java.util.concurrent.atomic.AtomicBoolean();
             operation.response = response;
+            operation.trace.stage("generation_ready", "chars=" + response.length() + ";voice=" + (audio != null));
             operation.voice = audio != null;
             operation.stage = Stage.QUEUE;
             dispatcher.prepare(operation.entry("pending"),
@@ -604,6 +625,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                         try {
                             Consumer<Boolean> acknowledged = success -> {
                                 operation.acknowledgmentReceived = true;
+                                operation.trace.stage("native_callback", "acknowledged_success=" + success + ";native_invoked=" + operation.nativeInvoked);
                                 submitReplyResult(operation, () -> {
                                     AutomationRateLimiter.Reservation active = reservation.get();
                                     String outcome = operation.nativeOutcome(success, active != null);
@@ -614,8 +636,11 @@ public final class NativeMessagingHooks implements AutoCloseable {
                                             // acknowledgment must not put its images back into the current context.
                                             if (!closed && generation.get() == epoch && ownUid() == account
                                                     && !automationOptionsChanged(current, options)) {
-                                                try { ai.rememberReply("reply:" + account + ":" + conversation, text, images, models, secondary, response); }
-                                                catch (Exception failure) { safeLog("Could not retain acknowledged reply context"); }
+                                                try {
+                                                    ai.rememberReply("reply:" + account + ":" + conversation, text, images, models, secondary, response);
+                                                } catch (Exception failure) {
+                                                    safeLog("Could not retain acknowledged reply context");
+                                                }
                                             }
                                         }
                                     }
@@ -682,6 +707,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                         });
                     });
         } catch (Exception failure) {
+            operation.trace.error(operation.stage.name().toLowerCase(java.util.Locale.ROOT), failure);
             if (operation.current()) {
                 operation.reason = operation.stage == Stage.MEDIA ? Reason.MEDIA_FAILED
                         : operation.stage == Stage.SPEECH ? Reason.SPEECH_FAILED : Reason.GENERATION_FAILED;
@@ -701,12 +727,14 @@ public final class NativeMessagingHooks implements AutoCloseable {
     }
 
     private void submitReplyResult(ReplyTask operation, Runnable result, Runnable overloaded) {
-        try { RESULTS_IO.execute(result); }
+        try { RESULTS_IO.execute(operation.trace.wrap(result)); }
         catch (RejectedExecutionException full) {
             if (operation.nativeInvoked) {
                 operation.unknown = true;
                 operation.reason = Reason.SUBMITTED_UNCONFIRMED;
             } else if (operation.reason == Reason.NONE) operation.reason = Reason.CANCELLED;
+            operation.trace.stage("result_persistence_rejected", "native_invoked=" + operation.nativeInvoked + ";outcome_conservative=true");
+            operation.trace.finish(operation.nativeInvoked ? DouAiLog.Outcome.UNCONFIRMED : DouAiLog.Outcome.CANCELLED, "result_persistence_rejected", "native_invoked=" + operation.nativeInvoked + ";durable_completion=false");
             safeLog("Automatic reply result queue is full; outcome remains conservative");
             overloaded.run();
         }
@@ -720,6 +748,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
 
     /** Owns cancellation until generation hands the result to the existing preview/send lifecycle. */
     private final class ReplyTask {
+        final DouAiLog.Operation trace;
         final long account;
         final long epoch;
         final String identity;
@@ -748,11 +777,15 @@ public final class NativeMessagingHooks implements AutoCloseable {
         volatile boolean began, reserved, nativeInvoked, voice, unknown, acknowledgmentReceived, handedOff;
         volatile String response = "", outputName = "";
         volatile String acknowledgedOutcome;
+        volatile String lastGateReason = "";
 
         ReplyTask(long account, long epoch, String identity, ReplyPolicy.Incoming incoming, int delay, ContentValues values, LocalOptions settings) {
             this.account = account;
             this.epoch = epoch;
             this.identity = identity;
+            trace = AutomationTrace.start("auto_reply", identity, incoming.group ? "group_message" : "private_message",
+                    settings.diagnosticRevision());
+            trace.stage("queue_admitted", "delay_seconds=" + delay + ";conversation_ref=" + DouAiLog.reference(incoming.conversation) + ";incoming_ref=" + DouAiLog.reference(incoming.serverId));
             ledgerIdentity = SubmissionLedger.identity(identity);
             this.values = new ContentValues(values);
             this.settings = settings;
@@ -768,9 +801,15 @@ public final class NativeMessagingHooks implements AutoCloseable {
         }
 
         boolean current() {
-            return !cancelled && sdk == sdkContext && generation.get() == epoch && ownUid() == account
-                    && automatic("native_auto_reply", options)
-                    && NativeFollowLists.ensureAccount(Long.toString(account));
+            String rejected = cancelled ? "task_cancelled" : sdk != sdkContext ? "sdk_changed"
+                    : generation.get() != epoch ? "configuration_changed" : ownUid() != account ? "account_changed"
+                    : !automatic("native_auto_reply", options) ? "disabled_or_not_ready"
+                    : !NativeFollowLists.ensureAccount(Long.toString(account)) ? "relationship_account_changed" : "";
+            if (!rejected.isEmpty()) {
+                lastGateReason = rejected;
+                trace.wrap(() -> DouAiLog.event("auto_reply", "eligibility_rejected", rejected, "stage=" + stage)).run();
+            }
+            return rejected.isEmpty();
         }
 
         boolean begin() {
@@ -778,6 +817,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
             synchronized (replyLock) {
                 if (!current()) return false;
                 began = true;
+                trace.stage("generation_started", "queue_deadline_met=true;generation_timeout_ms=" + REPLY_GENERATION_TIMEOUT_MILLIS);
                 queueMillis = Math.max(0, SystemClock.elapsedRealtime() - readyAt);
                 deadline = SystemClock.elapsedRealtime() + REPLY_GENERATION_TIMEOUT_MILLIS;
                 activeReply = this;
@@ -811,6 +851,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 cancelled = true;
                 finished = true;
             }
+            trace.finish(timeout ? DouAiLog.Outcome.TIMED_OUT : DouAiLog.Outcome.CANCELLED, timeout ? began ? "generation_timeout" : "queue_expired" : "configuration_account_or_lifecycle_changed", "began=" + began + ";native_invoked=" + nativeInvoked + ";remote_outcome=" + (nativeInvoked ? "unknown" : "not_invoked"));
             mediaCancellation.cancel();
             synchronized (replyLock) {
                 // An old task must never disconnect the next task's AI request.
@@ -831,6 +872,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
         }
 
         void release() {
+            if (!handedOff && !cancelled && !failureReported.get()) trace.finish(DouAiLog.Outcome.SKIPPED, "generation_not_handed_off", "last_gate=" + lastGateReason + ";reason=" + reason + ";stage=" + stage + ";model_sent=" + modelRequestSent + ";native_invoked=" + nativeInvoked);
             synchronized (this) { finished = true; }
             synchronized (replyLock) { if (activeReply == this) activeReply = null; }
             main.removeCallbacks(watchdog);
@@ -840,6 +882,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
         }
 
         void preparation(String phase, BooleanSupplier valid) {
+            trace.stage(phase, "model_sent=" + modelRequestSent + ";images=" + requestImageCount);
             dispatcher.trackReply(entry("pending"), phase, valid, () -> cancel(false));
         }
 
@@ -849,6 +892,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 throw new IllegalStateException("Reply reservation unavailable");
             }
             nativeInvoked = true;
+            trace.stage("native_invoking", "durable_reservation=true;business_success=false");
         }
 
         void abandon() {
@@ -865,6 +909,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
             if (reserved) {
                 if (nativeInvoked) {
                     boolean persisted = replyLedger.complete(ledgerIdentity, attempt, success ? "sent" : "failed", System.currentTimeMillis());
+                    trace.stage("submission_ledger_result", "native_ack_success=" + success + ";completion_persisted=" + persisted);
                     if (!success && !persisted) {
                         reason = Reason.SUBMITTED_UNCONFIRMED;
                         acknowledgedOutcome = "submitted";
@@ -888,6 +933,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
         }
 
         void recordOutcome(String status) {
+            AutomationTrace.outcome(trace, status, reason.name().toLowerCase(java.util.Locale.ROOT), "native_invoked=" + nativeInvoked + ";acknowledgment_received=" + acknowledgmentReceived + ";acknowledged_outcome=" + acknowledgedOutcome + ";unknown=" + unknown + ";reserved=" + reserved);
             // Dispatcher already owns normal completion, preview admission and cumulative timings.
             if (reason == Reason.NONE || reason == Reason.CANCELLED || reason == Reason.SEND_FAILED
                     || reason == Reason.SUBMITTED_UNCONFIRMED) return;
@@ -896,6 +942,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
 
         void reportFailure() {
             if (!failureReported.compareAndSet(false, true)) return;
+            trace.finish(reason == Reason.GENERATION_TIMEOUT || reason == Reason.QUEUE_EXPIRED ? DouAiLog.Outcome.TIMED_OUT : DouAiLog.Outcome.FAILED, reason.name().toLowerCase(java.util.Locale.ROOT), "stage=" + stage + ";model_sent=" + modelRequestSent + ";native_invoked=" + nativeInvoked);
             long now = SystemClock.elapsedRealtime();
             if (!began) queueMillis = Math.max(0, now - readyAt);
             if (stage == Stage.MEDIA && mediaMillis < 0 && stageStarted >= 0) mediaMillis = Math.max(0, now - stageStarted);
@@ -991,6 +1038,9 @@ public final class NativeMessagingHooks implements AutoCloseable {
     private void sendText(String id, String text, long account, long epoch, boolean group,
                           Consumer<Boolean> done, BooleanSupplier beforeNativeSend, Object resolved,
                           Runnable invoking) throws Exception {
+        DouAiLog.Operation trace = DouAiLog.current();
+        Consumer<Boolean> callbackResult = trace == null ? done : trace.wrapConsumer(done);
+        if (trace != null) trace.stage("message_prepare", "media=text;conversation_ref=" + DouAiLog.reference(id) + ";chars=" + (text == null ? 0 : text.length()));
         if (closed || !receive.isActive() || ownUid() != account || generation.get() != epoch
                 || sdk == null || text == null || text.trim().isEmpty()
                 || text.length() > 4000) { done.accept(false); return; }
@@ -1015,8 +1065,8 @@ public final class NativeMessagingHooks implements AutoCloseable {
                         if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
                         if ("equals".equals(method.getName())) return arguments != null && proxy == arguments[0];
                     }
-                    if ("onSuccess".equals(method.getName()) && completed.compareAndSet(false, true)) done.accept(true);
-                    if ("onFailure".equals(method.getName()) && completed.compareAndSet(false, true)) done.accept(false);
+                    if ("onSuccess".equals(method.getName()) && completed.compareAndSet(false, true)) callbackResult.accept(true);
+                    if ("onFailure".equals(method.getName()) && completed.compareAndSet(false, true)) callbackResult.accept(false);
                     return null;
                 });
         Object handler = senderConstructor.newInstance(activeSdk, callback);
@@ -1025,6 +1075,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                     || closed || sdk != activeSdk) { done.accept(false); return; }
             if (!beforeNativeSend.getAsBoolean()) { done.accept(false); return; }
             invoking.run();
+            if (trace != null) trace.stage("message_native_submit", "business_success=false;awaiting_sdk_callback=true");
             send.invoke(handler, message, Collections.emptyMap());
         }
     }
@@ -1077,7 +1128,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
 
     private void streakTick() {
         LocalOptions current = options;
-        if (closed || !receive.isActive() || sdk == null || ownUid() <= 0) return;
+        if (closed || !receive.isActive() || sdk == null || ownUid() <= 0) { DouAiLog.event("streak", "eligibility", "native_im_or_account_unavailable", "closed=" + closed + ";sdk_present=" + (sdk != null)); return; }
         try {
             Object model = sdkConversations.invoke(sdk);
             Object raw = allConversations.invoke(model);
@@ -1142,29 +1193,36 @@ public final class NativeMessagingHooks implements AutoCloseable {
                         if (targets.contains(value)) target = value;
                     }
                 }
-                if (target == null || !automatic("streak_enabled", current)
-                        || !ReplyPolicy.inWindow(current.text("streak_start", ""), current.text("streak_end", ""), LocalTime.now())) continue;
+                String streakRejected = target == null ? "target_not_selected" : !automatic("streak_enabled", current) ? "disabled_or_not_ready"
+                        : !ReplyPolicy.inWindow(current.text("streak_start", ""), current.text("streak_end", ""), LocalTime.now()) ? "outside_configured_window" : "";
+                if (!streakRejected.isEmpty()) { DouAiLog.event("streak", "eligibility", streakRejected, "eligible=false"); continue; }
                 String key = "streak." + self + "." + day + "." + target;
-                if (!streakLedger.canBegin(key) || !pendingStreak.add(key)) continue;
+                if (!streakLedger.canBegin(key) || !pendingStreak.add(key)) { DouAiLog.event("streak", "eligibility", "ledger_blocked_or_already_pending", "target_ref=" + DouAiLog.reference(target)); continue; }
                 String id = (String) conversationId.invoke(conversation);
                 StreakSendLedger.Attempt[] attempt = new StreakSendLedger.Attempt[1];
+                DouAiLog.Operation streakTrace = DouAiLog.begin("streak", "scheduled_window");
+                streakTrace.stage("content_prepare", "target_ref=" + DouAiLog.reference(target) + ";content_api=" + !current.text("streak_content_api", "").trim().isEmpty());
                 try {
                     String content = streakContent(current);
-                    if (generation.get() != epoch || !automatic("streak_enabled", options)) { pendingStreak.remove(key); continue; }
+                    if (generation.get() != epoch || !automatic("streak_enabled", options)) { streakTrace.finish(DouAiLog.Outcome.CANCELLED, "settings_changed", "native_invoked=false"); pendingStreak.remove(key); continue; }
+                    streakTrace.stage("content_ready", "chars=" + content.length() + ";body_logged=false");
                     boolean[] reachedPersistence = {false};
                     sendText(id, content, self, epoch, false, success -> {
                         StreakSendLedger.Attempt active = attempt[0];
                         if (active == null) {
+                            streakTrace.finish(DouAiLog.Outcome.CANCELLED, "not_invoked", "durable_attempt=false;native_result=" + success);
                             pendingStreak.remove(key);
                             return;
                         }
                         boolean recorded = streakLedger.complete(key, active.token, success, System.currentTimeMillis());
                         if (recorded) {
+                            streakTrace.finish(success ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.FAILED, success ? "native_sdk_acknowledged" : "native_sdk_rejected", "callback_received=true;durable_completion=true");
                             pendingStreak.remove(key);
                             safeLog(success ? "Streak send acknowledged by native SDK" : "Streak native SDK send failed");
                             if (current.enabled("streak_tip")) toast(success ? "续火花已发送" : "续火花发送失败");
                         } else {
                             pendingStreak.remove(key);
+                            streakTrace.finish(DouAiLog.Outcome.UNCONFIRMED, "completion_persistence_failed", "callback_success=" + success + ";durable_completion=false");
                             safeLog("Could not persist streak send result; outcome remains unknown");
                         }
                     }, () -> {
@@ -1172,10 +1230,12 @@ public final class NativeMessagingHooks implements AutoCloseable {
                         reachedPersistence[0] = true;
                         attempt[0] = streakLedger.begin(key, System.currentTimeMillis());
                         if (attempt[0] == null) return false;
+                        streakTrace.stage("submission_reserved", "durable=true;business_success=false");
                         String attemptToken = attempt[0].token;
                         streakWorker.schedule(() -> {
                             if (streakLedger.markUnknown(key, attemptToken, System.currentTimeMillis())) {
                                 pendingStreak.remove(key);
+                                streakTrace.finish(DouAiLog.Outcome.UNCONFIRMED, "native_callback_timeout", "deadline_ms=30000;durable_state=unknown;retry_safe=false");
                                 safeLog("Streak send callback timed out; outcome is unknown");
                             }
                         }, 30, TimeUnit.SECONDS);
@@ -1183,6 +1243,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                     });
                     if (attempt[0] == null && reachedPersistence[0]) {
                         pendingStreak.remove(key);
+                        streakTrace.finish(DouAiLog.Outcome.SKIPPED, "submission_persistence_failed", "native_invoked=false");
                         safeLog("Streak send prevented because its state could not be persisted");
                     }
                 } catch (Exception failure) {
@@ -1190,6 +1251,8 @@ public final class NativeMessagingHooks implements AutoCloseable {
                         streakLedger.markUnknown(key, attempt[0].token, System.currentTimeMillis());
                     }
                     pendingStreak.remove(key);
+                    streakTrace.error("streak_send", failure);
+                    streakTrace.finish(attempt[0] == null ? DouAiLog.Outcome.FAILED : DouAiLog.Outcome.UNCONFIRMED, "streak_send_exception", "durable_attempt=" + (attempt[0] != null) + ";remote_side_effect_unknown=" + (attempt[0] != null));
                     safeLog("Streak task failed: " + failure.getClass().getSimpleName());
                 }
             }
@@ -1224,7 +1287,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
     }
 
     private void toast(String text) { main.post(() -> Toast.makeText(context, text, Toast.LENGTH_SHORT).show()); }
-    private void safeLog(String message) { try { log.accept(message); } catch (Throwable ignored) { } }
+    private void safeLog(String message) { try { DouAiLog.event(message.startsWith("Streak") ? "streak" : message.startsWith("Automatic reply") ? "auto_reply" : "native_messaging", "diagnostic", "legacy_context", "message_ref=" + DouAiLog.reference(message) + ";chars=" + message.length()); log.accept(message); } catch (Throwable ignored) { } }
 
     @Override public void close() {
         synchronized (sendLock) {

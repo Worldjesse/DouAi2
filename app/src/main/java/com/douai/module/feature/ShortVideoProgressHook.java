@@ -3,6 +3,7 @@ package com.douai.module.feature;
 import com.douai.module.config.ComponentHideSettings;
 import com.douai.module.config.ComponentHideSettings.Component;
 import com.douai.module.config.ExtendedSettings;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostScanReport;
 
 import java.lang.reflect.Method;
@@ -51,20 +52,38 @@ final class ShortVideoProgressHook implements AutoCloseable {
     boolean overrideDecision(boolean hidden, Object work, Object suppliedDuration) {
         ComponentHideSettings current = settings;
         if (!hidden || current == null || !current.configured || !current.enabled
-                || current.alpha(Component.PROGRESS) <= 0 || work == null) return hidden;
+                || current.alpha(Component.PROGRESS) <= 0 || work == null) {
+            DouAiLog.event("short_progress", "decision", "disabled_or_not_applicable", "native_predicate_retained=true");
+            return hidden;
+        }
         if (Boolean.TRUE.equals(HostTargets.invoke(work, "getAd"))
-                || Boolean.TRUE.equals(HostTargets.invoke(work, "getIsAdAweme"))) return hidden;
+                || Boolean.TRUE.equals(HostTargets.invoke(work, "getIsAdAweme"))) {
+            DouAiLog.event("short_progress", "decision", "advertisement", "native_predicate_retained=true");
+            return hidden;
+        }
         Object type = HostTargets.invoke(work, "getAwemeType");
-        if (!(type instanceof Number) || ((Number) type).intValue() != 0) return hidden;
+        if (!(type instanceof Number) || ((Number) type).intValue() != 0) {
+            DouAiLog.event("short_progress", "decision", "work_type_not_video", "native_predicate_retained=true");
+            return hidden;
+        }
         Object video = HostTargets.invoke(work, "getVideo");
-        if (video == null) return hidden;
+        if (video == null) {
+            DouAiLog.event("short_progress", "decision", "video_model_unavailable", "native_predicate_retained=true");
+            return hidden;
+        }
         Object duration = suppliedDuration;
         if (!(duration instanceof Number)) duration = HostTargets.invoke(video, "getDuration");
         if (!(duration instanceof Number)) duration = HostTargets.read(video, "x");
         if (!(duration instanceof Number)) duration = HostTargets.read(work, "duration");
-        if (!(duration instanceof Number)) return hidden;
+        if (!(duration instanceof Number)) {
+            DouAiLog.event("short_progress", "decision", "duration_unavailable", "native_predicate_retained=true");
+            return hidden;
+        }
         long millis = ((Number) duration).longValue();
-        return millis <= 0 || millis > 30_000;
+        boolean result = millis <= 0 || millis > 30_000;
+        DouAiLog.event("short_progress", "predicate_result", result ? "duration_outside_short_range" : "short_progress_allowed",
+                "duration_ms=" + millis + ";returned_hidden=" + result + ";rendered_progress=unobserved");
+        return result;
     }
 
     boolean isLegacyInstalled() { return legacy.isActive(); }

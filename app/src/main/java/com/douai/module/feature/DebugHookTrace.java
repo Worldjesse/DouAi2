@@ -4,8 +4,8 @@ import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.os.ParcelFileDescriptor;
 
-import com.douai.module.diagnostics.DebugCommentSnapshot;
-import com.douai.module.diagnostics.DebugMessageSnapshot;
+import com.douai.module.diagnostics.DouAiLog;
+import com.douai.module.diagnostics.FeatureLogCatalog;
 
 import java.io.FileNotFoundException;
 import java.lang.reflect.Array;
@@ -29,6 +29,12 @@ public final class DebugHookTrace {
     private static final int MAX_ARGS = 6;
     private DebugHookTrace() { }
 
+    /** Production path: safe detail fields go directly to the structured evidence sink. */
+    public static XposedInterface wrap(XposedInterface base, BooleanSupplier enabled) {
+        return wrap(base, enabled, ignored -> { }, System::nanoTime);
+    }
+
+    /** Optional safe-summary observer; it is never responsible for delivering structured evidence. */
     public static XposedInterface wrap(XposedInterface base, BooleanSupplier enabled,
                                        Consumer<String> detailLog) {
         return wrap(base, enabled, detailLog, System::nanoTime);
@@ -52,8 +58,6 @@ public final class DebugHookTrace {
         if (framework instanceof TracingFramework) {
             TracingFramework tracing = (TracingFramework) framework;
             tracing.limiter.reset();
-            tracing.comments.reset();
-            tracing.messages.reset();
         }
     }
 
@@ -109,13 +113,9 @@ public final class DebugHookTrace {
         private final Consumer<String> log;
         private final LongSupplier clock;
         private final Limiter limiter = new Limiter();
-        private final DebugCommentSnapshot comments;
-        private final DebugMessageSnapshot messages;
 
         TracingFramework(XposedInterface base, BooleanSupplier enabled, Consumer<String> log, LongSupplier clock) {
             this.base = base; this.enabled = enabled; this.log = log; this.clock = clock;
-            comments = new DebugCommentSnapshot(enabled, log, clock);
-            messages = new DebugMessageSnapshot(enabled, log, clock);
         }
 
         private long now() {
@@ -125,7 +125,24 @@ public final class DebugHookTrace {
 
         private void emit(String message) {
             if (!enabled(enabled)) return;
+            Boolean previous = OBSERVING.get();
+            OBSERVING.set(Boolean.TRUE);
+            try {
+                DouAiLog.event("logging", "hook_detail_suppression", "detail_rate_limit", message);
+            } catch (Throwable unavailable) { /* Diagnostics cannot change a host invocation. */ }
+            finally { if (previous == null) OBSERVING.remove(); else OBSERVING.set(previous); }
             emitBasic(message);
+        }
+
+        private void detail(String id, String phase, String input, String output,
+                            long durationUs, Throwable error, String summary) {
+            Boolean previous = OBSERVING.get();
+            OBSERVING.set(Boolean.TRUE);
+            try { DouAiLog.hookDetail(id, FeatureLogCatalog.forHook(id), phase, input, output, durationUs, error); }
+            catch (Throwable unavailable) { /* Diagnostics cannot change a host invocation. */ }
+            finally { if (previous == null) OBSERVING.remove(); else OBSERVING.set(previous); }
+            // Compatibility observers receive only the already-safe summary, never host objects.
+            emitBasic(summary);
         }
 
         private void emitBasic(String message) {
@@ -142,26 +159,23 @@ public final class DebugHookTrace {
             finally { OBSERVING.remove(); }
         }
 
-        private void snapshot(String id, String phase, XposedInterface.Chain chain, Object result) {
-            OBSERVING.set(Boolean.TRUE);
-            try {
-                Object owner = chain.getThisObject();
-                List<?> arguments = chain.getArgs();
-                comments.capture(id, phase, owner, arguments, result);
-                messages.capture(id, phase, owner, arguments, result);
-            }
-            catch (Throwable unavailable) { /* Includes malformed framework metadata, never the hooker's failure. */ }
-            finally { OBSERVING.remove(); }
-        }
-
         private Hooker observe(String id, Hooker original) {
+            Observation observation = new Observation(id);
             return chain -> {
-                // Disabled means no clock, argument inspection, JSON, limiter or chain access.
+                if (!Boolean.TRUE.equals(OBSERVING.get())) observation.entered();
+                // Basic observations never inspect the host's arguments or read the clock.
                 if (!enabled(enabled)) {
-                    try { return original.intercept(chain); }
+                    try {
+                        Object result = original.intercept(chain);
+                        observation.finished(false);
+                        return result;
+                    }
                     catch (Throwable failure) {
-                        if (!expectedPackageLookup(id, failure) && !Boolean.TRUE.equals(OBSERVING.get())) emitBasic("Hook call threw; hook=" + id
-                                + "; exception=" + failure.getClass().getName());
+                        observation.finished(true);
+                        if (!expectedPackageLookup(id, failure) && !Boolean.TRUE.equals(OBSERVING.get())) {
+                            detail(id, "threw", "not_inspected", "unavailable", -1L, failure,
+                                    "Hook call threw; hook=" + id + "; exception=" + failure.getClass().getName());
+                        }
                         throw failure;
                     }
                 }
@@ -172,37 +186,73 @@ public final class DebugHookTrace {
                         + " windowMs=" + Limiter.WINDOW_MS);
                 boolean sampled = limiter.normal(id, started / 1_000_000L);
                 String input = sampled ? inputs(chain) : "not_sampled";
-                snapshot(id, "before", chain, null);
+
                 long invokedAt = now();
                 Object result;
                 try {
                     result = original.intercept(chain);
                 } catch (Throwable failure) {
+                    observation.finished(true);
                     long finishedAt = now();
                     if (expectedPackageLookup(id, failure)) {
-                        if (sampled) emit("[DouAi.Trace] hook=" + id + " outcome=package_not_found"
-                                + " elapsedUs=" + elapsed(invokedAt, finishedAt));
+                        if (sampled) detail(id, "package_not_found", input, "unavailable",
+                                elapsed(invokedAt, finishedAt), null,
+                                "[DouAi.Trace] hook=" + id + " outcome=package_not_found"
+                                        + " elapsedUs=" + elapsed(invokedAt, finishedAt));
                         else limiter.dropped();
                     } else if (sampled || limiter.error(id, finishedAt / 1_000_000L)) {
-                        emit("[DouAi.Trace] hook=" + id + " args=" + input + " throws="
-                                + failure.getClass().getName() + " elapsedUs=" + elapsed(invokedAt, finishedAt));
+                        detail(id, "threw", input, "unavailable", elapsed(invokedAt, finishedAt), failure,
+                                "[DouAi.Trace] hook=" + id + " args=" + input + " throws="
+                                        + failure.getClass().getName() + " elapsedUs=" + elapsed(invokedAt, finishedAt));
                     } else limiter.dropped();
-                    snapshot(id, "after", chain, null);
+
                     throw failure;
                 }
                 long finishedAt = now();
+                observation.finished(false);
                 if (sampled) {
                     String output;
                     OBSERVING.set(Boolean.TRUE);
                     try { output = describe(result); }
                     catch (Throwable unavailable) { output = "unavailable"; }
                     finally { OBSERVING.remove(); }
-                    emit("[DouAi.Trace] hook=" + id + " args=" + input + " result=" + output
-                            + " elapsedUs=" + elapsed(invokedAt, finishedAt));
+                    if (enabled(enabled)) detail(id, "returned", input, output, elapsed(invokedAt, finishedAt), null,
+                            "[DouAi.Trace] hook=" + id + " args=" + input + " result=" + output
+                                    + " elapsedUs=" + elapsed(invokedAt, finishedAt));
                 } else limiter.dropped();
-                snapshot(id, "after", chain, result);
+
                 return result;
             };
+        }
+
+        /** A return is only transport observation. It never closes a business operation as success. */
+        private final class Observation {
+            final String id, feature;
+            long entered, returned, threw;
+            Boolean previousFailure;
+            Observation(String id) { this.id = id; feature = FeatureLogCatalog.forHook(id); }
+            synchronized void entered() {
+                entered++;
+                if (entered == 1) report("first_trigger", "entered=1;business_result=unknown");
+            }
+            synchronized void finished(boolean failure) {
+                if (Boolean.TRUE.equals(OBSERVING.get())) return;
+                if (failure) threw++; else returned++;
+                long count = returned + threw;
+                if (previousFailure == null || previousFailure != failure || count >= 64 && (count & (count - 1)) == 0) {
+                    report(failure ? "threw" : "returned", "entered=" + entered + ";returned=" + returned
+                            + ";threw=" + threw + ";aggregated=" + (count > 1)
+                            + ";business_result=unknown");
+                }
+                previousFailure = failure;
+            }
+            void report(String phase, String evidence) {
+                Boolean prior = OBSERVING.get();
+                OBSERVING.set(Boolean.TRUE);
+                try { DouAiLog.hook(id, feature, phase, evidence); }
+                catch (Throwable ignored) { }
+                finally { if (prior == null) OBSERVING.remove(); else OBSERVING.set(prior); }
+            }
         }
 
         private long elapsed(long started, long finished) { return Math.max(0L, finished - started) / 1_000L; }
@@ -232,7 +282,15 @@ public final class DebugHookTrace {
             @Override public HookBuilder setId(String value) { delegate = delegate.setId(value); id = label(value); return this; }
             @Override public HookHandle intercept(Hooker hooker) {
                 // Return the real handle, retaining the framework's unhook/getId/replaceHook contracts.
-                return delegate.intercept(hooker == null ? null : observe(id, hooker));
+                try {
+                    HookHandle handle = delegate.intercept(hooker == null ? null : observe(id, hooker));
+                    DouAiLog.hook(id, FeatureLogCatalog.forHook(id), handle == null ? "installation_empty" : "installed",
+                            "business_result=not_implied");
+                    return handle;
+                } catch (Throwable failure) {
+                    DouAiLog.failure(FeatureLogCatalog.forHook(id), "hook_installation", failure);
+                    throw failure;
+                }
             }
         }
 

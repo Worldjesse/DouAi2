@@ -1,6 +1,8 @@
 package com.douai.module.feature;
 
 import io.github.libxposed.api.XposedInterface;
+import com.douai.module.diagnostics.DouAiLog;
+import com.douai.module.diagnostics.DebugLog;
 import org.junit.Test;
 
 import java.lang.reflect.Method;
@@ -17,6 +19,122 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.junit.Assert.*;
 
 public final class DebugHookTraceTest {
+    @Test public void structuredSinkRetainsSafeTypesResultAndDurationWithoutLegacyHashing() throws Throwable {
+        Fixture f = new Fixture(); AtomicLong nanos = new AtomicLong();
+        List<String> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+        f.arguments = Arrays.asList("PRIVATE DETAIL BODY", 987654321L, true, new Poison(), new byte[7]);
+        f.onGetArgs = () -> nanos.addAndGet(1_000_000L);
+        assertTrue(DouAiLog.awaitIdle(5000));
+        boolean previous = DebugLog.isEnabled(); DebugLog.setEnabled(true);
+        DouAiLog.setFrameworkSink((priority, line) -> events.add(line));
+        try {
+            DebugHookTrace.wrap(f.framework, DebugLog::isEnabled, ignored -> { }, nanos::get)
+                    .hook(target()).setId("DouAi.HomeTab.Filter.StructuredDetailRegression").intercept(chain -> {
+                        nanos.addAndGet(750_000L); return Boolean.FALSE;
+                    });
+            assertEquals(Boolean.FALSE, f.hooker.intercept(f.chain()));
+            assertTrue(DouAiLog.awaitIdle(5000));
+            String detail = events.stream().filter(line -> line.contains("\"event\":\"hook_detail\""))
+                    .findFirst().orElseThrow();
+            assertTrue(detail.contains("\"hook_id\":\"DouAi.HomeTab.Filter.StructuredDetailRegression\""));
+            assertTrue(detail.contains("\"phase\":\"returned\""));
+            assertTrue(detail.contains("java.lang.String(len=19)"));
+            assertTrue(detail.contains("java.lang.Boolean(true)"));
+            assertTrue(detail.contains("[B(size=7)"));
+            assertTrue(detail.contains("\"result\":\"java.lang.Boolean(false)\""));
+            assertTrue(detail.contains("\"duration_us\":\"750\""));
+            assertTrue(detail.contains("\"level\":\"DEBUG\"") || detail.contains("\"level\":\"TRACE\""));
+            assertFalse(detail.contains("legacy_diagnostic"));
+            assertFalse(String.join("\n", events).contains("PRIVATE DETAIL BODY"));
+            assertFalse(String.join("\n", events).contains("987654321"));
+        } finally {
+            DouAiLog.awaitIdle(5000); DouAiLog.setFrameworkSink(null); DebugLog.setEnabled(previous);
+        }
+    }
+
+    @Test public void structuredErrorSurvivesDisabledDetailWithoutInspectingArgumentsOrClock() throws Throwable {
+        Fixture f = new Fixture(); List<String> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+        Error original = new AssertionError("PRIVATE DISABLED ERROR BODY");
+        XposedInterface.Chain unreadable = (XposedInterface.Chain) Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class<?>[]{XposedInterface.Chain.class}, (p, method, args) -> { throw new AssertionError("metadata read"); });
+        assertTrue(DouAiLog.awaitIdle(5000));
+        boolean previous = DebugLog.isEnabled(); DebugLog.setEnabled(false);
+        DouAiLog.setFrameworkSink((priority, line) -> events.add(line));
+        try {
+            DebugHookTrace.wrap(f.framework, DebugLog::isEnabled, ignored -> { },
+                    () -> { throw new AssertionError("disabled clock read"); })
+                    .hook(target()).setId("DouAi.HomeTab.Filter.DisabledErrorRegression").intercept(chain -> { throw original; });
+            try { f.hooker.intercept(unreadable); fail(); } catch (Throwable actual) { assertSame(original, actual); }
+            assertTrue(DouAiLog.awaitIdle(5000));
+            String detail = events.stream().filter(line -> line.contains("\"event\":\"hook_detail\""))
+                    .findFirst().orElseThrow();
+            assertTrue(detail.contains("\"phase\":\"threw\""));
+            assertTrue(detail.contains("\"hook_id\":\"DouAi.HomeTab.Filter.DisabledErrorRegression\""));
+            assertTrue(detail.contains("\"exception_class\":\"java.lang.AssertionError\""));
+            assertTrue(detail.contains("\"exception_message\":"));
+            assertTrue(detail.contains("\"log_mode\":\"simple\""));
+            for (String field : Arrays.asList("args", "result", "duration_us", "stack", "cause_chain")) {
+                assertFalse(field + " must be omitted when debug is off", detail.contains("\"" + field + "\":"));
+            }
+            assertTrue(detail.contains("\"level\":\"ERROR\"") || detail.contains("\"level\":\"WARN\""));
+            assertFalse(String.join("\n", events).contains("PRIVATE DISABLED ERROR BODY"));
+            assertFalse(events.stream().anyMatch(line -> line.contains("\"phase\":\"returned\"")));
+        } finally {
+            DouAiLog.awaitIdle(5000); DouAiLog.setFrameworkSink(null); DebugLog.setEnabled(previous);
+        }
+    }
+
+    @Test public void productionWrapperKeepsNormalDetailOffAtTheStructuredSink() throws Throwable {
+        Fixture f = new Fixture(); List<String> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+        f.onGetArgs = () -> { throw new AssertionError("disabled metadata read"); };
+        assertTrue(DouAiLog.awaitIdle(5000));
+        boolean previous = DebugLog.isEnabled(); DebugLog.setEnabled(false);
+        DouAiLog.setFrameworkSink((priority, line) -> events.add(line));
+        try {
+            DebugHookTrace.wrap(f.framework, DebugLog::isEnabled).hook(target())
+                    .setId("DouAi.HomeTab.Filter.DisabledDetailRegression").intercept(XposedInterface.Chain::proceed);
+            assertSame(f.result, f.hooker.intercept(f.chain()));
+            assertTrue(DouAiLog.awaitIdle(5000));
+            assertFalse(events.stream().anyMatch(line -> line.contains("hook_first_trigger")));
+            assertFalse(events.stream().anyMatch(line -> line.contains("hook_installed")));
+            assertFalse(events.stream().anyMatch(line -> line.contains("hook_returned")));
+            assertFalse(events.stream().anyMatch(line -> line.contains("\"event\":\"hook_detail\"")));
+        } finally {
+            DouAiLog.awaitIdle(5000); DouAiLog.setFrameworkSink(null); DebugLog.setEnabled(previous);
+        }
+    }
+
+    @Test public void basicModeSummarizesRealHookObservationWithoutInventingABusinessSuccess() throws Throwable {
+        Fixture fixture = new Fixture();
+        AtomicInteger metadataReads = new AtomicInteger(), clockReads = new AtomicInteger();
+        fixture.onGetArgs = metadataReads::incrementAndGet;
+        List<String> evidence = new java.util.concurrent.CopyOnWriteArrayList<>();
+        assertTrue(DouAiLog.awaitIdle(5000));
+        boolean previous = DebugLog.isEnabled(); DebugLog.setEnabled(true);
+        DouAiLog.setFrameworkSink((priority, line) -> evidence.add(line));
+        try {
+            // Global detail output is on; this wrapper still observes only basic counters.
+            XposedInterface framework = DebugHookTrace.wrap(fixture.framework, () -> false, ignored -> { },
+                    () -> { clockReads.incrementAndGet(); throw new AssertionError("basic hook must not use detail clock"); });
+            framework.hook(target()).setId("DouAi.HomeTab.Filter.BasicEvidenceRegression")
+                    .intercept(XposedInterface.Chain::proceed);
+            for (int i = 0; i < 130; i++) assertSame(fixture.result, fixture.hooker.intercept(fixture.chain()));
+            assertTrue(DouAiLog.awaitIdle(5000));
+            String joined = String.join("\n", evidence);
+            assertTrue(joined.contains("hook_first_trigger"));
+            assertTrue(joined.contains("returned=128"));
+            assertTrue(joined.contains("business_result=unknown"));
+            assertFalse(joined.contains("operation_finished"));
+            assertTrue("130 hot hook invocations should stay aggregated", evidence.size() < 10);
+            assertEquals(130, fixture.proceeded);
+            assertEquals(0, metadataReads.get()); assertEquals(0, clockReads.get());
+        } finally {
+            DouAiLog.awaitIdle(5000);
+            DouAiLog.setFrameworkSink(null);
+            DebugLog.setEnabled(previous);
+        }
+    }
+
     @Test public void fluentImmutableDelegateStaysWrappedAndReturnsTheOriginalHandle() throws Throwable {
         Fixture f = new Fixture(); List<String> logs = new ArrayList<>();
         XposedInterface wrapped = DebugHookTrace.wrap(f.framework, () -> true, logs::add, () -> 0);

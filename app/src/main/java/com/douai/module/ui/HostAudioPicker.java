@@ -1,5 +1,7 @@
 package com.douai.module.ui;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.app.Activity;
 import android.content.Context;
 import android.net.Uri;
@@ -25,13 +27,16 @@ public final class HostAudioPicker {
                 deliver(onImported, null);
                 return;
             }
-            Thread copy = new Thread(() -> importFile(context, source, onImported), "DouAi-AudioImport");
+            DouAiLog.Operation selectedTrace = DouAiLog.current();
+            Runnable importAction = () -> importFile(context, source, onImported);
+            Thread copy = new Thread(selectedTrace == null ? importAction : selectedTrace.wrap(importAction), "DouAi-AudioImport");
             copy.setDaemon(true);
             copy.start();
         });
     }
 
     private static void importFile(Context context, Uri source, java.util.function.Consumer<String> onImported) {
+        DouAiLog.Operation trace = DouAiLog.begin("media_picker", "audio_import");
         File target = null;
         try {
             File directory = new File(context.getFilesDir(), "douai-voice-source");
@@ -55,9 +60,11 @@ public final class HostAudioPicker {
                 if (count == 0) throw new IllegalStateException("语音文件为空");
             }
             String imported = target.getAbsolutePath();
+            trace.finish(DouAiLog.Outcome.SUCCESS, "audio_file_closed_and_sized", "bytes=" + target.length() + ";audio_decoding=not_verified");
             deliver(onImported, imported);
             target = null;
         } catch (Exception failure) {
+            trace.error("audio_copy", failure); trace.finish(DouAiLog.Outcome.FAILED, "audio_import_failed", "partial_file_cleanup=true");
             deliver(onImported, null);
             toast(context, failure.getMessage() == null ? "语音文件读取失败" : failure.getMessage());
         } finally {

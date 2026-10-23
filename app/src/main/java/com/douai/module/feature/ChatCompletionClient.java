@@ -1,5 +1,6 @@
 package com.douai.module.feature;
 
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.AiModelConfig;
 import com.douai.module.config.AiModelSettings;
 
@@ -175,27 +176,34 @@ public final class ChatCompletionClient {
                 deadline.remainingMillis();
                 if (request.commitHistory != null) request.commitHistory.run();
             }
+            if (request.ownsTrace) request.trace.finish(DouAiLog.Outcome.SUCCESS, "model_stream_validated", "chars=" + result.length() + ";deadline_and_cancel_checks_passed=true");
             return result;
         } catch (TimeoutException timeout) {
             request.timedOut = true;
+            request.trace.stage("model_timeout", "deadline_seconds=" + config.timeoutSeconds + ";remote_result=unknown");
+            if (request.ownsTrace) request.trace.finish(DouAiLog.Outcome.TIMED_OUT, "model_timeout", "remote_result=unknown");
             // Fence late results immediately; even interrupt/close work stays off the waiting caller.
             io.cancel(false);
             ensureActive(request);
             throw new java.net.SocketTimeoutException("AI request deadline exceeded");
         } catch (InterruptedException interrupted) {
+            if (request.ownsTrace) request.trace.finish(DouAiLog.Outcome.CANCELLED, "model_wait_interrupted", "remote_result=unknown");
             request.cancelled = true;
             io.cancel(false);
             Thread.currentThread().interrupt();
             throw cancelled();
         } catch (ExecutionException failed) {
+            if (request.ownsTrace) request.trace.finish(DouAiLog.Outcome.FAILED, "model_io_failed", "cause_type=" + (failed.getCause() == null ? "none" : failed.getCause().getClass().getSimpleName()));
             ensureActive(request);
             Throwable cause = failed.getCause();
             if (cause instanceof Exception) throw (Exception) cause;
             throw new IllegalStateException("AI request I/O did not complete");
         } catch (CancellationException cancelled) {
+            if (request.ownsTrace) request.trace.finish(DouAiLog.Outcome.CANCELLED, "model_cancelled", "remote_result=unknown");
             ensureActive(request);
             throw cancelled();
         } catch (RejectedExecutionException busy) {
+            if (request.ownsTrace) request.trace.finish(DouAiLog.Outcome.FAILED, "model_executor_busy", "request_io_started=false");
             throw new IllegalStateException("AI 请求繁忙，请稍后重试");
         } finally {
             io.cancel(false);
@@ -227,6 +235,7 @@ public final class ChatCompletionClient {
             if (activeRequest == null) return;
             request = activeRequest;
             request.cancelled = true;
+            request.trace.stage("model_cancel_requested", "asynchronous=" + request.asynchronous + ";remote_result=unknown");
             connection = request.connection;
             input = request.input;
         }
@@ -370,6 +379,7 @@ public final class ChatCompletionClient {
             activeRequest = request;
         }
         HttpURLConnection connection = null;
+        request.trace.stage("model_transport_prepare", "protocol=" + config.protocol + ";streaming=" + config.streaming() + ";images=" + images.size() + ";history_rounds=" + prior.size() + ";prompt_chars=" + prompt.length() + ";document_chars=" + document.length());
         try {
             ensureActive(request);
             diagnostic(config, secondaryPrompt, prior.size(), "prepare", 0);
@@ -393,12 +403,14 @@ public final class ChatCompletionClient {
             connection.setFixedLengthStreamingMode(bytes.length);
             ensureActive(request);
             try (java.io.OutputStream output = connection.getOutputStream()) { output.write(bytes); }
-            try { requestSent.accept(images.size()); }
+            request.trace.stage("model_transport_sent", "body_bytes=" + bytes.length + ";business_success=false");
+            try { request.trace.wrap(() -> requestSent.accept(images.size())).run(); }
             catch (RuntimeException ignored) { }
             diagnostic(config, secondaryPrompt, prior.size(), "sent", 0);
             ensureActive(request);
             if (deadline != null) deadline.beforeIo(request, connection);
             int status = connection.getResponseCode();
+            request.trace.stage("model_http_response", "http_status=" + status + ";business_success=false");
             diagnostic(config, secondaryPrompt, prior.size(), "response", status);
             if (status < 200 || status >= 300) throw httpFailure(status);
             String result;
@@ -428,8 +440,12 @@ public final class ChatCompletionClient {
                 else commit.run();
                 if (!request.asynchronous && activeRequest == request) activeRequest = null;
             }
+            request.trace.stage("model_output_validated", "chars=" + result.length() + ";protocol=" + config.protocol + ";delivery_confirmed=false");
+            if (request.ownsTrace && !request.asynchronous) request.trace.finish(DouAiLog.Outcome.SUCCESS, "model_output_validated", "chars=" + result.length() + ";evidence=protocol_completion_and_output_bounds");
             return result;
         } catch (Exception error) {
+            request.trace.error("model_transport", error);
+            if (request.ownsTrace) request.trace.finish(error instanceof java.net.SocketTimeoutException ? DouAiLog.Outcome.TIMED_OUT : error instanceof CancellationException ? DouAiLog.Outcome.CANCELLED : DouAiLog.Outcome.FAILED, "model_request_failed", "type=" + error.getClass().getSimpleName());
             diagnostic(config, secondaryPrompt, prior.size(), "failed", 0);
             ensureActive(request);
             throw error;
@@ -450,7 +466,7 @@ public final class ChatCompletionClient {
         deadline.beforeIo(request, connection);
         String contentType = connection.getContentType();
         boolean sse = contentType != null && contentType.toLowerCase(java.util.Locale.ROOT).startsWith("text/event-stream");
-        streamDiagnostic(deadline, "transport=" + (sse ? "stream" : "json") + " stage=stream_headers status=" + status);
+        streamDiagnostic(request, deadline, "transport=" + (sse ? "stream" : "json") + " stage=stream_headers status=" + status);
         InputStream guarded = new FilterInputStream(input) {
             @Override public int read() throws IOException {
                 deadline.beforeIo(request, connection); int value = in.read();
@@ -464,7 +480,7 @@ public final class ChatCompletionClient {
         if (sse) {
             try {
                 return ProtocolResponseStream.read(config.protocol, guarded, maximumReplyChars,
-                        () -> deadline.beforeIo(request, connection), value -> streamDiagnostic(deadline, value));
+                        () -> deadline.beforeIo(request, connection), value -> streamDiagnostic(request, deadline, value));
             } catch (ResponsesAnalysisStream.Failure failure) {
                 ReplyFailure.Kind kind;
                 switch (failure.kind) {
@@ -485,7 +501,8 @@ public final class ChatCompletionClient {
         catch (Exception invalid) { throw new ReplyFailure(ReplyFailure.Kind.FORMAT, status, -1); }
     }
 
-    private void streamDiagnostic(RequestDeadline deadline, String value) {
+    private void streamDiagnostic(ActiveRequest request, RequestDeadline deadline, String value) {
+        request.trace.stage("model_stream_progress", value + ";elapsed_ms=" + deadline.elapsedMillis());
         try { diagnostics.accept(value + " elapsedMs=" + deadline.elapsedMillis()); }
         catch (RuntimeException ignored) { }
     }
@@ -542,6 +559,8 @@ public final class ChatCompletionClient {
     private static CancellationException cancelled() { return new CancellationException("请求已取消"); }
 
     private static final class ActiveRequest {
+        final boolean ownsTrace = DouAiLog.current() == null;
+        final DouAiLog.Operation trace = AutomationTrace.capture("ai_model", "request");
         volatile boolean cancelled;
         volatile boolean timedOut;
         boolean asynchronous;

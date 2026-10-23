@@ -11,12 +11,135 @@ import java.nio.file.Files;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.ThreadPoolExecutor;
+import org.json.JSONObject;
 
 import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class DebugLogStoreTest {
+    @Test public void structuredFloodBypassesTheSaturatedLegacyQueueAndKeepsAllBusinessStages() throws Exception {
+        File directory = Files.createTempDirectory("douai-structured-flood").toFile();
+        try (DebugLogStore store = new DebugLogStore(directory)) {
+            CountDownLatch release = blockLegacyWorker(store);
+            try {
+                for (int i = 0; i < 600; i++) store.record(true, 3, "detail", "legacy-flood-" + i, null);
+                // This is the same direct call made by the upstream evidence worker; there is no second queue.
+                for (int trace = 0; trace < 300; trace++) {
+                    store.recordStructured(4, event(trace * 3 + 1, "operation_started", "trace-" + trace));
+                    store.recordStructured(4, event(trace * 3 + 2, "stage", "trace-" + trace));
+                    store.recordStructured(4, event(trace * 3 + 3, "operation_finished", "trace-" + trace));
+                }
+            } finally { release.countDown(); }
+            String snapshot = read(store, true);
+            for (int trace = 0; trace < 300; trace++) {
+                assertTrue("start " + trace, snapshot.contains(event(trace * 3 + 1, "operation_started", "trace-" + trace)));
+                assertTrue("stage " + trace, snapshot.contains(event(trace * 3 + 2, "stage", "trace-" + trace)));
+                assertTrue("terminal " + trace, snapshot.contains(event(trace * 3 + 3, "operation_finished", "trace-" + trace)));
+            }
+            JSONObject integrity = new JSONObject(store.integrity());
+            assertTrue("legacy saturation is accounted", integrity.getLong("lost_count") > 0);
+            assertEquals("evidence_worker_direct_no_secondary_queue", integrity.getString("structured_delivery"));
+            assertFalse("no structured record was rejected by the legacy queue", integrity.getJSONObject("affected_records").toString().contains("trace-"));
+            assertTrue(new File(directory, "debug.log").length() <= DebugLogStore.TOTAL_BYTES);
+        }
+    }
+
+    @Test public void ioFailureIsExplicitAndIdentifiesTheMemoryOnlyBusinessEvidence() throws Exception {
+        File unavailableDirectory = Files.createTempFile("douai-log-io-failure", ".not-directory").toFile();
+        try (DebugLogStore store = new DebugLogStore(unavailableDirectory)) {
+            String json = event(42, "operation_finished", "io-trace");
+            store.recordStructured(4, json);
+            String snapshot = read(store, true);
+            assertTrue(snapshot.contains(json));
+            assertTrue(snapshot.contains("memory_fallback")); assertTrue(snapshot.contains("disk_read_failure"));
+            JSONObject integrity = new JSONObject(store.integrity());
+            assertEquals(1, integrity.getLong("io_failures"));
+            JSONObject affected = integrity.getJSONObject("affected_records").getJSONArray("affected").getJSONObject(0);
+            assertEquals("disk_write_failure_memory_only", affected.getString("reason"));
+            assertEquals("session-fixture", affected.getString("session_id"));
+            assertEquals("io-trace", affected.getString("trace_id")); assertEquals(42, affected.getLong("first_seq"));
+            assertEquals("operation_finished", affected.getString("event"));
+        }
+    }
+
+    @Test public void clearSeparatesGenerationsIncludingStartupReplayAndLaterDirectDelivery() throws Exception {
+        File directory = Files.createTempDirectory("douai-clear-generation").toFile();
+        try (DebugLogStore store = new DebugLogStore(directory)) {
+            store.recordStructured(4, event(1, "operation_started", "old-trace"));
+            CountDownLatch release = blockLegacyWorker(store);
+            store.replayStartup(java.util.Collections.singletonList(new String[]{"4", "DouAi.Event", event(2, "stage", "old-startup"), "structured"}));
+            CountDownLatch cleared = new CountDownLatch(1);
+            store.clear(ok -> { assertTrue(ok); cleared.countDown(); });
+            Thread evidence = new Thread(() -> store.recordStructured(4, event(3, "operation_finished", "new-trace")));
+            evidence.start(); release.countDown();
+            assertTrue(cleared.await(5, TimeUnit.SECONDS)); evidence.join(5000); assertFalse(evidence.isAlive());
+            String snapshot = read(store, true);
+            assertFalse(snapshot.contains("old-trace")); assertFalse(snapshot.contains("old-startup"));
+            assertTrue(snapshot.contains("new-trace"));
+            String integrity = store.integrity(); assertTrue(integrity.contains("user_clear_disk"));
+            assertTrue(integrity.contains("old-trace")); assertTrue(integrity.contains("user_clear_startup"));
+        }
+    }
+
+    @Test public void structuredJsonIsNeverCutAndUtf8TailStartsAtACompleteRecord() throws Exception {
+        File directory = Files.createTempDirectory("douai-structured-utf8").toFile();
+        try (DebugLogStore store = new DebugLogStore(directory)) {
+            String large = "{\"session_id\":\"s\",\"seq\":\"1\",\"event\":\"stage\",\"evidence\":\"" + "中😀".repeat(25_000) + "\"}";
+            store.recordStructured(4, large);
+            String snapshot = read(store, true);
+            assertTrue(snapshot.contains(large)); assertFalse(snapshot.contains("\uFFFD"));
+            assertFalse(store.memoryTail(DebugLogStore.TAIL_BYTES).contains("\"evidence\":"));
+            assertTrue(store.integrity().contains("memory_entry_capacity"));
+            String newest = event(2, "operation_finished", "utf8-trace");
+            String tail = DebugLogStore.utf8Tail(large + "\n" + newest + "\n", 800);
+            assertTrue(tail.contains(newest)); assertFalse(tail.contains("\uFFFD"));
+            assertTrue(tail.startsWith("[tail truncated]\n{"));
+        }
+    }
+
+    @Test public void rotationReportsDiscardedStructuredIdentitiesAndKeepsDiskBounded() throws Exception {
+        File directory = Files.createTempDirectory("douai-structured-retention").toFile();
+        try (DebugLogStore store = new DebugLogStore(directory)) {
+            for (int seq = 1; seq <= 36; seq++) {
+                String record = event(seq, "operation_finished", "rotation-trace-" + seq);
+                store.recordStructured(4, record.substring(0, record.length() - 1) + ",\"evidence\":\"" + "x".repeat(100_000) + "\"}");
+            }
+            assertTrue(new File(directory, "debug.log").length() + new File(directory, "debug.1.log").length() <= DebugLogStore.TOTAL_BYTES);
+            String integrity = store.integrity(); assertTrue(integrity.contains("retention_rotation")); assertTrue(integrity.contains("rotation-trace-1"));
+            assertFalse(integrity.contains("xxxx"));
+            assertTrue(read(store, true).contains("rotation-trace-36"));
+        }
+    }
+
+    @Test public void separateStoresShareAFileLockWithoutOverlappingLockFailures() throws Exception {
+        File directory = Files.createTempDirectory("douai-shared-store").toFile();
+        try (DebugLogStore first = new DebugLogStore(directory); DebugLogStore second = new DebugLogStore(directory)) {
+            Thread one = new Thread(() -> { for (int i = 1; i <= 75; i++) first.recordStructured(4, event(i, "stage", "writer-one")); });
+            Thread two = new Thread(() -> { for (int i = 76; i <= 150; i++) second.recordStructured(4, event(i, "operation_finished", "writer-two")); });
+            one.start(); two.start(); one.join(10000); two.join(10000);
+            assertFalse(one.isAlive()); assertFalse(two.isAlive());
+            assertEquals(0, new JSONObject(first.integrity()).getLong("io_failures"));
+            assertEquals(0, new JSONObject(second.integrity()).getLong("io_failures"));
+            String snapshot = read(first, true);
+            for (int seq = 1; seq <= 150; seq++) assertTrue(snapshot.contains("\"seq\":\"" + seq + "\""));
+        }
+    }
+
+    private static String event(int seq, String event, String trace) {
+        return "{\"session_id\":\"session-fixture\",\"seq\":\"" + seq + "\",\"feature_id\":\"download\",\"event\":\"" + event + "\",\"trace_id\":\"" + trace + "\"}";
+    }
+
+    private static CountDownLatch blockLegacyWorker(DebugLogStore store) throws Exception {
+        java.lang.reflect.Field field = DebugLogStore.class.getDeclaredField("worker"); field.setAccessible(true);
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        ((ThreadPoolExecutor) field.get(store)).execute(() -> {
+            entered.countDown(); try { release.await(10, TimeUnit.SECONDS); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+        });
+        assertTrue(entered.await(5, TimeUnit.SECONDS)); return release;
+    }
+
     @Test public void writingIsAsyncBoundedRotatedAndRedactedBeforeDiskOrMemory() throws Exception {
         File directory = Files.createTempDirectory("douai-debug-store").toFile();
         try (DebugLogStore store = new DebugLogStore(directory)) {

@@ -4,6 +4,7 @@ import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
 import android.widget.Toast;
+import com.douai.module.diagnostics.DouAiLog;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -74,8 +75,11 @@ public final class DownloadTasks {
         Task task = new Task(application == null ? source : application, key, name, log,
                 key.startsWith("third-party\n") ? "第三方下载失败，请重试" : "媒体保存失败，请重试");
         synchronized (TASKS) { TASKS.put(task.id, task); }
-        BoundedMediaQueue.Handle handle = QUEUE.submit(key, () -> task.run(work), task::released);
+        task.operation.stage("queue_requested", "business_result=pending");
+        BoundedMediaQueue.Handle handle = QUEUE.submit(key, task.operation.wrap(() -> task.run(work)),
+                task.operation.wrap(task::released));
         if (handle == null) {
+            task.operation.finish(DouAiLog.Outcome.SKIPPED, "deduplicated_or_queue_full", "queue_did_not_accept");
             synchronized (TASKS) { TASKS.remove(task.id); }
             return null;
         }
@@ -108,6 +112,8 @@ public final class DownloadTasks {
         final Consumer<String> log;
         final String failureMessage;
         private final AnalyticsActionCapture analytics;
+        final DouAiLog.Operation operation;
+        final boolean parser;
         final DownloadTransfer transfer = transfers.get();
         volatile BoundedMediaQueue.Handle handle;
         volatile String status = "queued";
@@ -117,9 +123,15 @@ public final class DownloadTasks {
         final AtomicBoolean disconnectQueued = new AtomicBoolean();
         Task(Context context, String key, String name, Consumer<String> log, String failureMessage) {
             this.context = context; this.log = log; this.failureMessage = failureMessage;
+            parser = key.startsWith("third-party\nparse\n");
+            String feature = parser ? "third_party_parse" : key.startsWith("third-party\n")
+                    ? "third_party_download" : key.startsWith("official-live-photo\n") ? "live_photo_download" : "media_download";
+            operation = DouAiLog.begin(feature, "user_download");
+            transfer.operation = operation;
+            operation.stage("ready", "task_ref=" + DouAiLog.reference(id) + "; source_ref=" + DouAiLog.reference(key));
             // A parser finishing is not saved media. Completed saves count once per task, with no
             // work/visit attribution: a later foreground card must never inherit this completion.
-            analytics = key.startsWith("third-party\nparse\n") ? null : AnalyticsActionCapture.capture(context, null);
+            analytics = parser ? null : AnalyticsActionCapture.capture(context, null);
             transfer.name = name; transfer.changed = DownloadTasks::changed;
         }
         Snapshot snapshot() {
@@ -129,6 +141,7 @@ public final class DownloadTasks {
         void run(Work work) {
             java.util.concurrent.ScheduledFuture<?> watchdog = null;
             try {
+                operation.stage("queue_admitted", "accepted=true; business_result=pending");
                 transfer.start();
                 synchronized (this) {
                     transfer.check();
@@ -137,11 +150,15 @@ public final class DownloadTasks {
                 transfer.phase("准备下载");
                 watchdog = CLOCK.scheduleWithFixedDelay(this::watch, 1, 1, TimeUnit.SECONDS);
                 successMessage = work.run(transfer);
+                operation.stage("work_returned", "completedFiles=" + transfer.completedFiles + "; totalFiles=" + transfer.totalFiles
+                        + "; saveEvidence=" + transfer.savedEvidenceCount);
                 transfer.complete();
                 result = "completed";
             } catch (Exception failure) {
+                transfer.transportTimedOut |= failure instanceof java.net.SocketTimeoutException || failure instanceof java.util.concurrent.TimeoutException;
                 result = transfer.isTimedOut() ? "timed_out" : transfer.isCancelled()
                         || failure instanceof java.util.concurrent.CancellationException ? "cancelled" : "failed";
+                operation.error("download_work", failure);
                 if ("failed".equals(result) && log != null) try {
                     log.accept("Download failed: " + failure.getClass().getSimpleName());
                 } catch (RuntimeException ignored) { }
@@ -163,6 +180,7 @@ public final class DownloadTasks {
                 if (terminal || !transfer.requestCancel(false)) return;
                 status = "cancelling";
             }
+            operation.stage("cancel_requested", "origin=user; resources_closed_asynchronously=true");
             changed();
             stopInBackground();
         }
@@ -182,13 +200,22 @@ public final class DownloadTasks {
         }
         void released() {
             synchronized (this) {
-                if (terminal) return;
+                if (terminal) { operation.stage("duplicate_release", "ignored=true"); return; }
                 status = transfer.isTimedOut() ? "timed_out" : transfer.isCancelled() ? "cancelled" : result;
                 terminal = true;
                 handle = null;
                 transfer.phase = "completed".equals(status) ? "已完成" : "cancelled".equals(status) ? "已取消"
                         : "timed_out".equals(status) ? "超过 30 分钟，已停止" : "下载失败，请重试";
             }
+            DouAiLog.Outcome outcome = "timed_out".equals(status) || "failed".equals(status) && transfer.transportTimedOut ? DouAiLog.Outcome.TIMED_OUT
+                    : "cancelled".equals(status) ? DouAiLog.Outcome.CANCELLED
+                    : !"completed".equals(status) ? DouAiLog.Outcome.FAILED
+                    : parser || transfer.savedEvidenceCount > 0 ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.UNCONFIRMED;
+            operation.finish(outcome, parser && "completed".equals(status) ? "parser_returned_plan"
+                    : "completed".equals(status) && transfer.savedEvidenceCount == 0 ? "save_evidence_missing"
+                    : transfer.transportTimedOut ? "transport_timeout" : status,
+                    "completedFiles=" + transfer.completedFiles + "; totalFiles=" + transfer.totalFiles
+                            + "; saveEvidence=" + transfer.savedEvidenceCount + "; bytes=" + transfer.bytes);
             if ("completed".equals(status) && analytics != null) {
                 analytics.manual("download_completed", "下载任务完成", "success");
             }

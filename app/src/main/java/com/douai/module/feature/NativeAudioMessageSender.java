@@ -1,5 +1,7 @@
 package com.douai.module.feature;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.os.Handler;
 import android.os.Looper;
 
@@ -34,6 +36,7 @@ final class NativeAudioMessageSender implements AutoCloseable {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<XposedInterface.HookHandle> handles = new ArrayList<>();
     private final Map<String, Pending> pending = new ConcurrentHashMap<>();
+    private final Map<String, DouAiLog.Operation> completedTraces = Collections.synchronizedMap(new java.util.LinkedHashMap<>());
     private final Method type;
     private final Constructor<?> plainContent;
     private final Constructor<?> encryptedContent;
@@ -140,8 +143,10 @@ final class NativeAudioMessageSender implements AutoCloseable {
         if (closed) { audio.delete(); done.accept(false); return; }
         String uuid = (String) messageUuid.invoke(message);
         Pending item = new Pending(uuid, audio, done);
+        item.trace.stage("audio_local_insert", "message_ref=" + DouAiLog.reference(uuid) + ";bytes=" + audio.file.length() + ";duration_ms=" + audio.duration + ";remote_ack=false");
         if (pending.putIfAbsent(uuid, item) != null) throw new IllegalStateException("Duplicate native audio UUID");
         main.postDelayed(() -> {
+            item.trace.stage("audio_retention_expired", "retention_ms=" + RETENTION_MILLIS + ";remote_outcome=unknown;completed=" + item.completed.get());
             item.completed.set(true);
             pending.remove(uuid, item);
             audio.delete();
@@ -154,14 +159,17 @@ final class NativeAudioMessageSender implements AutoCloseable {
                         if ("equals".equals(method.getName())) return arguments != null && proxy == arguments[0];
                     }
                     // This callback acknowledges local database insertion, not remote delivery.
-                    if ("onFailure".equals(method.getName())) finish(item, false);
+                    if ("onFailure".equals(method.getName())) { item.trace.stage("audio_local_insert_failed", "remote_ack=false"); finish(item, false); }
                     if ("onSuccess".equals(method.getName()) && !item.completed.get() && (closed || !valid.getAsBoolean())) {
                         finish(item, false); return null;
                     }
                     if ("onSuccess".equals(method.getName()) && !item.completed.get()
                             && item.queued.compareAndSet(false, true)) {
+                        item.trace.stage("audio_upload_enqueue", "local_insert_success=true;remote_ack=false");
                         try { enqueue.invoke(uploader, message, content.value, System.currentTimeMillis(), null); }
                         catch (ReflectiveOperationException | RuntimeException ignored) {
+                            item.trace.error("audio_upload_enqueue", ignored);
+                            item.trace.stage("audio_enqueue_unknown", "native_invocation_threw=true;remote_outcome=unknown");
                             // A throwing native queue may already have submitted an upload; retain its unknown outcome.
                         }
                     }
@@ -171,20 +179,31 @@ final class NativeAudioMessageSender implements AutoCloseable {
     }
 
     private void acknowledge(Object message) throws ReflectiveOperationException {
-        Pending item = pending.get(messageUuid.invoke(message));
-        if (item == null) return;
+        Object uuid = messageUuid.invoke(message);
+        Pending item = pending.get(uuid);
+        if (item == null) {
+            DouAiLog.Operation completed = completedTraces.get(uuid);
+            if (completed != null) completed.stage("audio_late_observation", "previously_completed=true;message_status=" + messageStatus.invoke(message));
+            return;
+        }
         int status = ((Number) messageStatus.invoke(message)).intValue();
-        if (status == 3) { finish(item, false); return; }
+        if (status == 3) { item.trace.stage("audio_native_failure", "message_status=3"); finish(item, false); return; }
         Object extension = messageExt.invoke(message);
         if (status == 2 && ((Number) messageServerId.invoke(message)).longValue() > 0
                 && extension instanceof Map<?, ?> && "0".equals(((Map<?, ?>) extension).get("s:status_code"))) {
+            item.trace.stage("audio_remote_ack", "message_status=2;server_id_positive=true;status_code=0");
             finish(item, true);
         }
     }
 
     private void finish(Pending item, boolean success) {
-        if (!item.completed.compareAndSet(false, true)) return;
+        if (!item.completed.compareAndSet(false, true)) { item.trace.stage("audio_callback_ignored", "duplicate=true;success=" + success); return; }
+        item.trace.stage("audio_callback", "success=" + success + ";evidence=" + (success ? "status_2_positive_server_id_status_code_0" : "native_failure_or_cancelled_before_upload"));
         pending.remove(item.uuid, item);
+        synchronized (completedTraces) {
+            completedTraces.put(item.uuid, item.trace);
+            while (completedTraces.size() > 128) completedTraces.remove(completedTraces.keySet().iterator().next());
+        }
         item.audio.delete();
         item.done.accept(success);
     }
@@ -195,16 +214,20 @@ final class NativeAudioMessageSender implements AutoCloseable {
         handles.clear();
         // Submitted uploads retain their files until the bounded cleanup deadline.
         pending.clear();
+        completedTraces.clear();
     }
 
     private static final class Pending {
         final String uuid;
+        final DouAiLog.Operation trace;
         final SpeechPreparation.Audio audio;
         final Consumer<Boolean> done;
         final AtomicBoolean completed = new AtomicBoolean();
         final AtomicBoolean queued = new AtomicBoolean();
         Pending(String uuid, SpeechPreparation.Audio audio, Consumer<Boolean> done) {
-            this.uuid = uuid; this.audio = audio; this.done = done;
+            this.uuid = uuid; this.audio = audio;
+            trace = AutomationTrace.capture("native_audio_message", "send");
+            this.done = trace.wrapConsumer(done);
         }
     }
 }

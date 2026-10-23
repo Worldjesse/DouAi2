@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 
 import com.douai.module.config.ExtendedSettings;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
@@ -30,6 +31,7 @@ public final class RefreshConfirmHook implements AutoCloseable {
     private final AtomicBoolean confirmationPending = new AtomicBoolean();
     private final Consumer<String> log;
     private volatile boolean enabled;
+    private volatile DouAiLog.Operation pendingOperation;
 
     private RefreshConfirmHook(Method selectTabMethod, ClassLoader hostLoader,
                                ExtendedSettings settings, Consumer<String> log) {
@@ -76,24 +78,40 @@ public final class RefreshConfirmHook implements AutoCloseable {
             CONFIRMED_REENTRY.remove();
             return chain.proceed();
         }
-        if (!enabled) return chain.proceed();
+        if (!enabled) {
+            DouAiLog.event("refresh_confirm", "decision", "disabled", "native_refresh_forwarded=true");
+            return chain.proceed();
+        }
 
         Object[] arguments = chain.getArgs().toArray();
         if (arguments.length != 2 || !(arguments[1] instanceof String)) return chain.proceed();
         String requestedTab = (String) arguments[1];
         if ((!HOME.equals(requestedTab) && !HOME_FEED.equals(requestedTab))
-                || !isCurrentHomeTab(requestedTab)) return chain.proceed();
+                || !isCurrentHomeTab(requestedTab)) {
+            DouAiLog.event("refresh_confirm", "decision", "not_repeated_home_tab", "native_selection_forwarded=true");
+            return chain.proceed();
+        }
 
         Activity activity = currentActivity();
-        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return chain.proceed();
-        if (!confirmationPending.compareAndSet(false, true)) return null;
-        activity.runOnUiThread(() -> showConfirmation(activity, chain.getThisObject(), arguments));
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
+            DouAiLog.event("refresh_confirm", "decision", "activity_unavailable", "native_refresh_forwarded=true");
+            return chain.proceed();
+        }
+        if (!confirmationPending.compareAndSet(false, true)) {
+            DouAiLog.event("refresh_confirm", "decision", "confirmation_already_pending", "duplicate_request_suppressed=true");
+            return null;
+        }
+        DouAiLog.Operation operation = DouAiLog.begin("refresh_confirm", "repeat_home_tab");
+        pendingOperation = operation;
+        operation.stage("await_dialog", "native_refresh_blocked=true");
+        activity.runOnUiThread(operation.wrap(() -> showConfirmation(activity, chain.getThisObject(), arguments, operation)));
         return null;
     }
 
-    private void showConfirmation(Activity activity, Object receiver, Object[] arguments) {
+    private void showConfirmation(Activity activity, Object receiver, Object[] arguments, DouAiLog.Operation operation) {
         if (!enabled || activity.isFinishing() || activity.isDestroyed()) {
             confirmationPending.set(false);
+            operation.finish(DouAiLog.Outcome.CANCELLED, "disabled_or_activity_destroyed", "native_refresh_invoked=false");
             return;
         }
         try {
@@ -102,28 +120,42 @@ public final class RefreshConfirmHook implements AutoCloseable {
                     .setMessage("再次刷新首页推荐内容？")
                     .setNegativeButton("取消", (dialog, which) -> {
                         confirmationPending.set(false);
+                        operation.finish(DouAiLog.Outcome.CANCELLED, "user_cancelled", "native_refresh_invoked=false");
                         dialog.dismiss();
                     })
                     .setPositiveButton("刷新", (dialog, which) -> {
                         confirmationPending.set(false);
-                        invokeConfirmed(receiver, arguments);
+                        operation.wrap(() -> invokeConfirmed(receiver, arguments, operation)).run();
                     })
-                    .setOnCancelListener(dialog -> confirmationPending.set(false))
+                    .setOnCancelListener(dialog -> {
+                        confirmationPending.set(false);
+                        operation.finish(DouAiLog.Outcome.CANCELLED, "dialog_cancelled", "native_refresh_invoked=false");
+                    })
                     .show();
+            operation.stage("await_confirmation", "dialog_show_returned=true;native_refresh_invoked=false");
         } catch (Throwable failure) {
             confirmationPending.set(false);
+            operation.error("show_dialog", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "dialog_unavailable", "native_refresh_invoked=false");
             safeLog("Could not show refresh confirmation: " + failure.getMessage());
         }
     }
 
-    private void invokeConfirmed(Object receiver, Object[] arguments) {
+    private void invokeConfirmed(Object receiver, Object[] arguments, DouAiLog.Operation operation) {
         CONFIRMED_REENTRY.set(true);
         try {
+            operation.stage("forward_native_refresh", "user_confirmed=true");
             selectTabMethod.invoke(receiver, arguments);
+            operation.finish(DouAiLog.Outcome.UNCONFIRMED, "native_refresh_dispatched",
+                    "native_call_returned=true;new_feed_response_observed=false");
         } catch (InvocationTargetException failure) {
             Throwable cause = failure.getCause();
+            operation.error("native_refresh", cause == null ? failure : cause);
+            operation.finish(DouAiLog.Outcome.FAILED, "native_refresh_threw", "new_feed_response_observed=false");
             safeLog("Confirmed refresh failed: " + (cause == null ? failure.getMessage() : cause.getMessage()));
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            operation.error("native_refresh", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "native_refresh_threw", "new_feed_response_observed=false");
             safeLog("Confirmed refresh failed: " + failure.getMessage());
         } finally {
             CONFIRMED_REENTRY.remove();
@@ -205,6 +237,9 @@ public final class RefreshConfirmHook implements AutoCloseable {
 
     @Override
     public void close() {
+        DouAiLog.Operation operation = pendingOperation;
+        if (confirmationPending.get() && operation != null) operation.finish(DouAiLog.Outcome.CANCELLED,
+                "hook_closed", "confirmation_pending=true;native_refresh_result=unobserved");
         unhookAll(null);
     }
 

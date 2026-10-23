@@ -2,6 +2,7 @@ package com.douai.module.config;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import com.douai.module.diagnostics.DouAiLog;
 
 import java.util.Map;
 
@@ -33,12 +34,14 @@ public final class SettingsRepository implements SettingsStore {
                 || !preferences.contains(HIDE_RECOMMENDATION_CARDS_KEY)) return;
         boolean legacyEnabled = preferences.getBoolean(HIDE_RECOMMENDATION_CARDS_KEY, false);
         preferences.edit().putBoolean(HIDE_RECOMMENDATION_MERCHANTS_KEY, legacyEnabled).apply();
+        DouAiLog.event("settings", "migration", "recommendation_filter_key", "enabled=" + legacyEnabled + "; disk_commit=pending");
     }
 
     public synchronized void save(FeatureSettings settings) {
         SharedPreferences.Editor editor = preferences.edit();
         settings.writeTo(editor);
         editor.apply();
+        DouAiLog.event("settings", "memory_applied", "save_settings", "disk_commit=pending; host_propagation=pending");
         if (frameworkConfigSync != null) {
             frameworkConfigSync.publish(settings);
         }
@@ -54,11 +57,14 @@ public final class SettingsRepository implements SettingsStore {
 
     public synchronized void putBoolean(String key, boolean value) {
         preferences.edit().putBoolean(key, value).apply();
+        DouAiLog.event("settings", "memory_applied", "put_boolean", "key=" + key + "; enabled=" + value + "; disk_commit=pending");
         publishCurrentSettings();
     }
 
     public synchronized void putString(String key, String value) {
         preferences.edit().putString(key, value == null ? "" : value).apply();
+        DouAiLog.event("settings", "memory_applied", "put_string", "key=" + key + "; value_ref=" + DouAiLog.reference(value)
+                + "; disk_commit=pending");
         publishCurrentSettings();
     }
 
@@ -67,17 +73,31 @@ public final class SettingsRepository implements SettingsStore {
     }
 
     @Override public synchronized void replaceSnapshot(Map<String, ?> expected, Map<String, ?> replacement) {
+        DouAiLog.Operation operation = DouAiLog.begin("settings_replace", "config_transaction");
+        try {
+            operation.wrap(() -> replaceSnapshotChecked(expected, replacement)).run();
+            operation.finish(DouAiLog.Outcome.SUCCESS, "preferences_commit_confirmed", "commit=true; entries=" + replacement.size()
+                    + "; host_propagation_confirmed=false");
+        } catch (RuntimeException failure) {
+            operation.error("transaction", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "preferences_replace_failed", "host_propagation_confirmed=false");
+            throw failure;
+        }
+    }
+
+    private void replaceSnapshotChecked(Map<String, ?> expected, Map<String, ?> replacement) {
         Map<String, ?> previous = snapshot();
         if (!previous.equals(expected)) throw new IllegalStateException("设置已发生变化，请重新预览导入文件");
         SharedPreferences.Editor update = completeEditor(replacement);
         try (ConfigImportTransaction transaction = ConfigImportTransaction.begin(preferences, previous)) {
             boolean committed;
             try { committed = update.commit(); }
-            catch (RuntimeException failure) { committed = false; }
+            catch (RuntimeException failure) { DouAiLog.failure("settings_replace", "commit", failure); committed = false; }
             if (!committed) {
                 boolean restored;
                 try { restored = completeEditor(previous).commit(); }
-                catch (RuntimeException failure) { restored = false; }
+                catch (RuntimeException failure) { DouAiLog.failure("settings_replace", "rollback", failure); restored = false; }
+                DouAiLog.event("settings_replace", "rollback", "commit_failed", "restored=" + restored);
                 throw new IllegalStateException(restored ? "导入写入失败，原配置已恢复" : "导入和恢复写入失败，请保留原备份并检查存储空间");
             }
             publishCurrentSettings();

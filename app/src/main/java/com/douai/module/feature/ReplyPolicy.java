@@ -1,5 +1,7 @@
 package com.douai.module.feature;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import com.douai.module.config.LocalOptions;
 import android.content.ContentValues;
 import org.json.JSONArray;
@@ -44,7 +46,7 @@ public final class ReplyPolicy {
 
     public static Incoming incoming(ContentValues values, long ownUid, long startedAt, LocalOptions options) {
         if (values == null || ownUid <= 0
-                || !options.enabled("native_auto_reply")) return null;
+                || !options.enabled("native_auto_reply")) return rejected("disabled_or_account_missing", "values_present=" + (values != null) + ";account_present=" + (ownUid > 0));
         try {
             Long sender = values.getAsLong("sender");
             String conversation = values.getAsString("conversation_id");
@@ -54,41 +56,49 @@ public final class ReplyPolicy {
             Long created = values.getAsLong("created_time");
             boolean ai = "ai".equals(options.text("reply_mode", "fixed"));
             if (created != null && created > 0 && created < 1_000_000_000_000L) created *= 1000;
-            if (sender == null || sender <= 0 || sender == ownUid || conversation == null || conversation.isEmpty()
-                    || id == null || !id.matches("[1-9][0-9]*") || type == null
-                    || type != 7 && !(ai && (type == 27 || AutomationReplyMedia.isVideoMessageType(type)))
-                    || conversationType != null && conversationType != 1 && conversationType != 2
-                    || created == null || created < startedAt - 30_000) return null;
+            String rejected = sender == null || sender <= 0 ? "sender_missing" : sender == ownUid ? "own_message"
+                    : conversation == null || conversation.isEmpty() ? "conversation_missing"
+                    : id == null || !id.matches("[1-9][0-9]*") ? "server_id_missing_or_local_message"
+                    : type == null ? "message_type_missing"
+                    : type != 7 && !(ai && (type == 27 || AutomationReplyMedia.isVideoMessageType(type))) ? "message_type_unsupported_in_mode"
+                    : conversationType != null && conversationType != 1 && conversationType != 2 ? "conversation_type_unsupported"
+                    : created == null ? "timestamp_missing" : created < startedAt - 30_000 ? "historical_message" : "";
+            if (!rejected.isEmpty()) return rejected(rejected, "type=" + type + ";conversation_type=" + conversationType + ";ai_mode=" + ai);
             boolean group = conversationType != null && conversationType == 2;
-            if (group && !options.enabled("reply_group_chats", false)) return null;
-            if (!group && !options.enabled("reply_private_chats", true)) return null;
+            if (group && !options.enabled("reply_group_chats", false)) return rejected("group_replies_disabled", "group=true");
+            if (!group && !options.enabled("reply_private_chats", true)) return rejected("private_replies_disabled", "group=false");
             JSONObject content = new JSONObject(values.getAsString("content"));
             java.util.List<String> images = type == 27 && options.enabled(LocalOptions.REPLY_RECOGNIZE_IMAGES, true)
                     ? AutomationReplyMedia.incomingImages(content) : java.util.Collections.emptyList();
-            if (type == 27 && options.enabled(LocalOptions.REPLY_RECOGNIZE_IMAGES, true) && images.isEmpty()) return null;
+            if (type == 27 && options.enabled(LocalOptions.REPLY_RECOGNIZE_IMAGES, true) && images.isEmpty()) return rejected("image_source_missing", "type=27;recognize_images=true");
             boolean videoMessage = AutomationReplyMedia.isVideoMessageType(type);
             String video = videoMessage
                     && options.enabled(LocalOptions.REPLY_RECOGNIZE_VIDEO, false)
                     ? AutomationReplyMedia.incomingVideo(content) : "";
             // The verified type 30 payload is encrypted. A resolver must prove a playable source first.
-            if (videoMessage && (video == null || video.isEmpty())) return null;
+            if (videoMessage && (video == null || video.isEmpty())) return rejected("video_disabled_or_playable_source_unproved", "type=" + type);
             if (video == null) video = "";
             String text = content.optString("text", "").trim();
             String messageText = text;
             if (text.isEmpty() && !images.isEmpty()) text = "请根据对方发来的图片回复对方。";
             if (text.isEmpty() && !video.isEmpty()) text = "请根据对方发来的视频画面回复对方。";
-            if (text.isEmpty()) return null;
+            if (text.isEmpty()) return rejected("message_has_no_usable_content", "images=" + images.size() + ";video_present=" + !video.isEmpty());
             String uid = sender.toString();
             AutomationScopePolicy.Relation relation = AutomationScopePolicy.fromIncoming(values, sender);
             String author = first(values, "sender_name", "nickname", "author_name", "user_name");
             if (author.isEmpty()) author = AutomationScopePolicy.cachedName(uid);
             if (author.isEmpty()) author = NativeMessagingHooks.availableContacts().getOrDefault(uid, uid);
             if (group) {
-                if (!GroupReplyPolicy.allows(values, ownUid, conversation, sender, author, options)) return null;
+                if (!GroupReplyPolicy.allows(values, ownUid, conversation, sender, author, options)) return rejected("group_policy_rejected", "scope_mode=" + options.text("reply_group_scope_mode", "all") + ";trigger_mode=" + options.text("reply_group_mode", "all"));
             } else if (!ReplyScopePolicy.allows(options, uid, author, messageText,
-                    content.optString("title", ""), relation)) return null;
+                    content.optString("title", ""), relation)) return rejected("private_scope_or_content_rejected", "group=false");
             return new Incoming(conversation, id, sender, text, images, video, author, group, relation);
-        } catch (org.json.JSONException | RuntimeException ignored) { return null; }
+        } catch (org.json.JSONException | RuntimeException ignored) { DouAiLog.failure("auto_reply", "receipt_parse", ignored); return rejected("receipt_parse_failed", "error_type=" + ignored.getClass().getSimpleName()); }
+    }
+
+    private static Incoming rejected(String reason, String evidence) {
+        DouAiLog.event("auto_reply", "receipt_rejected", reason, evidence);
+        return null;
     }
 
     private static String first(ContentValues values, String... keys) {

@@ -1,5 +1,7 @@
 package com.douai.module.ui;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.app.Activity;
 import android.content.Intent;
 import android.net.Uri;
@@ -18,6 +20,8 @@ final class HostConfigFilePicker implements AutoCloseable {
     private Object launcher;
     private Class<?> launcherType;
     private boolean closed;
+    private boolean resultReceived;
+    private final DouAiLog.Operation trace = DouAiLog.begin("media_picker", "HostConfigFilePicker");
 
     private HostConfigFilePicker(Activity activity) { this.activity = activity; }
 
@@ -66,17 +70,25 @@ final class HostConfigFilePicker implements AutoCloseable {
                     return "DouAiConfigSelection";
                 }
                 if (!"onActivityResult".equals(method.getName()) || picker.closed) return null;
+                picker.resultReceived = true;
+                picker.trace.stage("selection_callback", "callback_received=true");
                 picker.close();
                 Uri uri = null;
+                boolean parseFailed = false;
                 try {
                     Object value = args == null || args.length == 0 ? null : args[0];
                     if (resultType.isInstance(value) && Integer.valueOf(Activity.RESULT_OK).equals(resultCode.invoke(value))) {
                         Object data = resultData.invoke(value);
                         if (data instanceof Intent) uri = ((Intent) data).getData();
                     }
-                } catch (ReflectiveOperationException | RuntimeException ignored) { }
+                } catch (ReflectiveOperationException | RuntimeException failure) {
+                    parseFailed = true; picker.trace.error("selection_parse", failure);
+                    picker.trace.finish(DouAiLog.Outcome.FAILED, "selection_protocol_error", "uri_unavailable=true");
+                }
                 // No persistent grant is needed: the operation consumes this document immediately.
-                selected.accept(uri != null && "content".equalsIgnoreCase(uri.getScheme()) ? uri : null);
+                if (!parseFailed) picker.trace.finish(uri != null && "content".equalsIgnoreCase(uri.getScheme()) ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.CANCELLED,
+                        "selection_result", "content_uri=" + (uri != null && "content".equalsIgnoreCase(uri.getScheme())) + ";document_io_verified=false");
+                picker.trace.wrapConsumer(selected).accept(uri != null && "content".equalsIgnoreCase(uri.getScheme()) ? uri : null);
                 return null;
             });
             picker.launcher = registryType.getMethod("register", String.class, contract, callback)
@@ -85,6 +97,8 @@ final class HostConfigFilePicker implements AutoCloseable {
             picker.launcherType.getMethod("launch", Object.class).invoke(picker.launcher, intent);
             return picker;
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            picker.resultReceived = true;
+            picker.trace.finish(DouAiLog.Outcome.FAILED, "picker_unavailable", "selection_not_started");
             picker.close();
             return null;
         }
@@ -95,6 +109,7 @@ final class HostConfigFilePicker implements AutoCloseable {
     @Override public void close() {
         if (closed) return;
         closed = true;
+        if (!resultReceived) trace.finish(DouAiLog.Outcome.CANCELLED, "picker_closed", "no_selection_consumed");
         if (PENDING.get(activity) == this) PENDING.remove(activity);
         if (launcher != null) {
             try { launcherType.getMethod("unregister").invoke(launcher); }

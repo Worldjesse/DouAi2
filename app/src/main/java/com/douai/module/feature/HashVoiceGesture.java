@@ -1,5 +1,7 @@
 package com.douai.module.feature;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
 
@@ -12,6 +14,7 @@ final class HashVoiceGesture {
     private final BooleanSupplier current;
     private final BooleanSupplier sendable;
     private final Runnable restore;
+    private final DouAiLog.Operation originTrace;
     private boolean claimed;
     private boolean cancelled;
 
@@ -24,6 +27,8 @@ final class HashVoiceGesture {
         this.current = current;
         this.sendable = sendable;
         this.restore = restore;
+        // Native confirmation can occur after the originating click's ThreadLocal has gone away.
+        this.originTrace = DouAiLog.current();
     }
 
     boolean matches(String text, String group, String service, String reply) {
@@ -54,4 +59,11 @@ final class HashVoiceGesture {
     }
 
     void restoreAfterNativeClick() { restore.run(); }
+
+    DouAiLog.Operation beginSpeechOperation() {
+        if (originTrace == null) return DouAiLog.begin("hash_long_press_voice_comment", "native_publish_action");
+        DouAiLog.Operation[] started = new DouAiLog.Operation[1];
+        originTrace.wrap(() -> started[0] = DouAiLog.begin("hash_long_press_voice_comment", "native_publish_action")).run();
+        return started[0];
+    }
 }

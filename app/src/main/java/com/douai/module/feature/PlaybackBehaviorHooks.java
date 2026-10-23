@@ -5,6 +5,7 @@ import android.os.Handler;
 import android.os.Looper;
 
 import com.douai.module.config.LocalOptions;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostScanReport;
 
 import io.github.libxposed.api.XposedInterface;
@@ -136,6 +137,7 @@ public final class PlaybackBehaviorHooks implements AutoCloseable {
         }
 
         if (GestureSpeedOverride.inScope()) {
+            DouAiLog.event("auto_speed", "decision", "manual_gesture_scope", "original_speed_write_forwarded=true");
             GestureSpeedOverride.bypassSpeedWrite(player);
             return chain.proceed();
         }
@@ -146,7 +148,11 @@ public final class PlaybackBehaviorHooks implements AutoCloseable {
             arguments[0] = manual;
             return chain.proceed(arguments);
         }
-        if (Boolean.TRUE.equals(ownSpeedCall.get()) || !enabled(key)) return chain.proceed();
+        if (Boolean.TRUE.equals(ownSpeedCall.get()) || !enabled(key)) {
+            DouAiLog.event("auto_speed", "decision", Boolean.TRUE.equals(ownSpeedCall.get()) ? "owned_reentry" : "disabled",
+                    "original_speed_write_forwarded=true");
+            return chain.proceed();
+        }
 
         Object[] arguments = chain.getArgs().toArray();
         try {
@@ -163,7 +169,17 @@ public final class PlaybackBehaviorHooks implements AutoCloseable {
             failSpeed(group, failure);
             return chain.proceed();
         }
-        return chain.proceed(arguments);
+        DouAiLog.Operation operation = DouAiLog.begin("auto_speed", "native_speed_write");
+        operation.stage("rewrite_speed", "requested_speed=" + requested + ";configured_speed=" + arguments[0]);
+        try {
+            Object result = chain.proceed(arguments);
+            operation.finish(DouAiLog.Outcome.UNCONFIRMED, "speed_write_forwarded", "setter_returned=true;readback=false");
+            return result;
+        } catch (Throwable failure) {
+            operation.error("rewrite_speed", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "speed_setter_threw", "readback=false");
+            throw failure;
+        }
     }
 
     private static void updateOriginal(Map<Object, SpeedState> states, Object player, float requested) {
@@ -202,7 +218,12 @@ public final class PlaybackBehaviorHooks implements AutoCloseable {
                     states.put(player, state);
                 } else if (current != state.applied) state.original = current;
                 float next = playbackSpeed(options);
-                if (current != next) writer.write(player, next);
+                if (current != next) {
+                    writer.write(player, next);
+                    DouAiLog.event("auto_speed", "speed_write", "configured_speed_submitted",
+                            "baseline=" + current + ";requested=" + next + ";readback=false;business_result=unconfirmed");
+                } else DouAiLog.event("auto_speed", "speed_observed", "configured_speed_already_observed",
+                        "actual=" + current + ";requested=" + next + ";result_scope=current_getter");
                 state.applied = next;
             }
         } catch (ReflectiveOperationException | RuntimeException failure) {
@@ -229,6 +250,7 @@ public final class PlaybackBehaviorHooks implements AutoCloseable {
     }
 
     private void failSpeed(BehaviorHookGroup group, Throwable failure) {
+        DouAiLog.failure("auto_speed", "apply_or_restore_speed", failure);
         if (group != null) group.fail(failure);
         onMain(this::restoreSpeeds);
     }

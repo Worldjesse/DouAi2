@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.view.View;
 import android.view.ViewGroup;
 
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
@@ -99,6 +100,7 @@ public final class AutoFollowHook implements AutoCloseable {
         synchronized (settingsLock) {
             FeatureSettings current = settings;
             if (closed || current == null || !current.automationEnabled || !current.autoFollowEnabled) {
+                DouAiLog.event("auto_follow", "eligibility", "disabled_or_closed", "closed=" + closed);
                 return result;
             }
             generation = settingsGeneration.get();
@@ -106,16 +108,21 @@ public final class AutoFollowHook implements AutoCloseable {
 
         Object holder = chain.getThisObject();
         String reservedId = null;
+        DouAiLog.Operation started = null;
         try {
             Object aweme = awemeGetter.invoke(holder);
-            if (aweme == null || Boolean.TRUE.equals(invokeBoolean(aweme, "getIsAdAweme"))) return result;
+            if (aweme == null || Boolean.TRUE.equals(invokeBoolean(aweme, "getIsAdAweme"))) { DouAiLog.event("auto_follow", "eligibility", "missing_work_or_ad", "eligible=false"); return result; }
             Object author = fieldValue(aweme, "author");
             Object status = author == null ? null : invokeNoArg(author, "getFollowStatus");
-            if (!(status instanceof Number) || ((Number) status).intValue() != 0) return result;
+            if (!(status instanceof Number) || ((Number) status).intValue() != 0) { DouAiLog.event("auto_follow", "eligibility", "already_followed_or_unknown_status", "status_known=" + (status instanceof Number)); return result; }
             String awemeId = readString(aweme, "getAid", "aid");
-            if (awemeId == null || !isLoggedIn() || !enabled(generation)
-                    || !attemptedIds.add(awemeId)) return result;
+            String rejected = awemeId == null ? "target_missing" : !isLoggedIn() ? "logged_out"
+                    : !enabled(generation) ? "settings_changed" : !attemptedIds.add(awemeId) ? "duplicate" : "";
+            if (!rejected.isEmpty()) { DouAiLog.event("auto_follow", "eligibility", rejected, "target_ref=" + DouAiLog.reference(awemeId)); return result; }
             reservedId = awemeId;
+            final DouAiLog.Operation trace = DouAiLog.begin("auto_follow", "visible_card_selected");
+            started = trace;
+            trace.stage("follow_button_lookup", "target_ref=" + DouAiLog.reference(awemeId) + ";follow_status=0");
 
             Object root = quickRootField.get(holder);
             if (!(root instanceof View)) return result;
@@ -128,9 +135,11 @@ public final class AutoFollowHook implements AutoCloseable {
             if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
                 return result;
             }
-            boolean queued = button.post(() -> {
+            trace.stage("follow_click_scheduled", "button_visible=true;button_enabled=true");
+            boolean queued = button.post(trace.wrap(() -> {
                 synchronized (settingsLock) {
                     if (!enabledLocked(generation)) {
+                        trace.finish(DouAiLog.Outcome.CANCELLED, "settings_changed", "click_invoked=false");
                         attemptedIds.remove(awemeId);
                         return;
                     }
@@ -149,21 +158,28 @@ public final class AutoFollowHook implements AutoCloseable {
                                 || !button.isEnabled()
                                 || !button.isAttachedToWindow()
                                 || !button.performClick()) {
+                            trace.finish(DouAiLog.Outcome.SKIPPED, "follow_target_changed_or_click_rejected", "native_ack_observed=false");
                             attemptedIds.remove(awemeId);
                         } else {
+                            trace.finish(DouAiLog.Outcome.UNCONFIRMED, "native_follow_click_accepted", "perform_click=true;server_ack_observed=false");
                             com.douai.module.analytics.LocalAnalytics.action(awemeId, "auto_follow", "自动关注点击", "automatic", "request");
                         }
                     } catch (Throwable failure) {
+                        trace.error("native_follow_click", failure);
+                        trace.finish(DouAiLog.Outcome.UNCONFIRMED, "native_click_threw", "remote_side_effect_unknown=true");
                         attemptedIds.remove(awemeId);
                         safeLog("Native follow click failed: " + failure.getMessage());
                     }
                 }
-            });
+            }));
             if (queued) reservedId = null;
         } catch (ReflectiveOperationException | RuntimeException failure) {
             safeLog("Auto-follow skipped: " + failure.getMessage());
         } finally {
-            if (reservedId != null) attemptedIds.remove(reservedId);
+            if (reservedId != null) {
+                if (started != null) started.finish(DouAiLog.Outcome.SKIPPED, "follow_button_activity_or_post_unavailable", "click_queued=false");
+                attemptedIds.remove(reservedId);
+            }
         }
         return result;
     }

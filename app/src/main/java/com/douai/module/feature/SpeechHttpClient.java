@@ -6,6 +6,7 @@ import android.util.JsonToken;
 
 import com.douai.module.config.SpeechSettings;
 import com.douai.module.config.ThirdPartyRequestTemplate;
+import com.douai.module.diagnostics.DouAiLog;
 
 import org.json.JSONObject;
 
@@ -141,12 +142,14 @@ public final class SpeechHttpClient {
         }
 
         public List<VoiceCatalog.Entry> fetchVoices(SpeechSettings settings) throws IOException {
-            String url = resolveTemplate(settings.voiceGetTemplate, "", settings.selectedVoice);
-            String body = fetchText(url, settings.voiceHeaders);
-            ensureActive();
-            List<VoiceCatalog.Entry> entries = VoiceCatalog.parse(body, settings);
-            ensureActive();
-            return entries;
+            return observeCatalog("third_party_voice_catalog", () -> {
+                String url = resolveTemplate(settings.voiceGetTemplate, "", settings.selectedVoice);
+                String body = fetchText(url, settings.voiceHeaders);
+                ensureActive();
+                List<VoiceCatalog.Entry> entries = VoiceCatalog.parse(body, settings);
+                ensureActive();
+                return entries;
+            });
         }
 
         private Resource fetch(String url, String headersJson, int limit) throws IOException {
@@ -163,6 +166,8 @@ public final class SpeechHttpClient {
                 inProgress = true;
             }
             HttpURLConnection opened = null;
+            transportEvent("request_started", "provider_request", "method=" + (body == null ? "GET" : "POST")
+                    + "; endpoint_ref=" + DouAiLog.reference(url) + "; result=pending");
             long deadline = System.nanoTime() + 45_000_000_000L;
             try {
                 opened = (HttpURLConnection) endpoint.toURL().openConnection();
@@ -187,6 +192,7 @@ public final class SpeechHttpClient {
                     }
                 }
                 int status = opened.getResponseCode();
+                transportEvent("http_response", "transport_only", "status=" + status + "; result=validating");
                 ensureActive();
                 if (System.nanoTime() > deadline) throw new SocketTimeoutException();
                 if (status >= 300 && status < 400) {
@@ -209,6 +215,7 @@ public final class SpeechHttpClient {
                 ensureActive();
                 if (System.nanoTime() > deadline) throw new SocketTimeoutException();
                 if (bytes.length == 0) throw new IllegalArgumentException("第三方语音响应为空");
+                transportEvent("body_read", "bounded_response", "bytes=" + bytes.length + "; result=validating");
                 return new Resource(bytes, opened.getContentType());
             } catch (SocketTimeoutException ignored) {
                 ensureActive();
@@ -245,6 +252,34 @@ public final class SpeechHttpClient {
         }
 
         @Override public void close() { cancel(); }
+    }
+
+    interface CatalogWork<T> { List<T> run() throws IOException; }
+    private static void transportEvent(String event, String reason, String evidence) {
+        DouAiLog.Operation operation = DouAiLog.current();
+        if (operation != null) operation.stage(event, "reason=" + reason + "; " + evidence);
+        else DouAiLog.event("speech_transport", event, reason, evidence);
+    }
+    static <T> List<T> observeCatalog(String feature, CatalogWork<T> work) throws IOException {
+        DouAiLog.Operation operation = DouAiLog.begin(feature, "load_catalog");
+        java.util.concurrent.atomic.AtomicReference<List<T>> result = new java.util.concurrent.atomic.AtomicReference<>();
+        IOException[] checked = new IOException[1];
+        try {
+            operation.wrap(() -> {
+                try { result.set(work.run()); }
+                catch (IOException failure) { checked[0] = failure; }
+            }).run();
+            if (checked[0] != null) throw checked[0];
+            operation.finish(DouAiLog.Outcome.SUCCESS, "catalog_parsed", "entries=" + result.get().size() + "; selection_saved=false");
+            return result.get();
+        } catch (IOException | RuntimeException failure) {
+            operation.error("catalog_fetch_or_parse", failure);
+            operation.finish(failure instanceof CancellationException ? DouAiLog.Outcome.CANCELLED
+                            : failure instanceof java.net.SocketTimeoutException || failure.getMessage() != null && failure.getMessage().contains("超时")
+                            ? DouAiLog.Outcome.TIMED_OUT : DouAiLog.Outcome.FAILED,
+                    failure instanceof CancellationException ? "owner_cancelled" : "catalog_fetch_or_parse_failed", "selection_saved=false");
+            throw failure;
+        }
     }
 
     public static String audioUrl(String body, String field) {

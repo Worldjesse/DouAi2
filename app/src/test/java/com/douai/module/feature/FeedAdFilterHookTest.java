@@ -1,6 +1,8 @@
 package com.douai.module.feature;
 
 import com.douai.module.config.FeatureSettings;
+import com.douai.module.diagnostics.DouAiLog;
+import com.douai.module.diagnostics.DebugLog;
 import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
@@ -19,6 +21,92 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 
 public final class FeedAdFilterHookTest {
+    @Test public void logsSeparateNoMatchFromEmptyPageGuardAndPreserveBothOriginalLists() throws Throwable {
+        AtomicReference<XposedInterface.Hooker> installed = new AtomicReference<>();
+        List<String> evidence = new java.util.concurrent.CopyOnWriteArrayList<>();
+        org.junit.Assert.assertTrue(DouAiLog.awaitIdle(5000));
+        boolean previousDebug = DebugLog.isEnabled(); DebugLog.setEnabled(true);
+        DouAiLog.setFrameworkSink((priority, line) -> evidence.add(line));
+        try (FeedAdFilterHook hook = FeedAdFilterHook.install(createFramework(installed), createReport(),
+                getClass().getClassLoader(), true, ignored -> { })) {
+            AwemeFixture ordinary = new AwemeFixture(false), advertisement = new AwemeFixture(true);
+            ordinary.desc = "private-body-not-for-evidence";
+            List<AwemeFixture> noMatches = Collections.singletonList(ordinary);
+            FeedItemListFixture ordinaryPage = new FeedItemListFixture(noMatches);
+            installed.get().intercept(createChain(ordinaryPage, new ApiResponseFixture("https://private-host/aweme/v1/feed/")));
+            org.junit.Assert.assertSame(noMatches, ordinaryPage.items);
+            List<AwemeFixture> allMatched = Collections.singletonList(advertisement);
+            FeedItemListFixture guardedPage = new FeedItemListFixture(allMatched);
+            installed.get().intercept(createChain(guardedPage, new ApiResponseFixture("https://private-host/aweme/v1/feed/")));
+            org.junit.Assert.assertSame(allMatched, guardedPage.items);
+            assertEquals(1, ordinary.typeReadCount); assertEquals(1, advertisement.typeReadCount);
+            assertEquals(0, hook.getFilteredPages());
+            org.junit.Assert.assertTrue(DouAiLog.awaitIdle(5000));
+            String noMatch = terminal(evidence, "no_items_matched"), guard = terminal(evidence, "empty_page_guard");
+            org.junit.Assert.assertTrue(noMatch.contains("input=1;matched=0;removed=0;retained=1;output=1"));
+            org.junit.Assert.assertTrue(noMatch.contains("empty_guard_count=0"));
+            org.junit.Assert.assertTrue(guard.contains("input=1;matched=1;removed=0;retained=1;output=1"));
+            org.junit.Assert.assertTrue(guard.contains("empty_guard_count=1;empty_guard_retained=1"));
+            org.junit.Assert.assertTrue(guard.contains("advertisement=1"));
+            assertFalse(String.join("\n", evidence).contains("private-body-not-for-evidence"));
+            assertFalse(String.join("\n", evidence).contains("private-host"));
+        } finally { DouAiLog.awaitIdle(5000); DouAiLog.setFrameworkSink(null); DebugLog.setEnabled(previousDebug); }
+    }
+
+    @Test public void failOpenClassificationHasItsOwnOutcomeAndDoesNotClaimNoRuleMatched() throws Throwable {
+        AtomicReference<XposedInterface.Hooker> installed = new AtomicReference<>();
+        List<String> evidence = new java.util.concurrent.CopyOnWriteArrayList<>();
+        org.junit.Assert.assertTrue(DouAiLog.awaitIdle(5000)); DouAiLog.setFrameworkSink((priority, line) -> evidence.add(line));
+        boolean previousDebug = DebugLog.isEnabled(); DebugLog.setEnabled(true);
+        try (FeedAdFilterHook hook = FeedAdFilterHook.install(createFramework(installed), createReport(),
+                getClass().getClassLoader(), recommendationSettings(false, true), ignored -> { })) {
+            AwemeFixture merchant = new AwemeFixture(false); merchant.awemeType = 140; merchant.failLifeSpuClassification = true;
+            List<AwemeFixture> source = Arrays.asList(new AwemeFixture(false), merchant);
+            FeedItemListFixture page = new FeedItemListFixture(source);
+            installed.get().intercept(createChain(page, new ApiResponseFixture("https://private-host/aweme/v1/feed/")));
+            org.junit.Assert.assertSame(source, page.items); org.junit.Assert.assertTrue(DouAiLog.awaitIdle(5000));
+            String line = terminal(evidence, "classification_unavailable_fail_open");
+            org.junit.Assert.assertTrue(line.contains("\"outcome\":\"unconfirmed\""));
+            org.junit.Assert.assertTrue(line.contains("classification_failures=1")); org.junit.Assert.assertTrue(line.contains("observed_before_fail_open"));
+            assertFalse(line.contains("no_items_matched"));
+        } finally { DouAiLog.awaitIdle(5000); DouAiLog.setFrameworkSink(null); DebugLog.setEnabled(previousDebug); }
+    }
+
+    private static String terminal(List<String> evidence, String reason) {
+        for (String line : evidence) if (line.contains("\"event\":\"operation_finished\"") && line.contains("\"reason_code\":\"" + reason + "\"")) return line;
+        throw new AssertionError("Missing terminal " + reason + " in " + evidence);
+    }
+
+    @Test public void filterOutcomeIsBackedByMutatedResponseListsAndNeverClaimsRenderedFeed() throws Throwable {
+        AtomicReference<XposedInterface.Hooker> installed = new AtomicReference<>();
+        List<String> evidence = new java.util.concurrent.CopyOnWriteArrayList<>();
+        org.junit.Assert.assertTrue(DouAiLog.awaitIdle(5000));
+        boolean previousDebug = DebugLog.isEnabled(); DebugLog.setEnabled(true);
+        DouAiLog.setFrameworkSink((priority, line) -> evidence.add(line));
+        FeedAdFilterHook hook = null;
+        try {
+            hook = FeedAdFilterHook.install(createFramework(installed), createReport(),
+                    getClass().getClassLoader(), true, ignored -> { });
+            AwemeFixture advertisement = new AwemeFixture(true), ordinary = new AwemeFixture(false);
+            FeedItemListFixture page = new FeedItemListFixture(Arrays.asList(advertisement, ordinary));
+            installed.get().intercept(createChain(page, new ApiResponseFixture("https://api.example/aweme/v1/feed/")));
+            assertEquals(Collections.singletonList(ordinary), page.items);
+            org.junit.Assert.assertTrue(DouAiLog.awaitIdle(5000));
+            String joined = String.join("\n", evidence);
+            org.junit.Assert.assertTrue(joined.contains("response_list_readback"));
+            org.junit.Assert.assertTrue(joined.contains("rendered_feed=unobserved"));
+            org.junit.Assert.assertTrue(joined.contains("removed=1"));
+            org.junit.Assert.assertTrue(joined.contains("input=2;matched=1;removed=1;retained=1;output=1"));
+            org.junit.Assert.assertTrue(joined.contains("rule_matches={advertisement=1}"));
+            org.junit.Assert.assertTrue(joined.contains("\"outcome\":\"success\""));
+            assertFalse(joined.contains("api.example"));
+        } finally {
+            if (hook != null) hook.close();
+            DouAiLog.awaitIdle(5000); DouAiLog.setFrameworkSink(null);
+            DebugLog.setEnabled(previousDebug);
+        }
+    }
+
     public static final class FeedItemListFixture {
         public List<AwemeFixture> items;
         public List<AwemeFixture> preloadAds;
@@ -42,6 +130,7 @@ public final class FeedAdFilterHookTest {
         public final AwemeStatisticsFixture statistics;
         public boolean nearbyAdCard;
         public boolean failLifeSpuClassification;
+        public int typeReadCount;
 
         AwemeFixture(boolean ad) {
             this(ad, false, false, null, "", 20_000, 2_000);
@@ -82,6 +171,7 @@ public final class FeedAdFilterHookTest {
         }
 
         public int getAwemeType() {
+            typeReadCount++;
             return awemeType;
         }
     }

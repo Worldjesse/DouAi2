@@ -14,6 +14,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.AutomationHistoryStore.Entry;
 import com.douai.module.config.AutomationHistoryStore.Reason;
@@ -273,6 +274,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
     }
 
     private void startPreview(Pending item) {
+        item.trace.stage("preview_wait", "seconds=" + noticeSeconds(item.kind) + ";ready=" + item.ready);
         item.noticeDuration = noticeSeconds(item.kind) * 1000L;
         item.deadline = SystemClock.elapsedRealtime() + item.noticeDuration;
         renderNotices();
@@ -414,7 +416,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         removeNotice(item);
         if (closed || !enabled(item.kind) || !valid(item)) { cancel(item); return; }
         try {
-            worker.execute(() -> {
+            worker.execute(item.trace.wrap(() -> {
                 if (closed || !enabled(item.kind) || !valid(item)) { onMain(() -> cancel(item)); return; }
                 if (!item.state.compareAndSet(QUEUED, SENDING)) return;
                 item.sendStartedAt = SystemClock.elapsedRealtime();
@@ -423,21 +425,24 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
                         item.entry.queueMillis < 0 ? queuedMillis : item.entry.queueMillis + queuedMillis,
                         item.entry.mediaMillis, item.entry.generationMillis, item.entry.sendMillis);
                 item.phase = "publishing";
+                item.trace.stage("dispatch_send", "valid=true;enabled=true;queue_ms=" + queuedMillis + ";ack_deadline_ms=30000");
                 onMain(this::renderNotices);
                 record(withStatus(item.entry, "sending"));
                 main.postDelayed(item.acknowledgmentTimeout, 30_000);
-                try { item.action.send(status -> finish(item, status)); }
+                try { item.action.send(item.trace.wrapConsumer(status -> finish(item, status))); }
                 catch (Exception failure) {
+                    item.trace.error("dispatch_send", failure);
                     safeLog("Automatic action failed: " + failure.getClass().getSimpleName());
                     finish(item, "failed");
                 }
-            });
-        } catch (RejectedExecutionException ignored) { cancel(item); }
+            }));
+        } catch (RejectedExecutionException ignored) { item.trace.stage("dispatch_rejected", "worker_unavailable=true"); cancel(item); }
     }
 
     private void finish(Pending item, String status) {
         String result = "sent".equals(status) || "submitted".equals(status) || "cancelled".equals(status) ? status : "failed";
-        if (!item.state.compareAndSet(SENDING, FINISHED) && !item.state.compareAndSet(UNCONFIRMED, FINISHED)) return;
+        if (!item.state.compareAndSet(SENDING, FINISHED) && !item.state.compareAndSet(UNCONFIRMED, FINISHED)) { item.trace.stage("dispatch_callback_ignored", "status=" + result + ";state=" + item.state.get()); return; }
+        item.trace.stage("dispatch_result", "status=" + result + ";evidence=" + ("sent".equals(result) ? "native_sender_acknowledged" : "submitted".equals(result) ? "acknowledgment_missing" : "local_or_native_result"));
         onMain(() -> {
             item.entry = sendTiming(item);
             main.removeCallbacks(item.acknowledgmentTimeout);
@@ -463,6 +468,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
 
     private void unconfirmed(Pending item) {
         if (!item.state.compareAndSet(SENDING, UNCONFIRMED)) return;
+        item.trace.stage("acknowledgment_timeout", "deadline_ms=30000;remote_outcome=unknown;retry_safe=false");
         item.entry = sendTiming(item);
         pending.remove(key(item.kind, item.entry.id));
         if (isReply(item.kind)) retainSubmittedReply(item);
@@ -477,6 +483,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
             state = item.state.get();
             if (state >= SENDING) return;
         } while (!item.state.compareAndSet(state, FINISHED));
+        item.trace.stage("dispatch_cancelled", "previous_state=" + state + ";closed=" + closed + ";enabled=" + enabled(item.kind) + ";validity_rechecked=false");
         pending.remove(key(item.kind, item.entry.id));
         removeNotice(item);
         record(withStatus(item.entry, "cancelled"));
@@ -516,7 +523,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
             worker.execute(() -> {
                 if (!saveHistory(entry.kind)) return;
                 try { history.upsert(entry); }
-                catch (RuntimeException failure) { safeLog("Could not write automatic action history"); }
+                catch (RuntimeException failure) { AutomationTrace.operation("auto_" + entry.kind, entry.id, "history").error("history_persistence", failure); safeLog("Could not write automatic action history"); }
             });
         } catch (RejectedExecutionException ignored) { }
     }
@@ -876,6 +883,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
     private final class Pending {
         Entry entry;
         final String kind;
+        final DouAiLog.Operation trace;
         final BooleanSupplier stillValid;
         Action action;
         Consumer<String> outcome;
@@ -897,6 +905,8 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         Pending(Entry entry, BooleanSupplier stillValid, Action action, Consumer<String> outcome) {
             this.entry = entry;
             this.kind = entry.kind;
+            this.trace = AutomationTrace.operation("auto_" + entry.kind, entry.id, "preview");
+            this.trace.stage("preview_admission", "history_ref=" + DouAiLog.reference(entry.id) + ";delivery=" + entry.deliveryMode);
             this.stillValid = stillValid;
             this.action = action;
             this.outcome = outcome;

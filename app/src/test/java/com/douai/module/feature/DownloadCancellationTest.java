@@ -300,6 +300,8 @@ public final class DownloadCancellationTest {
             assertNotNull(task);
             await(() -> task.terminal);
         }
+        // terminal is published before the release callback trims completed history.
+        await(() -> DownloadTasks.snapshots().size() == 50);
         assertEquals(50, DownloadTasks.snapshots().size());
         java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
         DownloadTasks.Task first = DownloadTasks.submit(RuntimeEnvironment.getApplication(), "active-one", "one",
@@ -315,6 +317,7 @@ public final class DownloadCancellationTest {
             DownloadTasks.cancel(first.id); DownloadTasks.cancel(second.id); release.countDown();
             await(() -> first.terminal && second.terminal);
         }
+        await(() -> DownloadTasks.snapshots().size() == 50);
         assertEquals(50, DownloadTasks.snapshots().size());
     }
 

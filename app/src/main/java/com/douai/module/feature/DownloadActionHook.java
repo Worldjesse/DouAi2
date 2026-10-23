@@ -16,6 +16,7 @@ import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.ThirdPartyDownloadSettings;
 import com.douai.module.scan.HostAdaptation;
+import com.douai.module.diagnostics.DouAiLog;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -93,6 +94,7 @@ public final class DownloadActionHook implements AutoCloseable {
                     .intercept(hook::beforeNativeClick);
             if (clickHandle == null) throw new IllegalStateException("Framework returned an empty download click handle");
             hook.handles.add(clickHandle);
+            DouAiLog.featureState("download", hook.enabled, "ready", "installed", "hooks=menu_factory,native_click");
             return hook;
         } catch (Throwable failure) {
             hook.unhookAll(failure);
@@ -104,6 +106,7 @@ public final class DownloadActionHook implements AutoCloseable {
 
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
+        DouAiLog.featureState("download", enabled, "ready", "installed", "existing_rows=" + rows.size());
         if (!enabled) closeThirdPartyDialog();
         updateRows(enabled);
     }
@@ -116,22 +119,32 @@ public final class DownloadActionHook implements AutoCloseable {
     public void setOptions(LocalOptions options) {
         closeThirdPartyDialog();
         this.options = options == null ? new LocalOptions(Collections.emptyMap()) : options;
+        DouAiLog.event("download", "configuration", "download_options_updated", "third_party=" + new ThirdPartyDownloadSettings(this.options).thirdParty
+                + "; watermark_removal=" + settings.removeWatermark + "; custom_name=" + this.options.enabled("download_custom_name")
+                + "; remove_limits=" + this.options.enabled("remove_download_limits") + "; tree_selected=" + !this.options.downloadSaveTree().isEmpty());
     }
 
     private Object beforeNativeClick(XposedInterface.Chain chain) throws Throwable {
+        DouAiLog.event("download", "trigger", "native_download_click", "enabled=" + enabled);
         if (enabled && new ThirdPartyDownloadSettings(options).thirdParty) {
+            DouAiLog.event("download", "route", "selected_third_party_provider", "official_provider_invoked=false");
             Object view = chain.getArg(0);
             if (view instanceof View) {
                 try {
                     startThirdParty(((View) view).getContext(), currentAweme(chain.getThisObject()), chain.getThisObject());
                 } catch (ReflectiveOperationException | RuntimeException | LinkageError failure) {
+                    DouAiLog.failure("download", "read_third_party_source", failure);
                     showToast(((View) view).getContext(), "无法读取当前作品链接");
                 }
             }
             return null;
         }
         if (!enabled || !(settings.removeWatermark || options.enabled("download_custom_name")
-                || options.enabled("remove_download_limits") || !options.downloadSaveTree().isEmpty())) return chain.proceed();
+                || options.enabled("remove_download_limits") || !options.downloadSaveTree().isEmpty())) {
+            DouAiLog.event("download", "route", !enabled ? "module_disabled" : "native_default_settings",
+                    "host_native_action=true; host_result=unconfirmed");
+            return chain.proceed();
+        }
         Context context = null;
         Object selectedWork = null;
         List<MediaAsset> assets = Collections.emptyList();
@@ -144,25 +157,32 @@ public final class DownloadActionHook implements AutoCloseable {
                 assets = mediaAssets(aweme, settings.removeWatermark, options);
             }
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            DouAiLog.failure("download", "read_media_sources", failure);
             safeLog("Local download source unavailable: " + failure.getMessage());
         }
         if (!assets.isEmpty()) {
             if (options.downloadSaveTree().isEmpty() && Build.VERSION.SDK_INT < 29
                     && context.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                    != PackageManager.PERMISSION_GRANTED) return chain.proceed();
+                    != PackageManager.PERMISSION_GRANTED) {
+                DouAiLog.event("download", "route", "legacy_storage_permission_missing", "host_native_action=true; host_result=unconfirmed");
+                return chain.proceed();
+            }
             try {
                 saveAssets(context, assets, selectedWork);
                 safeLog("Queued " + assets.size() + " existing media resources from native download click");
             } catch (RuntimeException failure) {
+                DouAiLog.failure("download", "enqueue_media", failure);
                 safeLog("Local download queue failed: " + failure.getMessage());
                 showToast(context, "创建下载任务失败");
             }
             return null;
         }
         if (!options.downloadSaveTree().isEmpty()) {
+            DouAiLog.event("download", "skipped", "selected_tree_has_no_media_source", "task_created=false");
             if (context != null) showToast(context, "当前作品没有可保存到所选目录的媒体来源");
             return null;
         }
+        DouAiLog.event("download", "route", "no_local_media_sources", "host_native_action=true; host_result=unconfirmed");
         return chain.proceed();
     }
 
@@ -235,13 +255,13 @@ public final class DownloadActionHook implements AutoCloseable {
     }
 
     private boolean showMenu(Object module, View row) {
-        if (!enabled) return false;
+        if (!enabled) { DouAiLog.event("download_menu", "skipped", "disabled", "trigger=long_press"); return false; }
         Context context = row.getContext();
         try {
             Object aweme = currentAweme(module);
-            if (aweme == null) return false;
+            if (aweme == null) { DouAiLog.event("download_menu", "skipped", "current_work_missing", "trigger=long_press"); return false; }
             List<MenuAction> actions = buildMenuActions(aweme);
-            if (actions.isEmpty()) return false;
+            if (actions.isEmpty()) { DouAiLog.event("download_menu", "skipped", "no_available_actions", "trigger=long_press"); return false; }
             String[] labels = new String[actions.size()];
             for (int i = 0; i < actions.size(); i++) labels[i] = actions.get(i).label;
             new AlertDialog.Builder(context)
@@ -250,8 +270,10 @@ public final class DownloadActionHook implements AutoCloseable {
                             module, row, actions.get(which), context, aweme))
                     .setNegativeButton("取消", null)
                     .show();
+            DouAiLog.event("download_menu", "shown", "long_press", "available_actions=" + actions.size());
             return true;
         } catch (Throwable failure) {
+            DouAiLog.failure("download_menu", "show", failure);
             safeLog("Could not show native download menu: " + failure.getMessage());
             return false;
         }
@@ -259,6 +281,7 @@ public final class DownloadActionHook implements AutoCloseable {
 
     private void selectAction(Object module, View row, MenuAction action, Context context,
                               Object aweme) {
+        DouAiLog.event("download_menu", "selected", "user_choice", "kind=" + action.kind + "; business_result=pending");
         if (action.kind == MenuAction.THIRD_PARTY) {
             startThirdParty(context, aweme, module);
             return;

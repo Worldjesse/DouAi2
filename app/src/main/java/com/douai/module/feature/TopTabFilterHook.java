@@ -1,6 +1,7 @@
 package com.douai.module.feature;
 
 import com.douai.module.config.ExtendedSettings;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.RuleScanResult;
@@ -76,14 +77,25 @@ public final class TopTabFilterHook implements AutoCloseable {
     private Object intercept(XposedInterface.Chain chain) throws Throwable {
         Object result = chain.proceed();
         ExtendedSettings current = settings;
-        if (!(result instanceof List<?>)) return result;
+        if (!(result instanceof List<?>)) {
+            DouAiLog.event("top_tabs", "decision", "unexpected_provider_result", "original_result_retained=true");
+            return result;
+        }
         List<?> source = (List<?>) result;
-        if (source.isEmpty()) return result;
+        if (source.isEmpty()) {
+            DouAiLog.event("top_tabs", "decision", "empty_provider_list", "source_count=0");
+            return result;
+        }
+        DouAiLog.Operation operation = DouAiLog.begin("top_tabs", "tab_provider");
+        operation.stage("classify", "source_count=" + source.size() + ";enabled=" + (current != null && current.hideTopTabs));
         ArrayList<Object> kept = new ArrayList<>(source.size());
         java.util.Map<String, String> choices = new java.util.LinkedHashMap<>();
         try {
             for (Object item : source) {
-                if (item == null || !tabModelClass.isInstance(item)) return result;
+                if (item == null || !tabModelClass.isInstance(item)) {
+                    operation.finish(DouAiLog.Outcome.SKIPPED, "unexpected_tab_model", "original_list_retained=true");
+                    return result;
+                }
                 String id = (String) tabIdField.get(item);
                 String title = (String) tabTitleField.get(item);
                 if (id != null && !id.trim().isEmpty()) choices.put(id, title == null || title.isEmpty() ? id : title);
@@ -91,11 +103,20 @@ public final class TopTabFilterHook implements AutoCloseable {
                         || !matchesHiddenTab(id, title, current.hiddenTopTabs)) kept.add(item);
             }
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            operation.error("classify", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "tab_inspection_failed", "original_list_retained=true");
             safeLog("Could not classify home tabs: " + failure.getMessage());
             return result;
         }
         availableTabs = Collections.unmodifiableMap(choices);
-        if (kept.isEmpty() || kept.size() == source.size()) return result;
+        if (kept.isEmpty() || kept.size() == source.size()) {
+            operation.finish(DouAiLog.Outcome.SKIPPED, kept.isEmpty() ? "retain_last_tab_guard" : current == null || !current.hideTopTabs
+                    ? "disabled" : "no_configured_match", "source_count=" + source.size() + ";kept_count=" + kept.size()
+                    + ";original_list_retained=true");
+            return result;
+        }
+        operation.finish(DouAiLog.Outcome.SUCCESS, "filtered_list_returned", "source_count=" + source.size()
+                + ";kept_count=" + kept.size() + ";result_scope=provider_list;rendered_tabs=unobserved");
         return kept;
     }
 

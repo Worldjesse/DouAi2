@@ -25,6 +25,7 @@ import com.douai.module.config.MiniMaxSpeechOptions;
 import com.douai.module.config.SettingsStore;
 import com.douai.module.config.SpeechSettings;
 import com.douai.module.config.ThirdPartyRequestTemplate;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.feature.LocalSpeechSynthesis;
 import com.douai.module.feature.MiniMaxSpeechClient;
 import com.douai.module.feature.MiniMaxSpeechModelCatalog;
@@ -71,6 +72,7 @@ final class SpeechSettingsDialog implements AutoCloseable {
     private SpeechHttpClient.Request fetch;
     private Future<?> future;
     private SpeechSynthesis preview;
+    private DouAiLog.Operation previewTrace;
     private MediaPlayer player;
     private java.io.File previewFile;
     private long previewGeneration;
@@ -828,49 +830,86 @@ final class SpeechSettingsDialog implements AutoCloseable {
         AlertDialog test = builder("试听").setView(form).setNegativeButton("关闭", null).create();
         start.setOnClickListener(ignored -> {
             stopPreview();
+            DouAiLog.Operation trace = DouAiLog.begin("speech_preview", "user_test_speech");
+            previewTrace = trace;
             long generation = previewGeneration;
             start.setEnabled(false);
             status.setText("正在生成语音");
-            preview = SpeechSynthesis.synthesize(context, text.getText().toString(), options(), (result, failure) -> {
-                if (closed || generation != previewGeneration || !test.isShowing()) { delete(result); return; }
+            trace.stage("synthesis_requested", "text_chars=" + text.length() + "; playback_started=false");
+            trace.wrap(() -> preview = SpeechSynthesis.synthesize(context, text.getText().toString(), options(), (result, failure) -> {
+                if (closed || generation != previewGeneration || !test.isShowing()) {
+                    finishPreview(trace, DouAiLog.Outcome.CANCELLED, "preview_owner_changed", "playback_started=false");
+                    delete(result); return;
+                }
                 preview = null;
                 start.setEnabled(true);
-                if (result == null) { status.setText(failure); return; }
+                if (result == null) {
+                    finishPreview(trace, failure != null && failure.contains("超时") ? DouAiLog.Outcome.TIMED_OUT
+                            : failure != null && failure.contains("已停止") ? DouAiLog.Outcome.CANCELLED : DouAiLog.Outcome.FAILED,
+                            "synthesis_not_ready", "playback_started=false; diagnostic_ref=" + DouAiLog.reference(failure));
+                    status.setText(failure); return;
+                }
                 previewFile = result.file;
+                trace.stage("audio_ready", "duration_ms=" + result.durationMillis + "; playback_started=false");
                 try {
                     MediaPlayer preparing = new MediaPlayer();
                     player = preparing;
                     preparing.setDataSource(result.file.getAbsolutePath());
                     preparing.setOnPreparedListener(ready -> {
-                        if (closed || generation != previewGeneration || player != ready || !test.isShowing()) return;
-                        ready.start();
+                        if (closed || generation != previewGeneration || player != ready || !test.isShowing()) {
+                            finishPreview(trace, DouAiLog.Outcome.CANCELLED, "late_player_prepared", "playback_started=false"); return;
+                        }
+                        try { ready.start(); }
+                        catch (RuntimeException error) {
+                            trace.error("player_start", error);
+                            finishPreview(trace, DouAiLog.Outcome.FAILED, "player_start_failed", "playback_completed=false");
+                            throw error;
+                        }
+                        trace.stage("playing", "player_start_returned=true; playback_completed=false");
                         status.setText("正在播放");
                     });
                     preparing.setOnCompletionListener(completed -> {
-                        if (generation != previewGeneration || player != completed) return;
+                        if (generation != previewGeneration || player != completed) {
+                            finishPreview(trace, DouAiLog.Outcome.CANCELLED, "late_player_completion", "owner_matches=false"); return;
+                        }
+                        finishPreview(trace, DouAiLog.Outcome.SUCCESS, "player_completion_observed", "evidence=owned_media_player_completion_callback");
                         stopPreview();
                         status.setText("试听完成");
                     });
                     preparing.setOnErrorListener((failed, what, extra) -> {
                         if (generation == previewGeneration && player == failed) {
+                            finishPreview(trace, DouAiLog.Outcome.FAILED, "player_error", "what=" + what + "; extra=" + extra + "; playback_completed=false");
                             stopPreview();
                             status.setText("试听播放失败");
-                        }
+                        } else trace.stage("late_player_error", "ignored=true; what=" + what + "; extra=" + extra);
                         return true;
                     });
                     status.setText("正在准备播放");
+                    trace.stage("player_preparing", "prepare_async_requested=true; playback_started=false");
                     preparing.prepareAsync();
-                } catch (Exception error) { stopPreview(); status.setText("试听播放失败"); }
-            });
+                } catch (Exception error) {
+                    trace.error("player_prepare", error);
+                    finishPreview(trace, DouAiLog.Outcome.FAILED, "player_prepare_failed", "playback_completed=false");
+                    stopPreview(); status.setText("试听播放失败");
+                }
+            })).run();
         });
         show(test, this::stopPreview);
     }
 
     private void stopPreview() {
+        DouAiLog.Operation trace = previewTrace;
+        previewTrace = null;
+        if (trace != null) trace.finish(DouAiLog.Outcome.CANCELLED, "preview_stopped_or_replaced", "playback_completion_unobserved=true");
         previewGeneration++;
         if (preview != null) { preview.close(); preview = null; }
         if (player != null) { player.release(); player = null; }
         if (previewFile != null) { previewFile.delete(); previewFile = null; }
+    }
+
+    private void finishPreview(DouAiLog.Operation trace, DouAiLog.Outcome outcome, String reason, String evidence) {
+        if (previewTrace == trace) previewTrace = null;
+        trace.finish(outcome, reason, evidence);
     }
 
     private void settingChanged(String key) {

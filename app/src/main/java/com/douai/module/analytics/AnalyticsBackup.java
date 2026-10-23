@@ -6,6 +6,7 @@ import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import com.douai.module.config.BackupLimitException;
 import com.douai.module.config.BackupValidationException;
+import com.douai.module.diagnostics.DouAiLog;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -61,6 +62,20 @@ public final class AnalyticsBackup {
 
     /** Worker only; queued writes drain before a transaction reads all tables. */
     public static JSONObject export(Context context) {
+        DouAiLog.Operation operation = DouAiLog.begin("analytics_backup_export", "logical_snapshot");
+        try {
+            JSONObject payload = exportChecked(context);
+            operation.finish(DouAiLog.Outcome.SUCCESS, "snapshot_validated", "bytes=" + payload.toString().getBytes(StandardCharsets.UTF_8).length
+                    + "; external_file_written=false");
+            return payload;
+        } catch (RuntimeException failure) {
+            operation.error("snapshot", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "snapshot_failed", "external_file_written=false");
+            throw failure;
+        }
+    }
+
+    private static JSONObject exportChecked(Context context) {
         return LocalPortraitContext.withState(context, state -> {
             JSONObject payload = LocalAnalytics.get(context).exportBackup();
             try {
@@ -75,6 +90,19 @@ public final class AnalyticsBackup {
 
     /** Pure validation. Does not open this installation's analytics database. */
     public static Snapshot inspect(JSONObject payload) {
+        DouAiLog.Operation operation = DouAiLog.begin("analytics_backup_preview", "validate_logical_snapshot");
+        try {
+            Snapshot snapshot = inspectChecked(payload);
+            operation.finish(DouAiLog.Outcome.SUCCESS, "snapshot_validated", "rows=" + snapshot.rowCount + "; applied=false");
+            return snapshot;
+        } catch (RuntimeException failure) {
+            operation.error("validation", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "snapshot_validation_failed", "applied=false");
+            throw failure;
+        }
+    }
+
+    private static Snapshot inspectChecked(JSONObject payload) {
         BackupValidationException.Reason reason = BackupValidationException.Reason.HEADER_SHAPE;
         String field = "";
         try {
@@ -161,6 +189,20 @@ public final class AnalyticsBackup {
      * these separate stores are not a single crash-atomic transaction.
      */
     public static void restore(Context context, Snapshot snapshot, Runnable applySettings, Runnable rollbackSettings) {
+        DouAiLog.Operation operation = DouAiLog.begin("analytics_backup_restore", "restore_snapshot");
+        try {
+            operation.wrap(() -> restoreChecked(context, snapshot, applySettings, rollbackSettings)).run();
+            operation.finish(DouAiLog.Outcome.SUCCESS, "transaction_committed", "rows=" + snapshot.rowCount
+                    + "; cross_store_crash_atomic=false; read_back_verified=false");
+        } catch (RuntimeException failure) {
+            operation.error("restore_or_compensation", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, failure.getSuppressed().length > 0
+                            ? "restore_and_compensation_failed" : "restore_failed", "cross_store_crash_atomic=false");
+            throw failure;
+        }
+    }
+
+    private static void restoreChecked(Context context, Snapshot snapshot, Runnable applySettings, Runnable rollbackSettings) {
         if (snapshot == null) throw invalid();
         LocalPortraitContext.withState(context, before -> {
             boolean[] contextSaved = {false}, settingsSaved = {false};
@@ -174,6 +216,8 @@ public final class AnalyticsBackup {
                 catch (RuntimeException compensation) { failure.addSuppressed(compensation); }
                 if (contextSaved[0]) try { LocalPortraitContext.replaceFromBackup(context, before); }
                 catch (RuntimeException compensation) { failure.addSuppressed(compensation); }
+                DouAiLog.event("analytics_backup_restore", "compensation", "restore_failed", "settings_had_changed=" + settingsSaved[0]
+                        + "; context_had_changed=" + contextSaved[0] + "; compensation_errors=" + failure.getSuppressed().length);
                 if (failure.getSuppressed().length > 0) throw new IllegalStateException(
                         "恢复未完成，部分配置或自述未能回滚；本地统计事务已保留，请检查存储后重试", failure);
                 throw failure;

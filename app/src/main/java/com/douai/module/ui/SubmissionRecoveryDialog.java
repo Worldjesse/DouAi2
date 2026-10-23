@@ -1,5 +1,7 @@
 package com.douai.module.ui;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.app.AlertDialog;
 import android.content.Context;
 import android.os.Handler;
@@ -138,15 +140,18 @@ final class SubmissionRecoveryDialog implements AutoCloseable {
 
     private void reconcile(SubmissionLedger.Entry entry, boolean sent) {
         if (closed) return;
+        DouAiLog.Operation trace = DouAiLog.begin("history", "manual_reconcile");
+        trace.stage("ledger_write", "user_declared_sent=" + sent + ";entry_ref=" + DouAiLog.reference(entry.identity));
         String uid = loadedAccount;
         int ticket = ++generation;
         summary.setText("正在保存核对结果…");
-        work = worker.submit(() -> {
-            if (closed || !uid.equals(currentAccount())) return;
+        work = worker.submit(trace.wrap(() -> {
+            if (closed || !uid.equals(currentAccount())) { trace.finish(DouAiLog.Outcome.CANCELLED, "account_or_dialog_changed", ""); return; }
             boolean saved = ledger.reconcile(entry, SubmissionLedger.accountScope(uid), sent, System.currentTimeMillis(),
                     () -> !closed && uid.equals(currentAccount()) && (sent || releaseLegacyGuard(uid, entry.identity)));
-            main.post(() -> { if (current(ticket)) refresh(saved ? "核对结果已保存，未补发。" : "记录已变化、不可恢复或存储失败，请刷新后重新核对。"); });
-        });
+            trace.finish(saved ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.UNCONFIRMED, "ledger_reconcile_result", "saved=" + saved + ";remote_delivery=user_asserted;resend=false");
+            main.post(trace.wrap(() -> { if (current(ticket)) refresh(saved ? "核对结果已保存，未补发。" : "记录已变化、不可恢复或存储失败，请刷新后重新核对。"); }));
+        }));
     }
 
     private String currentAccount() {

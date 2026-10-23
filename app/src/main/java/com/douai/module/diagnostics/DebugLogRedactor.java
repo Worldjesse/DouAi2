@@ -13,12 +13,13 @@ import java.util.regex.Pattern;
 final class DebugLogRedactor {
     static final int MAX_INPUT_CHARS = 262_144;
     private static final String MASK = "[REDACTED]";
-    private static final String KEYS = "(?:[a-z0-9_.-]{0,128}(?:authorization|api[-_]?key|token|password|passwd|secret|cookie|secret[-_]?key|encrypt(?:ion)?[-_]?key|aes[-_]?key|private[-_]?key|auth[-_]?key)|skey|tkey|key)";
+    private static final String KEYS = "(?:[a-z0-9_.-]{0,128}(?:authorization|api[-_]?key|token|password|passwd|secret|cookie|signature|secret[-_]?key|encrypt(?:ion)?[-_]?key|aes[-_]?key|private[-_]?key|auth[-_]?key)|skey|tkey|key|sign)";
     private static final Pattern BEARER = Pattern.compile("(?i)\\b(?:Bearer|Basic)\\s+[^\\s\"'\\\\,;}]+(?:=*)");
     private static final Pattern QUOTED = Pattern.compile("(?i)(\\b(?:" + KEYS + ")(?:\\\\*[\"'])?\\s*[:=]\\s*)(\\\\*[\"'])(.*?)(\\2)", Pattern.DOTALL);
     private static final Pattern VALUE = Pattern.compile("(?i)(\\b(?:" + KEYS + ")(?:\\\\*[\"'])?\\s*[:=]\\s*(?:\\\\*[\"'])?)[^\\s,;&}\\\"']+");
     private static final Pattern URL_QUERY = Pattern.compile("(?i)(\\b[a-z][a-z0-9+.-]{0,31}://[^\\s\"'<>?\\\\]+)\\?[^\\s\"'<>\\\\]*");
     private static final Pattern URL_USER = Pattern.compile("(?i)(\\b[a-z][a-z0-9+.-]{0,31}://)[^/@\\s]+:[^/@\\s]+@");
+    private static final Pattern COOKIE_LINE = Pattern.compile("(?i)(\\b(?:set-cookie|cookie)\\s*[:=]\\s*)[^\\r\\n\"']*");
 
     private DebugLogRedactor() { }
 
@@ -88,13 +89,15 @@ final class DebugLogRedactor {
         return key.endsWith("authorization") || key.endsWith("apikey") || key.endsWith("token")
                 || key.endsWith("password") || key.endsWith("passwd") || key.endsWith("secret") || key.endsWith("cookie")
                 || key.equals("key") || key.equals("skey") || key.equals("tkey") || key.endsWith("secretkey") || key.endsWith("encryptkey")
-                || key.endsWith("encryptionkey") || key.endsWith("aeskey") || key.endsWith("privatekey") || key.endsWith("authkey");
+                || key.endsWith("encryptionkey") || key.endsWith("aeskey") || key.endsWith("privatekey") || key.endsWith("authkey")
+                || key.endsWith("signature") || key.equals("sign");
     }
 
     private static String plain(String value) {
         String safe = BEARER.matcher(value).replaceAll("[AUTH_REDACTED]");
         safe = QUOTED.matcher(safe).replaceAll("$1$2[REDACTED]$2");
         safe = VALUE.matcher(safe).replaceAll("$1[REDACTED]");
+        safe = COOKIE_LINE.matcher(safe).replaceAll("$1[REDACTED]");
         safe = URL_USER.matcher(safe).replaceAll("$1[REDACTED]@");
         return URL_QUERY.matcher(safe).replaceAll("$1?[QUERY_REDACTED]");
     }

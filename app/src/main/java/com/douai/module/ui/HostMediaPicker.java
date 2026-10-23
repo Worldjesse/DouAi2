@@ -1,5 +1,7 @@
 package com.douai.module.ui;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.app.Activity;
 import android.content.Intent;
 import android.net.Uri;
@@ -67,6 +69,8 @@ final class HostMediaPicker implements AutoCloseable {
     private Class<?> resultType;
     private Class<?> modelType;
     private boolean closed;
+    private boolean resultReceived;
+    private final DouAiLog.Operation trace = DouAiLog.begin("media_picker", "HostMediaPicker");
 
     private HostMediaPicker(Activity activity, boolean videoOnly, Consumer<List<Selection>> selected, HostAdaptation.Profile profile) {
         this.activity = activity;
@@ -82,7 +86,7 @@ final class HostMediaPicker implements AutoCloseable {
         HostAdaptation.Profile profile;
         try { profile = HostNativeChatViews.profileFor(activity); }
         catch (ReflectiveOperationException unavailable) {
-            Log.w("DouAi.HostAlbum", "Host album version is unavailable", unavailable);
+            DouAiLog.legacy(5, "DouAi.HostAlbum", "Host album version is unavailable", unavailable);
             return null;
         }
         HostMediaPicker picker = new HostMediaPicker(activity, videoOnly, selected, profile);
@@ -102,14 +106,21 @@ final class HostMediaPicker implements AutoCloseable {
                     return "DouAiHostAlbumSelection";
                 }
                 if (!"onActivityResult".equals(method.getName()) || picker.closed) return null;
+                picker.resultReceived = true;
+                picker.trace.stage("selection_callback", "callback_received=true");
                 picker.close();
                 List<Selection> result = null;
+                boolean parseFailed = false;
                 try {
                     if (args != null && args.length != 0 && args[0] != null) result = picker.readResult(args[0]);
                 } catch (ReflectiveOperationException | RuntimeException | LinkageError invalid) {
-                    Log.w("DouAi.HostAlbum", "Host album returned an unavailable selection", invalid);
+                    parseFailed = true; picker.trace.error("selection_parse", invalid);
+                    picker.trace.finish(DouAiLog.Outcome.FAILED, "selection_protocol_error", "selection_unavailable=true");
+                    DouAiLog.legacy(5, "DouAi.HostAlbum", "Host album returned an unavailable selection", invalid);
                 }
-                picker.selected.accept(result);
+                if (!parseFailed) picker.trace.finish(result == null ? DouAiLog.Outcome.CANCELLED : result.isEmpty() ? DouAiLog.Outcome.SKIPPED : DouAiLog.Outcome.SUCCESS,
+                        result != null && result.isEmpty() ? "no_usable_selection" : "selection_result", "selections=" + (result == null ? 0 : result.size()) + ";file_content_verified=false");
+                picker.trace.wrapConsumer(picker.selected).accept(result);
                 return null;
             });
             picker.launcher = registryType.getMethod("register", String.class, contract, callback)
@@ -119,8 +130,10 @@ final class HostMediaPicker implements AutoCloseable {
             picker.launcherType.getMethod("launch", Object.class).invoke(picker.launcher, intent);
             return picker;
         } catch (ReflectiveOperationException | RuntimeException | LinkageError unavailable) {
+            picker.resultReceived = true;
+            picker.trace.finish(DouAiLog.Outcome.FAILED, "picker_unavailable", "selection_not_started");
             picker.close();
-            Log.w("DouAi.HostAlbum", "Host album is unavailable", unavailable);
+            DouAiLog.legacy(5, "DouAi.HostAlbum", "Host album is unavailable", unavailable);
             return null;
         }
     }
@@ -230,11 +243,12 @@ final class HostMediaPicker implements AutoCloseable {
     @Override public void close() {
         if (closed) return;
         closed = true;
+        if (!resultReceived) trace.finish(DouAiLog.Outcome.CANCELLED, "picker_closed", "no_selection_consumed");
         if (PENDING.get(activity) == this) PENDING.remove(activity);
         if (launcher != null) {
             try { launcherType.getMethod("unregister").invoke(launcher); }
             catch (ReflectiveOperationException | RuntimeException unavailable) {
-                Log.w("DouAi.HostAlbum", "Host album callback could not be unregistered", unavailable);
+                DouAiLog.legacy(5, "DouAi.HostAlbum", "Host album callback could not be unregistered", unavailable);
             }
         }
     }

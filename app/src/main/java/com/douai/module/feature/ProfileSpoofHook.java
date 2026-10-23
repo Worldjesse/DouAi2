@@ -9,6 +9,7 @@ import android.view.ViewTreeObserver;
 import android.widget.TextView;
 
 import com.douai.module.config.LocalOptions;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostScanReport;
 
 import io.github.libxposed.api.XposedInterface;
@@ -143,13 +144,21 @@ public final class ProfileSpoofHook implements AutoCloseable {
                 Object target = owner.get();
                 LocalOptions current = options;
                 if (closed || !registration.isActive() || target == null || current == null
-                        || !current.enabled("spoof_profile")
-                        || !Boolean.TRUE.equals(ownProfile.invoke(target))) {
+                        || !current.enabled("spoof_profile")) {
+                    DouAiLog.event("spoof_profile", "decision", "disabled_or_not_ready", "restore_requested=true");
+                    restore();
+                    return;
+                }
+                if (!Boolean.TRUE.equals(ownProfile.invoke(target))) {
+                    DouAiLog.event("spoof_profile", "decision", "not_own_profile", "restore_requested=true");
                     restore();
                     return;
                 }
                 View root = (View) rootView.invoke(target);
-                if (root == null || !root.isAttachedToWindow()) { restore(); return; }
+                if (root == null || !root.isAttachedToWindow()) {
+                    DouAiLog.event("spoof_profile", "decision", "profile_view_unavailable", "restore_requested=true");
+                    restore(); return;
+                }
                 ViewTreeObserver next = root.getViewTreeObserver();
                 if (next != observer && next.isAlive()) {
                     detach();
@@ -203,11 +212,21 @@ public final class ProfileSpoofHook implements AutoCloseable {
         Original(CharSequence original) { this.original = original; }
         void apply(TextView view, CharSequence next) {
             if (applied != null && !TextUtils.equals(view.getText(), applied)) original = view.getText();
-            if (!TextUtils.equals(view.getText(), next)) view.setText(next);
+            if (!TextUtils.equals(view.getText(), next)) {
+                view.setText(next);
+                observeApplied(view, next);
+            }
             applied = next;
         }
         void restore(TextView view) {
             if (applied != null && TextUtils.equals(view.getText(), applied)) view.setText(original);
+        }
+        private static void observeApplied(TextView view, CharSequence next) {
+            try {
+                DouAiLog.event("spoof_profile", "view_state", TextUtils.equals(view.getText(), next)
+                        ? "display_text_readback" : "display_text_unconfirmed", "resource_id=" + view.getId()
+                        + ";configured_ref=" + DouAiLog.reference(String.valueOf(next)) + ";result_scope=current_text_view");
+            } catch (Throwable unavailable) { }
         }
     }
 }

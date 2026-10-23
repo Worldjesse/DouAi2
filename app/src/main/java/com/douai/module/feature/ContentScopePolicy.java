@@ -1,5 +1,7 @@
 package com.douai.module.feature;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import com.douai.module.config.LocalOptions;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -66,11 +68,13 @@ public final class ContentScopePolicy {
         identities.put(prefix + "_scope_mode", scopeMode(prefix, options));
         identities.put(prefix + "_scope_relations", options.text(prefix + "_scope_relations", ""));
         identities.put(targetsKey(prefix), options.text(targetsKey(prefix), ""));
-        if (!AutomationScopePolicy.allows(prefix, new LocalOptions(identities), uid, author, "", "", relation)) return false;
+        if (!AutomationScopePolicy.allows(prefix, new LocalOptions(identities), uid, author, "", "", relation)) { DouAiLog.event("auto_" + prefix, "scope_gate", "identity_scope_rejected", "scope_mode=" + identities.get(prefix + "_scope_mode") + ";relation=" + relation); return false; }
         String filter = filterMode(prefix, options);
         if (OFF.equals(filter)) return true;
-        if (!INCLUDE.equals(filter) && !EXCLUDE.equals(filter)) return false;
+        if (!INCLUDE.equals(filter) && !EXCLUDE.equals(filter)) { DouAiLog.event("auto_" + prefix, "scope_gate", "invalid_content_filter", "filter_ref=" + DouAiLog.reference(filter)); return false; }
         boolean match = AutomationScopePolicy.keywordMatch(keywords(prefix, options), fields(prefix, options), author, caption, title);
-        return INCLUDE.equals(filter) ? match : !match;
+        boolean allowed = INCLUDE.equals(filter) ? match : !match;
+        if (!allowed) DouAiLog.event("auto_" + prefix, "scope_gate", "content_filter_rejected", "filter_mode=" + filter + ";keyword_matched=" + match);
+        return allowed;
     }
 }

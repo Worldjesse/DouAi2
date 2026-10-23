@@ -1,6 +1,8 @@
 package com.douai.module.feature;
 
 import io.github.libxposed.api.XposedInterface;
+import com.douai.module.diagnostics.DouAiLog;
+import com.douai.module.diagnostics.FeatureLogCatalog;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -35,12 +37,16 @@ final class BehaviorHookGroup implements AutoCloseable {
                 .intercept(hooker);
         if (handle == null) throw new IllegalStateException("Empty hook handle: " + id);
         handles.add(handle);
+        DouAiLog.event(FeatureLogCatalog.forHook("DouAi.Advanced." + id), "registration", "handle_installed", "handles=" + handles.size() + ";business_result=not_implied");
     }
 
     synchronized boolean isActive() { return !closed && !handles.isEmpty(); }
     synchronized String installationFailure() { return installationFailure; }
 
     void fail(Throwable failure) {
+        String feature = FeatureLogCatalog.forHook("DouAi.Advanced." + id);
+        DouAiLog.failure(feature, "installation_or_runtime_rollback", failure);
+        DouAiLog.event(feature, "availability", "rolled_back", "hook_state=uninstalled;business_result=unknown");
         synchronized (this) {
             installationFailure = com.douai.module.diagnostics.HostAdaptationDiagnostics.installationFailure(failure);
         }
@@ -61,5 +67,6 @@ final class BehaviorHookGroup implements AutoCloseable {
             }
         }
         handles.clear();
+        DouAiLog.event(FeatureLogCatalog.forHook("DouAi.Advanced." + id), "registration", "closed", "handles=0");
     }
 }

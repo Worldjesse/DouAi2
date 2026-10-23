@@ -9,6 +9,7 @@ import android.os.Looper;
 import android.view.View;
 
 import com.douai.module.config.LocalOptions;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostScanReport;
 import io.github.libxposed.api.XposedInterface;
 import java.lang.reflect.Method;
@@ -56,6 +57,9 @@ public final class RecallHighlightHook implements AutoCloseable {
                         if (uid != null && id != null && hook.records.getBoolean("recall." + uid + "." + id, false)) {
                             hook.originals.put(view, view.getBackground());
                             view.setBackgroundColor(color(hook.options.text("recall_background", "#2051BA55")));
+                            DouAiLog.event("recall_background", "view_state", "known_recalled_message_highlighted",
+                                    "recall_record=true;message_ref=" + DouAiLog.reference(id)
+                                            + ";background_set_returned=true;visual_readback=unobserved");
                         }
                     } catch (ReflectiveOperationException | RuntimeException failure) {
                         hook.restoreAll();

@@ -1,5 +1,7 @@
 package com.douai.module.ui;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
@@ -345,7 +347,7 @@ public final class LocalAnalyticsDialog implements AutoCloseable {
         return message -> {
             try {
                 String safe = "[analytics] " + message;
-                if (sink == null) android.util.Log.i("DouAi.Analytics", safe);
+                if (sink == null) DouAiLog.legacy(4, "DouAi.Analytics", safe, null);
                 else sink.accept(safe);
             } catch (RuntimeException ignored) { /* Diagnostics must not affect host UI or requests. */ }
         };

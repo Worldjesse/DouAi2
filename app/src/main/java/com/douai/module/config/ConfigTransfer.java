@@ -1,6 +1,7 @@
 package com.douai.module.config;
 
 import com.douai.module.BuildConfig;
+import com.douai.module.diagnostics.DouAiLog;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.nio.charset.StandardCharsets;
@@ -46,6 +47,21 @@ public final class ConfigTransfer {
     }
 
     public static String export(SettingsStore store, boolean includeSecrets) {
+        DouAiLog.Operation operation = DouAiLog.begin("config_export", "serialize_backup");
+        try {
+            String result = exportChecked(store, includeSecrets);
+            operation.finish(DouAiLog.Outcome.SUCCESS, "validated_backup_serialized",
+                    "bytes=" + result.getBytes(StandardCharsets.UTF_8).length + "; includes_secrets=" + includeSecrets
+                            + "; external_file_written=false");
+            return result;
+        } catch (RuntimeException failure) {
+            operation.error("serialize", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "validation_or_serialization_failed", "external_file_written=false");
+            throw failure;
+        }
+    }
+
+    private static String exportChecked(SettingsStore store, boolean includeSecrets) {
         try {
             Map<String, ?> source = store.snapshot(); JSONObject values = new JSONObject();
             new MiniMaxSpeechOptions(new LocalOptions(source)).validate();
@@ -69,6 +85,21 @@ public final class ConfigTransfer {
     public static Preview inspect(SettingsStore store, String encoded) { return inspect(store, encoded, Mode.MERGE); }
 
     public static Preview inspect(SettingsStore store, String encoded, Mode mode) {
+        DouAiLog.Operation operation = DouAiLog.begin("config_import_preview", "inspect_backup");
+        try {
+            Preview preview = inspectChecked(store, encoded, mode);
+            operation.finish(DouAiLog.Outcome.SUCCESS, "preview_validated", "entries=" + preview.entryCount
+                    + "; changed=" + preview.changedCount + "; removed=" + preview.removedCount
+                    + "; missing_secrets=" + preview.missingSecretsCount + "; mode=" + mode + "; applied=false");
+            return preview;
+        } catch (RuntimeException | LinkageError failure) {
+            operation.error("validation", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "backup_validation_failed", "applied=false");
+            throw failure;
+        }
+    }
+
+    private static Preview inspectChecked(SettingsStore store, String encoded, Mode mode) {
         if (encoded == null) throw new BackupValidationException(Section.CONFIG, Reason.INVALID_JSON, null);
         if (encoded.length() > MAX_BYTES || encoded.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES)
             throw new BackupLimitException(BackupLimitException.Section.CONFIG);
@@ -169,8 +200,22 @@ public final class ConfigTransfer {
     }
 
     public static void apply(SettingsStore store, Preview preview) {
-        if (preview == null) throw new IllegalArgumentException("请先预览配置文件");
-        store.replaceSnapshot(preview.expected, preview.replacement);
+        DouAiLog.Operation operation = DouAiLog.begin("config_import", "apply_preview");
+        try {
+            if (preview == null) throw new IllegalArgumentException("请先预览配置文件");
+            operation.stage("compare_and_replace", "changed=" + preview.changedCount + "; mode=" + preview.mode);
+            operation.wrap(() -> store.replaceSnapshot(preview.expected, preview.replacement)).run();
+            boolean verified = false;
+            try { verified = store.snapshot().equals(preview.replacement); }
+            catch (RuntimeException unavailable) { operation.error("verification_unavailable", unavailable); }
+            operation.finish(verified ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.UNCONFIRMED,
+                    verified ? "store_snapshot_matches" : "store_snapshot_mismatch", "read_back_verified=" + verified
+                            + "; host_config_propagation_confirmed=false");
+        } catch (RuntimeException failure) {
+            operation.error("compare_and_replace", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "store_replace_failed", "host_config_propagation_confirmed=false");
+            throw failure;
+        }
     }
 
     /** Compensation after another selected backup component fails; never overwrites newer settings. */

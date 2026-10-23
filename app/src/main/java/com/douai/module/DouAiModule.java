@@ -60,7 +60,8 @@ import com.douai.module.diagnostics.ScanDiagnosticsChannel;
 import com.douai.module.diagnostics.HostAdaptationDiagnostics;
 import com.douai.module.diagnostics.DebugLog;
 import com.douai.module.diagnostics.DebugLogChannel;
-import com.douai.module.diagnostics.DebugLogPolicy;
+import com.douai.module.diagnostics.DouAiLog;
+import com.douai.module.diagnostics.FeatureLogCatalog;
 import com.douai.module.feature.DebugHookTrace;
 import com.douai.module.feature.FeedAdFilterHook;
 import com.douai.module.feature.DownloadActionHook;
@@ -163,7 +164,13 @@ public final class DouAiModule extends XposedModule {
 
     @Override
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
+        DouAiLog.setFrameworkSink((priority, line) -> DouAiLog.writeFramework(
+                (level, part) -> super.log(level, TAG, part), priority, line));
+        DouAiLog.environment(BuildConfig.VERSION_NAME, Integer.toString(BuildConfig.VERSION_CODE),
+                "unknown", param.getProcessName(), android.os.Process.myPid());
         isMainProcess = TARGET_PACKAGE.equals(param.getProcessName());
+        DouAiLog.event("module_startup", "process_gate", isMainProcess ? "target_main_process" : "other_process",
+                "module=" + BuildConfig.VERSION_NAME + ";api=" + getApiVersion());
         moduleLog(3, TAG, "DouAi " + BuildConfig.VERSION_NAME + " / API " + getApiVersion()
                 + " loaded in " + param.getProcessName());
         if (isMainProcess) installHostApplicationHook();
@@ -173,11 +180,15 @@ public final class DouAiModule extends XposedModule {
     public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
         if (!isMainProcess || !TARGET_PACKAGE.equals(param.getPackageName()) || !param.isFirstPackage()
                 || scanScheduled) {
+            DouAiLog.event("host_scan", "scan_gate", "package_not_eligible",
+                    "main_process=" + isMainProcess + ";target_package=" + TARGET_PACKAGE.equals(param.getPackageName())
+                            + ";first_package=" + param.isFirstPackage() + ";already_scheduled=" + scanScheduled);
             return;
         }
 
         ApplicationInfo appInfo = param.getApplicationInfo();
         if (appInfo == null || !"com.ss.android.ugc.aweme".equals(appInfo.packageName)) {
+            DouAiLog.event("host_scan", "scan_gate", "metadata_unavailable", "scan_started=false");
             moduleLog(6, TAG, "Target package metadata is unavailable");
             return;
         }
@@ -188,6 +199,8 @@ public final class DouAiModule extends XposedModule {
         List<File> archives = getApkArchives(appInfo);
         try {
             hostProfile = com.douai.module.scan.HostApkProfile.read(archives.get(0));
+            DouAiLog.event("host_scan", "host_profile", hostProfile == null ? "unsupported" : "recognized",
+                    "archive_count=" + archives.size() + ";business_readiness=not_implied");
             HostAdaptation.setCurrentProfile(hostProfile);
             if (hostProfile != null) {
                 moduleLog(3, TAG, "Selected host profile " + hostProfile.versionName + " / " + hostProfile.versionCode
@@ -243,7 +256,9 @@ public final class DouAiModule extends XposedModule {
     }
 
     private void scanHost(List<File> archives) {
+        DouAiLog.Operation operation = DouAiLog.begin("host_scan", "package_loaded");
         try {
+            operation.stage("await_context", "archive_count=" + archives.size());
             Context hostContext = awaitHostContext();
             targetContext = hostContext;
             try {
@@ -259,6 +274,9 @@ public final class DouAiModule extends XposedModule {
                 moduleLog(5, TAG, "Local analytics storage unavailable: " + failure.getClass().getSimpleName());
             }
             hostVersionEvidence = HostAdaptationDiagnostics.readInstalledVersion(hostContext);
+            DouAiLog.environment(BuildConfig.VERSION_NAME, Integer.toString(BuildConfig.VERSION_CODE),
+                    hostProfile == null ? "unknown" : hostProfile.versionName,
+                    TARGET_PACKAGE, android.os.Process.myPid());
             HostUiController ui = ensureHostUiController(hostContext);
             registerDiagnosticsReceiver(hostContext);
             HostRuleSet rules = loadRulesFromModuleApk();
@@ -271,11 +289,13 @@ public final class DouAiModule extends XposedModule {
                 moduleLog(3, TAG, "Copied existing module settings to independent Douyin-local storage");
             }
             registerSettingsListener(preferences);
+            operation.stage("configuration", "local_preferences_available=true");
             updateConfiguration(preferences);
             configurationReady = true;
             ensureImmersiveModeController(hostContext, extendedSettings == null
                     ? ExtendedSettings.readSystemBars(preferences) : extendedSettings);
             long scanStarted = android.os.SystemClock.elapsedRealtime();
+            operation.stage("scan", "cache_checked=true;rules=" + rules.getRules().size());
             HostScanReport report = new HostScanner().scanCached(
                     archives, rules, new HostScanCache(cacheFile), new HostScanner.ProgressListener() {
                         @Override
@@ -306,6 +326,8 @@ public final class DouAiModule extends XposedModule {
             Runtime runtime = Runtime.getRuntime();
             hostHeapUsedBytes = runtime.totalMemory() - runtime.freeMemory();
             hostScanReport = report;
+            operation.stage("install_features", "cache_hit=" + report.isCacheHit()
+                    + ";scan_duration_ms=" + hostScanMillis + ";rule_count=" + report.getRuleResults().size());
             moduleLog(3, TAG, "Host scan complete: " + report.summary());
             installFeatureHooksIfReady();
             publishDiagnostics(report, null);
@@ -320,7 +342,11 @@ public final class DouAiModule extends XposedModule {
                             + " candidates=" + result.getCandidates());
                 }
             }
+            operation.finish(DouAiLog.Outcome.SUCCESS, "scan_report_published",
+                    "scan_report=true;feature_results=separate;cache_hit=" + report.isCacheHit());
         } catch (Exception exception) {
+            operation.error("host_scan", exception);
+            operation.finish(DouAiLog.Outcome.FAILED, "scan_failed", "scan_report_published=false");
             moduleLog(6, TAG, "Host scan failed", exception);
             publishDiagnostics(null, exception.getMessage());
             HostUiController ui = hostUiController;
@@ -557,6 +583,7 @@ public final class DouAiModule extends XposedModule {
     }
 
     private synchronized void updateConfiguration(SharedPreferences preferences) {
+        DouAiLog.Operation configurationOperation = null;
         try {
             ConfigurationSnapshot snapshot = ConfigurationSnapshot.readForPublication(
                     preferences, this, this::scheduleConfigurationUpdate);
@@ -569,6 +596,9 @@ public final class DouAiModule extends XposedModule {
             boolean initial = lastConfigurationValues == null;
             ConfigurationChanges changes = ConfigurationChanges.between(lastConfigurationValues, values);
             if (!initial && changes.isEmpty()) return;
+            DouAiLog.configRevision(DouAiLog.configurationRevision(values));
+            configurationOperation = DouAiLog.begin("configuration", initial ? "initial_snapshot" : "preference_publication");
+            configurationOperation.stage("read_committed_snapshot", "initial=" + initial + ";key_count=" + values.size());
             boolean wasDebug = DebugLog.isEnabled();
             DebugLog.setEnabled(options.enabled(LocalOptions.DEBUG_LOGGING));
             if (initial || changes.contains(LocalOptions.DEBUG_LOGGING) || wasDebug != DebugLog.isEnabled()) {
@@ -579,8 +609,10 @@ public final class DouAiModule extends XposedModule {
             currentSettings = settings;
             extendedSettings = extended;
             localOptions = options;
-            if (DebugLog.isEnabled()) logDebugConfiguration(values, changes);
+            DouAiLog.Operation selectedOperation = configurationOperation;
+            selectedOperation.wrap(() -> logDebugConfiguration(values, changes)).run();
             lastConfigurationValues = values;
+            configurationOperation.stage("dispatch_hot_updates", "snapshot_references_published=true");
 
             boolean feedFilterChanged = initial || changes.affects(Feature.FEED_FILTER);
             boolean downloadChanged = initial || changes.affects(Feature.DOWNLOAD);
@@ -667,13 +699,29 @@ public final class DouAiModule extends XposedModule {
             if (refreshHook != null && (initial || changes.affects(Feature.REFRESH))) refreshHook.setSettings(extended);
             moduleLog(3, TAG, "Configuration updated: feedFilter=" + settings.feedFilterEnabled
                     + ", hideAds=" + settings.hideAds);
+            selectedOperation.wrap(this::publishFeatureLogState).run();
+            configurationOperation.finish(DouAiLog.Outcome.SUCCESS, "configuration_snapshot_published",
+                    "snapshot_references_current=" + (currentSettings == settings && extendedSettings == extended && localOptions == options)
+                            + ";result_scope=configuration_publication;feature_business_results=separate");
         } catch (RuntimeException exception) {
+            if (configurationOperation != null) {
+                configurationOperation.error("read_or_apply", exception);
+                configurationOperation.finish(DouAiLog.Outcome.FAILED, "configuration_dispatch_failed",
+                        "partial_hot_update_possible=true;feature_state_review_required=true");
+            }
+            DouAiLog.failure("configuration", "read_or_apply", exception);
             moduleLog(5, TAG, "Configuration read failed; previous settings remain active", exception);
         }
     }
 
     private synchronized void installFeatureHooksIfReady() {
-        if (hostScanReport == null || hostClassLoader == null || targetContext == null || !configurationReady) return;
+        if (hostScanReport == null || hostClassLoader == null || targetContext == null || !configurationReady) {
+            DouAiLog.event("module_startup", "feature_install_gate", "dependencies_pending",
+                    "scan=" + (hostScanReport != null) + ";classloader=" + (hostClassLoader != null)
+                            + ";context=" + (targetContext != null) + ";configuration=" + configurationReady);
+            publishFeatureLogState();
+            return;
+        }
         if (localAnalyticsHook == null) {
             try {
                 localAnalyticsHook = LocalAnalyticsHook.install(hookFramework(), hostScanReport, hostClassLoader,
@@ -690,6 +738,7 @@ public final class DouAiModule extends XposedModule {
                 }
             } catch (Throwable failure) {
                 localAnalyticsHookFailure = HostAdaptationDiagnostics.installationFailure(failure);
+                DouAiLog.failure("local_analytics", "installation", failure);
                 moduleLog(5, TAG, "Local analytics hook unavailable: " + localAnalyticsHookFailure);
             }
         }
@@ -716,6 +765,7 @@ public final class DouAiModule extends XposedModule {
                 ui.setSettingsPageTargets(resolveHookClass("host_settings_activity"),
                         resolveHookClass("host_settings_scroll"));
             } catch (Exception failure) {
+                DouAiLog.failure("settings_entry", "installation", failure);
                 moduleLog(5, TAG, "Native settings entry unavailable: " + failure.getMessage());
             }
         }
@@ -732,6 +782,7 @@ public final class DouAiModule extends XposedModule {
             } catch (Throwable failure) {
                 feedHookFailure = failure.getMessage() == null
                         ? failure.getClass().getSimpleName() : failure.getMessage();
+                DouAiLog.failure("feed_filter", "installation", failure);
                 moduleLog(6, TAG, "Feed response filter hook installation failed", failure);
             }
         }
@@ -749,6 +800,7 @@ public final class DouAiModule extends XposedModule {
             } catch (Throwable failure) {
                 downloadHookFailure = failure.getMessage() == null
                         ? failure.getClass().getSimpleName() : failure.getMessage();
+                DouAiLog.failure("download", "installation", failure);
                 moduleLog(6, TAG, "Native download row extension installation failed", failure);
             }
         }
@@ -762,6 +814,7 @@ public final class DouAiModule extends XposedModule {
             } catch (Throwable failure) {
                 versionHookFailure = failure.getMessage() == null
                         ? failure.getClass().getSimpleName() : failure.getMessage();
+                DouAiLog.failure("version", "installation", failure);
                 moduleLog(6, TAG, "PackageManager version hook installation failed", failure);
             }
         }
@@ -775,6 +828,7 @@ public final class DouAiModule extends XposedModule {
             } catch (Throwable failure) {
                 topTabHookFailure = failure.getMessage() == null
                         ? failure.getClass().getSimpleName() : failure.getMessage();
+                DouAiLog.failure("top_tabs", "installation", failure);
                 moduleLog(6, TAG, "Home tab filter hook installation failed", failure);
             }
         }
@@ -788,6 +842,7 @@ public final class DouAiModule extends XposedModule {
             } catch (Throwable failure) {
                 feedUiHookFailure = failure.getMessage() == null
                         ? failure.getClass().getSimpleName() : failure.getMessage();
+                DouAiLog.failure("feed_ui", "installation", failure);
                 moduleLog(6, TAG, "Feed UI visibility hook installation failed", failure);
             }
         }
@@ -801,6 +856,7 @@ public final class DouAiModule extends XposedModule {
             } catch (Throwable failure) {
                 refreshHookFailure = failure.getMessage() == null
                         ? failure.getClass().getSimpleName() : failure.getMessage();
+                DouAiLog.failure("refresh_confirm", "installation", failure);
                 moduleLog(6, TAG, "Home refresh confirmation hook installation failed", failure);
             }
         }
@@ -814,6 +870,7 @@ public final class DouAiModule extends XposedModule {
             } catch (Throwable failure) {
                 autoLikeHookFailure = failure.getMessage() == null
                         ? failure.getClass().getSimpleName() : failure.getMessage();
+                DouAiLog.failure("auto_like", "installation", failure);
                 moduleLog(6, TAG, "Auto-like host action hook installation failed", failure);
             }
         }
@@ -827,6 +884,7 @@ public final class DouAiModule extends XposedModule {
             } catch (Throwable failure) {
                 autoFollowHookFailure = failure.getMessage() == null
                         ? failure.getClass().getSimpleName() : failure.getMessage();
+                DouAiLog.failure("auto_follow", "installation", failure);
                 moduleLog(6, TAG, "Auto-follow native action hook installation failed", failure);
             }
         }
@@ -840,6 +898,7 @@ public final class DouAiModule extends XposedModule {
             } catch (Throwable failure) {
                 autoPlayHookFailure = failure.getMessage() == null
                         ? failure.getClass().getSimpleName() : failure.getMessage();
+                DouAiLog.failure("auto_play", "installation", failure);
                 moduleLog(6, TAG, "DouAi auto-slide hook installation failed", failure);
             }
         }
@@ -854,6 +913,7 @@ public final class DouAiModule extends XposedModule {
             } catch (Throwable failure) {
                 autoCommentDraftHookFailure = failure.getMessage() == null
                         ? failure.getClass().getSimpleName() : failure.getMessage();
+                DouAiLog.failure("auto_comment", "installation", failure);
                 moduleLog(6, TAG, "Native automatic comment hook installation failed", failure);
             }
         }
@@ -871,6 +931,7 @@ public final class DouAiModule extends XposedModule {
                 }
             } catch (Throwable failure) {
                 commentReplyHookFailure = HostAdaptationDiagnostics.installationFailure(failure);
+                DouAiLog.failure("comment_reply", "installation", failure);
                 moduleLog(6, TAG, "Comment reply hook installation failed: " + commentReplyHookFailure);
             }
         }
@@ -885,6 +946,7 @@ public final class DouAiModule extends XposedModule {
             } catch (Throwable failure) {
                 autoMessageDraftHookFailure = failure.getMessage() == null
                         ? failure.getClass().getSimpleName() : failure.getMessage();
+                DouAiLog.failure("auto_message", "installation", failure);
                 moduleLog(6, TAG, "Native single-chat plain-text draft hook installation failed", failure);
             }
         }
@@ -897,6 +959,7 @@ public final class DouAiModule extends XposedModule {
             } catch (Throwable failure) {
                 commentToolsHookFailure = failure.getMessage() == null
                         ? failure.getClass().getSimpleName() : failure.getMessage();
+                DouAiLog.failure("comment_tools", "installation", failure);
                 moduleLog(6, TAG, "Comment long-press tools hook installation failed", failure);
             }
         }
@@ -914,6 +977,7 @@ public final class DouAiModule extends XposedModule {
                     feedUi.setComponentVisibilityListener(navigation::setTemporarilyShown);
                 }
             } catch (Throwable failure) {
+                DouAiLog.failure("home_navigation", "installation", failure);
                 moduleLog(6, TAG, "Home navigation visibility controller installation failed", failure);
             }
         }
@@ -926,13 +990,19 @@ public final class DouAiModule extends XposedModule {
             try {
                 hostBehaviorHooks = HostBehaviorHooks.install(hookFramework(), hostScanReport, hostClassLoader,
                         targetContext, localOptions, message -> moduleLog(3, TAG, message));
-            } catch (Throwable failure) { moduleLog(6, TAG, "Host behavior hooks failed", failure); }
+            } catch (Throwable failure) {
+                DouAiLog.failure("host_behavior", "installation", failure);
+                moduleLog(6, TAG, "Host behavior hooks failed", failure);
+            }
         }
         if (playbackBehaviorHooks == null) {
             try {
                 playbackBehaviorHooks = PlaybackBehaviorHooks.install(hookFramework(), hostScanReport, hostClassLoader,
                         targetContext, localOptions, message -> moduleLog(3, TAG, message));
-            } catch (Throwable failure) { moduleLog(6, TAG, "Playback behavior hooks failed", failure); }
+            } catch (Throwable failure) {
+                DouAiLog.failure("auto_speed", "installation", failure);
+                moduleLog(6, TAG, "Playback behavior hooks failed", failure);
+            }
         }
         if (profileSpoofHook == null) {
             try {
@@ -944,7 +1014,10 @@ public final class DouAiModule extends XposedModule {
             try {
                 nativeMessagingHooks = NativeMessagingHooks.install(hookFramework(), hostScanReport, hostClassLoader,
                         targetContext, localOptions, message -> moduleLog(3, TAG, message), automationDispatcher);
-            } catch (Throwable failure) { moduleLog(6, TAG, "Native messaging hooks failed", failure); }
+            } catch (Throwable failure) {
+                DouAiLog.failure("native_auto_reply", "installation", failure);
+                moduleLog(6, TAG, "Native messaging hooks failed", failure);
+            }
         }
         if (recallHighlightHook == null) {
             try {
@@ -1027,11 +1100,48 @@ public final class DouAiModule extends XposedModule {
             } catch (Throwable failure) {
                 if (candidate != null) candidate.close();
                 hashLongPressVoiceHookFailure = HostAdaptationDiagnostics.installationFailure(failure);
+                DouAiLog.failure("hash_long_press_voice", "installation", failure);
                 moduleLog(6, TAG, "Hash long-press voice workflow failed: " + hashLongPressVoiceHookFailure);
             }
         }
         if (!additionalInitialized) moduleLog(3, TAG, "Host features ready; installation failures are reported separately");
         additionalInitialized = true;
+        publishFeatureLogState();
+    }
+
+    private void publishFeatureLogState() {
+        try {
+            Bundle snapshot = diagnosticsSnapshot();
+            Map<String, Object> runtime = new java.util.HashMap<>();
+            for (String key : snapshot.keySet()) runtime.put(key, snapshot.get(key));
+            runtime.put("follow_lists_installed", nativeFollowLists != null);
+            runtime.put("automation_dispatch_installed", automationDispatcher != null);
+            runtime.put("automation_dispatch_enabled", localOptions.enabled("native_auto_reply")
+                    || localOptions.enabled("native_auto_comment"));
+            runtime.put("streak_active", localOptions.enabled("automation_enabled") && localOptions.enabled("streak_enabled"));
+            runtime.put("diagnostics_installed", diagnosticsReceiver != null);
+            runtime.put("local_analytics_enabled", targetContext != null && LocalAnalytics.get(targetContext).isEnabled());
+            runtime.put("short_progress_installed", snapshot.getBoolean("short_progress_legacy_installed")
+                    || snapshot.getBoolean("short_progress_pro_installed"));
+            com.douai.module.config.ComponentHideSettings components = extendedSettings == null ? null : extendedSettings.components;
+            boolean componentPolicyEnabled = components != null && components.configured && components.enabled;
+            runtime.put("home_navigation_enabled", componentPolicyEnabled);
+            runtime.put("short_progress_enabled", componentPolicyEnabled
+                    && components.alpha(com.douai.module.config.ComponentHideSettings.Component.PROGRESS) > 0);
+            runtime.put("dm_speech_enabled", localOptions.enabled("dm_tts") || localOptions.enabled("dm_voice_replace"));
+            runtime.put("comment_enhancements_enabled", localOptions.enabled("comment_append_suffix") || localOptions.enabled("colored_comment"));
+            runtime.put("comment_tools_enabled", extendedSettings != null && (extendedSettings.copyCommentText
+                    || extendedSettings.commentMediaTools || extendedSettings.copySourceData));
+            boolean gestures = localOptions.enabled("toolbar_enabled") || localOptions.interceptNativeLongPress();
+            for (String prefix : new String[]{"long_press", "double_tap"}) {
+                for (int region = 0; region < FeedGestureToolsHook.REGION_IDS.length; region++) {
+                    gestures |= !"none".equals(FeedGestureToolsHook.regionAction(localOptions, prefix, region));
+                }
+            }
+            runtime.put("gesture_enabled", gestures);
+            FeatureLogCatalog.publish(lastConfigurationValues == null ? java.util.Collections.emptyMap()
+                    : lastConfigurationValues, runtime, lastConfigurationValues != null);
+        } catch (Throwable unavailable) { /* Observability cannot interrupt feature installation. */ }
     }
 
     private Bundle diagnosticsSnapshot() {
@@ -1250,68 +1360,37 @@ public final class DouAiModule extends XposedModule {
         if (current != null) return current;
         synchronized (this) {
             if (tracedFramework == null) tracedFramework = DebugHookTrace.wrap(this,
-                    DebugLog::isEnabled, message -> moduleLog(3, TAG, message));
+                    DebugLog::isEnabled);
             return tracedFramework;
         }
     }
 
     private void moduleLog(int priority, String tag, String message) {
-        try {
-            boolean basic = DebugLogPolicy.isBasic(priority, message);
-            if (!DebugLog.isEnabled() && !basic) return;
-            String selected = DebugLog.isEnabled() ? message : DebugLogPolicy.basicMessage(message);
-            String safe;
-            int jsonStart = selected == null ? -1 : selected.indexOf('{');
-            if (selected != null && (selected.startsWith("[DouAi.CommentJson]")
-                    || selected.startsWith("[DouAi.MessageJson]")
-                    || selected.startsWith("[DouAi.Configuration]")) && jsonStart >= 0) {
-                safe = selected.substring(0, jsonStart) + DebugLog.redactJson(selected.substring(jsonStart));
-            } else safe = DebugLog.redact(selected == null ? "" : selected);
-            if (safe.length() > 262144) safe = safe.substring(0, 262144) + "\n[event truncated at 262144 characters]";
-            if (basic) DebugLog.recordBasic(priority, tag, safe);
-            else DebugLog.record(priority, tag, safe);
-            // LSPosed/Logcat transports may truncate a large JSON event; the local file
-            // retains the same complete sanitized event, while LSPosed gets numbered parts.
-            if (safe.length() <= 1200) super.log(priority, tag, safe);
-            else {
-                int count = (safe.length() + 999) / 1000;
-                for (int index = 0; index < count; index++) {
-                    super.log(priority, tag, "[part " + (index + 1) + "/" + count + "] "
-                            + safe.substring(index * 1000, Math.min(safe.length(), (index + 1) * 1000)));
-                }
-            }
-        } catch (Throwable unavailable) {
-            // Diagnostic failures cannot change host behavior or expose the original payload.
-        }
+        DouAiLog.legacy(priority, tag, message, null);
     }
 
     private void moduleLog(int priority, String tag, String message, Throwable failure) {
-        try {
-            String detail = "";
-            if (failure != null) {
-                if (DebugLog.isEnabled()) detail = "\n" + android.util.Log.getStackTraceString(failure);
-                else detail = "; exception=" + failure.getClass().getSimpleName();
-            }
-            moduleLog(priority, tag, message + detail);
-        } catch (Throwable unavailable) { }
+        DouAiLog.legacy(priority, tag, message, failure);
     }
 
     private void logDebugConfiguration(Map<String, ?> values, ConfigurationChanges changes) {
         try {
-            org.json.JSONObject flags = new org.json.JSONObject();
-            org.json.JSONArray changed = new org.json.JSONArray();
-            for (String key : new java.util.TreeSet<>(values.keySet())) {
-                Object value = values.get(key);
-                if (value instanceof Boolean) flags.put(key, value);
-                if (changes.contains(key)) changed.put(key);
+            if (lastConfigurationValues != null) for (String key : new java.util.TreeSet<>(lastConfigurationValues.keySet())) {
+                if (!values.containsKey(key)) DouAiLog.event("configuration", "config_removed", "key_removed",
+                        "key=" + key + ";effective_value=owning_feature_default");
             }
-            org.json.JSONObject snapshot = new org.json.JSONObject();
-            snapshot.put("module", BuildConfig.VERSION_NAME);
-            snapshot.put("host", hostProfile == null ? "unknown" : hostProfile.versionName);
-            snapshot.put("persisted_boolean_options", flags);
-            snapshot.put("changed_keys", changed);
-            moduleLog(3, TAG, "[DouAi.Configuration] " + snapshot);
-        } catch (Exception | LinkageError unavailable) { }
+            for (String key : new java.util.TreeSet<>(values.keySet())) {
+                if (lastConfigurationValues != null && !changes.contains(key)) continue;
+                Object value = values.get(key);
+                com.douai.module.config.ConfigurationCatalog.Setting definition =
+                        com.douai.module.config.ConfigurationCatalog.settings().get(key);
+                DouAiLog.event("configuration", "config_value", "snapshot_applied",
+                        "key=" + key + ";type=" + (value == null ? "null" : value.getClass().getSimpleName())
+                                + ";value=" + (value instanceof Boolean ? value.toString()
+                                : DouAiLog.reference(String.valueOf(value))) + ";consumers="
+                                + (definition == null ? "unregistered" : definition.consumers.toString()));
+            }
+        } catch (Throwable unavailable) { }
     }
 
     private static List<File> getApkArchives(ApplicationInfo appInfo) {

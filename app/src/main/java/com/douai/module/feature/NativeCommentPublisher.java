@@ -1,5 +1,7 @@
 package com.douai.module.feature;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.os.Handler;
 import android.os.Looper;
 
@@ -10,6 +12,8 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.lang.ref.WeakReference;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -17,6 +21,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 
 /** Uses the host's permission-checked publisher with a captured work context. */
@@ -44,6 +49,9 @@ final class NativeCommentPublisher implements AutoCloseable {
     private final Field modelText;
     private final Field modelContext;
     private final Map<Object, Pending> requests = java.util.Collections.synchronizedMap(new IdentityHashMap<>());
+    // Diagnostic correlation only. Never retains a host request/model or changes request lifetime.
+    private final CallbackHistory callbackHistory = new CallbackHistory(256,
+            java.util.concurrent.TimeUnit.MINUTES.toNanos(5), System::nanoTime);
     private final ThreadLocal<Pending> submitting = new ThreadLocal<>();
     private final Map<Object, String> ownedModels = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
     private final List<XposedInterface.HookHandle> handles = new ArrayList<>();
@@ -212,8 +220,10 @@ final class NativeCommentPublisher implements AutoCloseable {
 
     private void send(Object work, String aid, String text, SpeechPreparation.Audio audio, CommentReplyEvent reply,
                       BooleanSupplier valid, BooleanSupplier beforeNativeSend, Runnable acceptedRequest, Consumer<String> result) {
-        main.post(() -> {
-            if (closed || !valid.getAsBoolean()) { result.accept("cancelled"); return; }
+        DouAiLog.Operation trace = AutomationTrace.capture(reply == null ? "auto_comment" : "auto_comment_reply", "native_publish");
+        trace.stage("native_prepare", "target_ref=" + DouAiLog.reference(aid) + ";media=" + (audio == null ? "text" : "audio"));
+        main.post(trace.wrap(() -> {
+            if (closed || !valid.getAsBoolean()) { trace.stage("native_cancelled", "before_invocation=true;closed=" + closed); result.accept("cancelled"); return; }
             Object request = null;
             Pending pending = null;
             boolean accepted = false;
@@ -275,11 +285,13 @@ final class NativeCommentPublisher implements AutoCloseable {
                 submitting.set(pending);
                 try {
                     nativeInvoked = true;
+                    trace.stage("native_submit", "business_success=false;audio_upload_possible=" + (audio != null));
                     directSubmission = Boolean.TRUE.equals(submit.invoke(request, model));
                 }
                 finally { submitting.remove(); }
                 accepted = directSubmission || pending.uploadStarted || pending.callbackSeen;
                 if (!accepted) { received(request, "failed"); return; }
+                trace.stage("native_submission_accepted", "direct=" + directSubmission + ";upload_started=" + pending.uploadStarted + ";callback_seen=" + pending.callbackSeen + ";business_success=false");
                 acceptedRequest.run();
                 safeLog("Automatic comment native request accepted for captured work; mode="
                         + (pending.uploadStarted ? "audio_upload" : "direct"));
@@ -287,25 +299,29 @@ final class NativeCommentPublisher implements AutoCloseable {
                 Pending token = pending;
                 main.postDelayed(() -> {
                     if (requests.get(owner) != token || !token.timedOut.compareAndSet(false, true)) return;
+                    token.trace.stage("native_ack_timeout", "deadline_ms=30000;remote_outcome=unknown;retention_ms=120000");
                     token.result.accept("submitted");
                 }, 30_000);
-                main.postDelayed(() -> requests.remove(owner, token), 120_000);
+                main.postDelayed(() -> expireObservation(owner, token), 120_000);
             } catch (Exception failure) {
+                trace.error("native_publish", failure);
                 // An invoked host method can throw after it has already sent the request.
                 if (request != null && pending != null
                         && (accepted || nativeInvoked && failure instanceof java.lang.reflect.InvocationTargetException)) {
                     Object owner = request;
                     Pending token = pending;
-                    main.postDelayed(() -> requests.remove(owner, token), 120_000);
+                    main.postDelayed(() -> expireObservation(owner, token), 120_000);
                     safeLog("Automatic comment native request outcome unknown: " + failure.getClass().getSimpleName());
                     result.accept("submitted");
                     return;
                 }
-                if (request != null && pending != null) requests.remove(request);
+                if (request != null && pending != null && requests.remove(request, pending)) {
+                    callbackHistory.remember(request, pending.trace, "request_failed_locally", "failed");
+                }
                 safeLog("Automatic comment native request failed: " + failure.getClass().getSimpleName());
                 result.accept("failed");
             }
-        });
+        }));
     }
 
     /** Reply-only binding: ordinary work comments do not depend on these host helpers. */
@@ -347,16 +363,104 @@ final class NativeCommentPublisher implements AutoCloseable {
     }
 
     private void received(Object request, String status) {
-        received(request, status, "");
+        received(request, status, "", false);
     }
 
     private void received(Object request, String status, String detail) {
+        received(request, status, detail, true);
+    }
+
+    private void received(Object request, String status, String detail, boolean hostCallback) {
         Pending pending = requests.remove(request);
-        if (pending == null || closed) return;
+        if (pending == null || closed) {
+            if (pending != null) callbackHistory.remember(request, pending.trace, "publisher_closed", "unknown");
+            ignoredCallback(request, status);
+            return;
+        }
+        callbackHistory.remember(request, pending.trace,
+                hostCallback ? "callback_already_processed" : "request_completed_locally", status);
+        String acknowledgement = "status=" + status + ";upload_started=" + pending.uploadStarted
+                + ";timed_out=" + pending.timedOut.get() + ";evidence=" + detail;
+        // A retained late callback can arrive after the parent has an unconfirmed terminal.
+        // stage() deliberately rejects post-terminal stages, so keep the receipt as its own event.
+        pending.trace.wrap(() -> DouAiLog.event("native_comment_publish",
+                pending.timedOut.get() ? "late_native_ack" : "native_ack", "owned_callback_received", acknowledgement)).run();
+        pending.trace.stage(pending.timedOut.get() ? "late_native_ack" : "native_ack", "status=" + status);
         safeLog("Automatic comment native callback: " + status + detail + audioPhase(pending)
                 + "; kind=" + (pending.rootId == null ? "root" : "reply")
                 + "; media=" + (pending.audioPath == null ? "text" : "voice"));
-        pending.result.accept(status);
+        pending.trace.wrapConsumer(pending.result).accept(status);
+    }
+
+    private void expireObservation(Object owner, Pending pending) {
+        if (!requests.remove(owner, pending)) return;
+        callbackHistory.remember(owner, pending.trace, "retention_expired", "unknown");
+        pending.trace.wrap(() -> DouAiLog.event("native_comment_publish", "callback_observation_ended", "retention_expired",
+                "retention_ms=120000;remote_outcome=unknown;business_retry_changed=false")).run();
+    }
+
+    private void ignoredCallback(Object request, String status) {
+        CallbackRecord record = callbackHistory.find(request);
+        String reason = record == null ? closed ? "publisher_closed_ownership_unknown" : "ownership_unknown" : record.reason;
+        String evidence = "closed=" + closed + ";received_status=" + status
+                + ";ownership_identity_match=" + (record != null)
+                + ";correlation=" + (record == null ? "unknown;history_absent_expired_or_evicted=true" : "verified;prior_status=" + record.status)
+                + ";" + callbackHistory.diagnostic()
+                + ";business_result_changed=false";
+        Runnable emit = () -> DouAiLog.event("native_comment_publish", "callback_ignored", reason, evidence);
+        if (record == null) emit.run(); else record.trace.wrap(emit).run();
+    }
+
+    /** Identity matches only; never associates a callback by aid/text/response similarity. */
+    static final class CallbackHistory {
+        private final int capacity;
+        private final long retentionNanos;
+        private final LongSupplier clock;
+        private final ArrayDeque<CallbackRecord> records = new ArrayDeque<>();
+        private long evicted, expired, collected;
+        CallbackHistory(int capacity, long retentionNanos, LongSupplier clock) {
+            if (capacity <= 0 || retentionNanos <= 0) throw new IllegalArgumentException("Invalid callback evidence bound");
+            this.capacity = capacity; this.retentionNanos = retentionNanos; this.clock = clock;
+        }
+        synchronized void remember(Object owner, DouAiLog.Operation trace, String reason, String status) {
+            if (owner == null || trace == null) return;
+            long now = clock.getAsLong();
+            purge(now);
+            records.removeIf(record -> record.owner.get() == owner);
+            while (records.size() >= capacity) { records.removeFirst(); evicted++; }
+            records.addLast(new CallbackRecord(owner, trace, reason, status, now));
+        }
+        synchronized CallbackRecord find(Object owner) {
+            long now = clock.getAsLong();
+            purge(now);
+            if (owner == null) return null;
+            for (CallbackRecord record : records) if (record.owner.get() == owner) return record;
+            return null;
+        }
+        synchronized int size() { return records.size(); }
+        synchronized String diagnostic() {
+            return "history_capacity=" + capacity + ";history_retention_ms=" + retentionNanos / 1_000_000L
+                    + ";history_evicted=" + evicted + ";history_expired=" + expired + ";history_owner_collected=" + collected;
+        }
+        private void purge(long now) {
+            java.util.Iterator<CallbackRecord> iterator = records.iterator();
+            while (iterator.hasNext()) {
+                CallbackRecord record = iterator.next();
+                if (now - record.at >= retentionNanos) { iterator.remove(); expired++; }
+                else if (record.owner.get() == null) { iterator.remove(); collected++; }
+            }
+        }
+    }
+
+    static final class CallbackRecord {
+        final WeakReference<Object> owner;
+        final DouAiLog.Operation trace;
+        final String reason, status;
+        final long at;
+        CallbackRecord(Object owner, DouAiLog.Operation trace, String reason, String status, long at) {
+            this.owner = new WeakReference<>(owner); this.trace = trace;
+            this.reason = reason; this.status = status; this.at = at;
+        }
     }
 
     private String audioPhase(Pending pending) {
@@ -523,7 +627,15 @@ final class NativeCommentPublisher implements AutoCloseable {
         catch (RuntimeException | LinkageError unavailable) {
             safeLog("Comment audio diagnostics close unavailable: " + unavailable.getClass().getSimpleName());
         }
-        main.post(requests::clear);
+        main.post(() -> {
+            synchronized (requests) {
+                for (Pending pending : requests.values()) {
+                    callbackHistory.remember(pending.owner, pending.trace, "publisher_closed", "unknown");
+                    pending.trace.stage("native_publisher_closed", "callback_observation_stopped=true;remote_outcome=unknown");
+                }
+                requests.clear();
+            }
+        });
         ownedModels.clear();
         for (XposedInterface.HookHandle handle : handles) {
             try { handle.unhook(); } catch (RuntimeException ignored) { }
@@ -533,6 +645,7 @@ final class NativeCommentPublisher implements AutoCloseable {
 
     private static final class Pending {
         final String aid;
+        final DouAiLog.Operation trace;
         final Object owner;
         final Object model;
         final String audioPath;
@@ -546,6 +659,7 @@ final class NativeCommentPublisher implements AutoCloseable {
         boolean callbackSeen;
         Pending(String aid, Object owner, Object model, String audioPath, String rootId, String incomingId,
                 String audioWorkDiagnostic, CommentAudioDiagnostics.Sample sample, Consumer<String> result) {
+            this.trace = AutomationTrace.capture("native_comment_publish", "owned_request");
             this.aid = aid; this.owner = owner; this.model = model; this.audioPath = audioPath; this.result = result;
             this.rootId = rootId; this.incomingId = incomingId;
             this.audioWorkDiagnostic = audioWorkDiagnostic;

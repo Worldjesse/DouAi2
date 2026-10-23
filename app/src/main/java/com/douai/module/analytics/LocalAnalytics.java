@@ -4,6 +4,7 @@ import android.content.Context;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.util.AtomicFile;
+import com.douai.module.diagnostics.DouAiLog;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -143,8 +144,9 @@ public final class LocalAnalytics implements AutoCloseable {
 
     /** Stops acceptance immediately; queued events from an earlier generation are discarded. */
     public void setEnabled(boolean value) {
+        DouAiLog.Operation operation = DouAiLog.begin("local_analytics_collection", "set_enabled");
         synchronized (stateLock) {
-            if (closed) return;
+            if (closed) { operation.finish(DouAiLog.Outcome.SKIPPED, "store_closed", "enabled=false"); return; }
             enabled = false;
             generation++;
             lastWorkHash = null;
@@ -157,7 +159,11 @@ public final class LocalAnalytics implements AutoCloseable {
                 long token = storageEpoch;
                 long timestamp = clock.millis();
                 enqueue(() -> recordCollectionBoundary(token, timestamp, value));
+                operation.finish(DouAiLog.Outcome.SUCCESS, "collection_flag_persisted", "enabled=" + enabled
+                        + "; generation=" + generation + "; boundary_write=pending");
             } catch (Exception ignored) {
+                operation.error("persist_collection_flag", ignored);
+                operation.finish(DouAiLog.Outcome.FAILED, "collection_disabled_on_storage_failure", "enabled=false");
                 try { enabledFile.delete(); } catch (Exception ignoredDelete) { /* Fail closed. */ }
             }
         }
@@ -187,7 +193,10 @@ public final class LocalAnalytics implements AutoCloseable {
 
     private String recordViewInternal(long expectedGeneration, String workId, String type, String authorId,
             String authorName, List<String> topics, boolean advertisement, long durationMillis, String source) {
-        if (!isEnabled() || workId == null || workId.trim().isEmpty()) return null;
+        if (!isEnabled() || workId == null || workId.trim().isEmpty()) {
+            DouAiLog.event("local_analytics", "observation_skipped", "disabled_or_missing_work", "enabled=" + isEnabled());
+            return null;
+        }
         try {
             String workHash = hash(workId.trim());
             String typeKey = normalizeType(type);
@@ -206,7 +215,9 @@ public final class LocalAnalytics implements AutoCloseable {
             }
             final String finalAuthorLabel = authorLabel;
             synchronized (stateLock) {
-                if (!isEnabled() || generation != expectedGeneration) return null;
+                if (!isEnabled() || generation != expectedGeneration) {
+                    DouAiLog.event("local_analytics", "observation_skipped", "stale_generation_or_disabled", "enabled=" + isEnabled()); return null;
+                }
                 long token = generation;
                 long timestamp = clock.millis();
                 ZonedDateTime local = Instant.ofEpochMilli(timestamp).atZone(zone.get());
@@ -247,7 +258,7 @@ public final class LocalAnalytics implements AutoCloseable {
                     return visitToken;
                 }
             }
-        } catch (Exception ignored) { /* Malformed host metadata must never disrupt the feed. */ }
+        } catch (Exception ignored) { DouAiLog.failure("local_analytics", "host_metadata", ignored); }
         return null;
     }
 
@@ -334,14 +345,32 @@ public final class LocalAnalytics implements AutoCloseable {
 
     /** Off-main only. Waits for previously queued writes. days=0 selects retained history. */
     public AnalyticsSnapshot snapshot(int days) {
-        if (closed) return AnalyticsSnapshot.empty();
+        DouAiLog.Operation operation = DouAiLog.begin("local_analytics_report", "snapshot");
+        if (closed) { operation.finish(DouAiLog.Outcome.SKIPPED, "store_closed", "empty=true"); return AnalyticsSnapshot.empty(); }
         FutureTask<AnalyticsSnapshot> task = new FutureTask<>(() -> readSnapshot(days));
-        if (!enqueue(task)) return readSnapshot(days);
-        try { return task.get(); }
+        if (!enqueue(task)) {
+            try {
+                AnalyticsSnapshot result = readSnapshot(days);
+                operation.finish(DouAiLog.Outcome.SUCCESS, "snapshot_read_synchronously", "days=" + days + "; queue_full=true; views=" + result.totalViews);
+                return result;
+            } catch (RuntimeException failure) { operation.error("snapshot_read", failure);
+                operation.finish(DouAiLog.Outcome.FAILED, "snapshot_read_failed", "days=" + days); throw failure; }
+        }
+        try {
+            AnalyticsSnapshot result = task.get();
+            operation.finish(DouAiLog.Outcome.SUCCESS, "snapshot_read", "days=" + days + "; views=" + result.totalViews
+                    + "; features=" + result.totalFeatureUses + "; queue_dropped=" + queueDropped.get());
+            return result;
+        }
         catch (InterruptedException ignored) {
+            operation.finish(DouAiLog.Outcome.CANCELLED, "reader_interrupted", "empty=true");
             Thread.currentThread().interrupt();
             return AnalyticsSnapshot.empty();
-        } catch (Exception ignored) { throw new IllegalStateException("无法读取本地统计数据"); }
+        } catch (Exception ignored) {
+            operation.error("snapshot_read", ignored);
+            operation.finish(DouAiLog.Outcome.FAILED, "snapshot_read_failed", "days=" + days);
+            throw new IllegalStateException("无法读取本地统计数据");
+        }
     }
 
     /** Worker only. A logical snapshot, including settled queued writes; never copies SQLite files. */
@@ -416,6 +445,7 @@ public final class LocalAnalytics implements AutoCloseable {
 
     /** Off-main only. Returns after deletion; stale queued events cannot repopulate the database. */
     public void clear() {
+        DouAiLog.Operation operation = DouAiLog.begin("local_analytics_clear", "user_clear");
         synchronized (stateLock) {
             generation++;
             storageEpoch++;
@@ -446,7 +476,10 @@ public final class LocalAnalytics implements AutoCloseable {
                         throw new IllegalStateException("Analytics database could not be removed");
                 }
                 lastPrunedDay = null;
+                operation.finish(DouAiLog.Outcome.SUCCESS, "database_and_sidecars_absent", "existence_verified=true; enabled_flag_preserved=true");
             } catch (Exception ignored) {
+                operation.error("database_delete", ignored);
+                operation.finish(DouAiLog.Outcome.FAILED, "clear_failed", "collection=disabled");
                 failClosed();
                 throw new IllegalStateException("无法清除本地统计数据");
             } finally {
@@ -486,18 +519,30 @@ public final class LocalAnalytics implements AutoCloseable {
     }
 
     private boolean enqueue(Runnable runnable) {
-        try { writer.execute(runnable); return true; }
-        catch (RejectedExecutionException ignored) { if (!closed) queueDropped.incrementAndGet(); return false; }
+        DouAiLog.Operation parent = DouAiLog.current();
+        try { writer.execute(parent == null ? runnable : parent.wrap(runnable)); return true; }
+        catch (RejectedExecutionException ignored) {
+            if (!closed) queueDropped.incrementAndGet();
+            DouAiLog.event("local_analytics", "write_dropped", closed ? "store_closed" : "queue_full",
+                    "dropped_total=" + queueDropped.get() + "; capacity=" + QUEUE_CAPACITY);
+            return false;
+        }
     }
 
     private interface Mutation { void run(SQLiteDatabase db); }
 
     private void write(long token, LocalDate eventDay, Mutation mutation) {
+        DouAiLog.Operation operation = DouAiLog.begin("local_analytics_write", "queued_mutation");
         synchronized (databaseLock) {
-            if (closed || !enabled || generation != token) return;
+            if (closed || !enabled || generation != token) {
+                operation.finish(DouAiLog.Outcome.SKIPPED, closed ? "store_closed" : !enabled ? "collection_disabled" : "stale_generation",
+                        "transaction_started=false"); return;
+            }
             try {
                 LocalDate today = today();
-                if (eventDay.isBefore(today.minusDays(RETENTION_DAYS - 1L))) return;
+                if (eventDay.isBefore(today.minusDays(RETENTION_DAYS - 1L))) {
+                    operation.finish(DouAiLog.Outcome.SKIPPED, "outside_retention", "transaction_started=false"); return;
+                }
                 SQLiteDatabase db = openDatabase();
                 db.beginTransaction();
                 try {
@@ -505,7 +550,12 @@ public final class LocalAnalytics implements AutoCloseable {
                     mutation.run(db);
                     db.setTransactionSuccessful();
                 } finally { db.endTransaction(); }
-            } catch (Exception ignored) { lastPrunedDay = null; failClosed(); }
+                operation.finish(DouAiLog.Outcome.SUCCESS, "sqlite_transaction_committed", "transaction_ended=true; read_back_verified=false");
+            } catch (Exception ignored) {
+                operation.error("sqlite_write", ignored);
+                operation.finish(DouAiLog.Outcome.FAILED, "storage_failed_collection_disabled", "read_back_verified=false");
+                lastPrunedDay = null; failClosed();
+            }
         }
     }
 

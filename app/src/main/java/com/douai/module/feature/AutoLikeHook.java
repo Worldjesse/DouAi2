@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.ContextWrapper;
 
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
@@ -105,6 +106,7 @@ public final class AutoLikeHook implements AutoCloseable {
         synchronized (settingsLock) {
             FeatureSettings current = settings;
             if (closed || current == null || !current.automationEnabled || !current.autoLikeEnabled) {
+                DouAiLog.event("auto_like", "eligibility", "disabled_or_closed", "closed=" + closed);
                 return result;
             }
             generation = settingsGeneration.get();
@@ -113,34 +115,41 @@ public final class AutoLikeHook implements AutoCloseable {
         Object presenter = chain.getThisObject();
         String reservedAwemeId = null;
         boolean likeQueued = false;
+        DouAiLog.Operation trace = null;
         try {
             Object viewModel = presenterViewModelMethod.invoke(presenter);
             Object aweme = viewModelAwemeField.get(viewModel);
-            if (aweme == null || Boolean.TRUE.equals(invokeBoolean(aweme, "getIsAdAweme"))) return result;
+            if (aweme == null || Boolean.TRUE.equals(invokeBoolean(aweme, "getIsAdAweme"))) { DouAiLog.event("auto_like", "eligibility", "missing_work_or_ad", "eligible=false"); return result; }
             Object alreadyLiked = fieldValue(aweme, "userDigg");
-            if (alreadyLiked instanceof Number && ((Number) alreadyLiked).intValue() != 0) return result;
+            if (alreadyLiked instanceof Number && ((Number) alreadyLiked).intValue() != 0) { DouAiLog.event("auto_like", "eligibility", "already_liked", "user_digg_nonzero=true"); return result; }
             String id = stringValue(invokeNoArg(aweme, "getAid"));
-            if (id == null || !isCurrentCard(presenter, id) || !isLoggedIn()) return result;
+            String rejected = id == null ? "target_missing" : !isCurrentCard(presenter, id) ? "inactive_card" : !isLoggedIn() ? "logged_out" : "";
+            if (!rejected.isEmpty()) { DouAiLog.event("auto_like", "eligibility", rejected, "target_ref=" + DouAiLog.reference(id)); return result; }
             Activity activity = presenterActivity(presenter);
-            if (activity == null || activity.isFinishing() || activity.isDestroyed()) return result;
+            if (activity == null || activity.isFinishing() || activity.isDestroyed()) { DouAiLog.event("auto_like", "eligibility", "activity_unavailable", "activity_present=" + (activity != null)); return result; }
 
             synchronized (settingsLock) {
-                if (!enabledLocked(generation) || !isCurrentCard(presenter, id)) return result;
+                if (!enabledLocked(generation) || !isCurrentCard(presenter, id)) { DouAiLog.event("auto_like", "eligibility", "settings_or_card_changed", "target_ref=" + DouAiLog.reference(id)); return result; }
                 Object currentViewModel = presenterViewModelMethod.invoke(presenter);
                 Object currentAweme = viewModelAwemeField.get(currentViewModel);
                 if (!id.equals(stringValue(invokeNoArg(currentAweme, "getAid")))
-                        || Boolean.TRUE.equals(invokeBoolean(currentAweme, "getIsAdAweme"))) return result;
+                        || Boolean.TRUE.equals(invokeBoolean(currentAweme, "getIsAdAweme"))) { DouAiLog.event("auto_like", "eligibility", "work_changed_or_ad", "target_ref=" + DouAiLog.reference(id)); return result; }
                 Object currentLiked = fieldValue(currentAweme, "userDigg");
-                if (currentLiked instanceof Number && ((Number) currentLiked).intValue() != 0) return result;
-                if (!attemptedAwemeIds.add(id)) return result;
+                if (currentLiked instanceof Number && ((Number) currentLiked).intValue() != 0) { DouAiLog.event("auto_like", "eligibility", "liked_before_invocation", "user_digg_nonzero=true"); return result; }
+                if (!attemptedAwemeIds.add(id)) { DouAiLog.event("auto_like", "eligibility", "duplicate", "target_ref=" + DouAiLog.reference(id)); return result; }
                 reservedAwemeId = id;
+                trace = DouAiLog.begin("auto_like", "visible_card_bind");
+                trace.stage("native_invoking", "target_ref=" + DouAiLog.reference(id) + ";logged_in=true;current_card=true;user_digg=0");
                 likeMethod.invoke(currentViewModel, activity, "douai_auto", null);
                 com.douai.module.analytics.LocalAnalytics.action(id, "auto_like", "自动点赞请求", "automatic", "request");
+                trace.finish(DouAiLog.Outcome.UNCONFIRMED, "native_like_requested", "permission_checked_method_returned=true;server_ack_observed=false");
                 likeQueued = true;
                 reservedAwemeId = null;
             }
             safeLog("Auto-like routed through Douyin permission checks for one visible item");
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            if (trace != null) { trace.error("native_like", failure); trace.finish(DouAiLog.Outcome.UNCONFIRMED, "native_invocation_threw", "remote_side_effect_unknown=true"); }
+            else DouAiLog.failure("auto_like", "eligibility", failure);
             if (reservedAwemeId != null) attemptedAwemeIds.remove(reservedAwemeId);
             safeLog("Auto-like skipped: " + failure.getMessage());
         } finally {

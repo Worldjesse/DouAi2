@@ -13,6 +13,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.MediaStore;
 import android.widget.Toast;
+import com.douai.module.diagnostics.DouAiLog;
 
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -87,7 +88,11 @@ public final class MediaStoreDownloader {
                                     String mimeType, String directory, Uri collection,
                                     String tree, Consumer<String> log) {
         if (sourceContext == null || fileName == null || fileName.isEmpty()
-                || fileName.contains("/") || fileName.contains("\\") || !isHttpUrl(url)) return false;
+                || fileName.contains("/") || fileName.contains("\\") || !isHttpUrl(url)) {
+            DouAiLog.begin("media_download", "user_download").finish(DouAiLog.Outcome.SKIPPED,
+                    "invalid_input", "context=" + (sourceContext != null) + "; valid_url=" + isHttpUrl(url));
+            return false;
+        }
         Context context = sourceContext.getApplicationContext();
         if (context == null) context = sourceContext;
         Context targetContext = context;
@@ -135,6 +140,7 @@ public final class MediaStoreDownloader {
                 if (resolver.update(target, completed, null, null) < 1) throw new IllegalStateException("无法完成文件保存");
                 transfer.fileDone();
                 transfer.complete();
+                transfer.saved("mediastore", target.toString(), transfer.bytes);
                 target = null;
                 return "媒体已保存到 " + directory + "/DouAi";
         } catch (Exception failure) {
@@ -178,6 +184,7 @@ public final class MediaStoreDownloader {
             }
             transfer.check();
             saved = true;
+            transfer.evidence("intermediate_downloaded", "bytes=" + target.length() + "; published=false");
         } catch (Exception failure) {
             transfer.check(); throw failure;
         } finally {
@@ -256,6 +263,8 @@ public final class MediaStoreDownloader {
                             new String[]{mimeType}, null);
                 } catch (RuntimeException ignored) { /* The saved image remains usable without indexing. */ }
             }
+            transfer.saved(document ? "document_tree" : legacyTarget != null ? "legacy_file" : "mediastore",
+                    legacyTarget != null ? legacyTarget.getAbsolutePath() : target.toString(), length);
             target = null;
             legacyTarget = null;
             return document ? "媒体已保存到所选目录" : "媒体已保存到 Pictures/DouAi";
@@ -324,6 +333,7 @@ public final class MediaStoreDownloader {
                 }
             }
             transfer.complete();
+            for (Uri output : created) transfer.saved("mediastore_bundle", output.toString(), -1);
         } catch (Exception failure) {
             for (Uri target : created) {
                 try { resolver.delete(target, null, null); }
@@ -345,6 +355,7 @@ public final class MediaStoreDownloader {
             copyResponse(connection, resolver, target, transfer);
             transfer.fileDone();
             transfer.complete();
+            transfer.saved("document_tree", target.toString(), transfer.bytes);
             target = null;
             return "媒体已保存到所选目录";
         } catch (Exception failure) {
@@ -382,6 +393,7 @@ public final class MediaStoreDownloader {
             }
             transfer.fileDone();
             transfer.complete();
+            for (Uri output : created) transfer.saved("document_bundle", output.toString(), -1);
         } catch (Exception failure) {
             for (Uri target : created) DownloadDocumentTree.delete(resolver, target);
             DownloadDocumentTree.delete(resolver, directory);
@@ -436,6 +448,7 @@ public final class MediaStoreDownloader {
             }
             transfer.fileDone();
             transfer.complete();
+            for (File output : created) transfer.saved("legacy_bundle", output.getAbsolutePath(), output.length());
         } catch (Exception failure) {
             for (File file : created) file.delete();
             directory.delete();
@@ -458,6 +471,7 @@ public final class MediaStoreDownloader {
             connection.setInstanceFollowRedirects(true);
             connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android) DouAi");
             int status = connection.getResponseCode();
+            transfer.evidence("http_response", "status=" + status + "; result=transport_only; source_ref=" + DouAiLog.reference(url));
             if (status < 200 || status >= 300) throw new IllegalStateException("媒体请求失败：HTTP " + status);
             String type = connection.getContentType();
             if (type != null) {
@@ -514,6 +528,8 @@ public final class MediaStoreDownloader {
         long id = manager.enqueue(new DownloadManager.Request(Uri.parse(url)).setTitle(name).setMimeType(mime)
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                 .setDestinationInExternalPublicDir(directory, "DouAi/" + name));
+        transfer.evidence("system_download_queued", "download_ref=" + DouAiLog.reference(Long.toString(id))
+                + "; business_result=pending");
         boolean completed = false;
         toast(context, "已加入系统下载队列");
         transfer.onStop(() -> manager.remove(id));
@@ -531,6 +547,7 @@ public final class MediaStoreDownloader {
                     if (status == DownloadManager.STATUS_SUCCESSFUL) {
                         if (bytes <= 0 || total >= 0 && bytes != total) throw new IllegalStateException("系统下载文件不完整");
                         transfer.fileDone(); transfer.complete(); completed = true;
+                        transfer.saved("download_manager_status_successful", Long.toString(id), bytes);
                         return "媒体已保存到 " + directory + "/DouAi";
                     }
                     if (status == DownloadManager.STATUS_FAILED) throw new IllegalStateException("系统下载失败");

@@ -5,6 +5,7 @@ import android.view.ViewParent;
 import android.widget.EditText;
 
 import com.douai.module.config.ExtendedSettings;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.scan.HostCandidate;
 import com.douai.module.scan.HostScanReport;
@@ -195,11 +196,11 @@ public final class AutoMessageDraftHook implements AutoCloseable {
                                       String boundConversationId) {
         if (closed || !root.isAttachedToWindow() || !root.isShown()
                 || !editor.isAttachedToWindow() || !editor.isShown()
-                || !isDescendant(editor, root)) return;
+                || !isDescendant(editor, root)) { DouAiLog.event("auto_message", "eligibility", "composer_not_active", "closed=" + closed); return; }
         FeatureSettings features = featureSettings;
         ExtendedSettings extended = extendedSettings;
         if (features == null || !features.automationEnabled || !features.autoMessageEnabled
-                || extended == null || extended.autoMessageText.isEmpty()) return;
+                || extended == null || extended.autoMessageText.isEmpty()) { DouAiLog.event("auto_message", "eligibility", "disabled_or_text_empty", "features_present=" + (features != null) + ";text_configured=" + (extended != null && !extended.autoMessageText.isEmpty())); return; }
         try {
             if (!boundConversationId.equals(currentConversationId(drawer))
                     || !isPlainTextMode(drawer)) return;
@@ -212,13 +213,15 @@ public final class AutoMessageDraftHook implements AutoCloseable {
                 CharSequence currentText = editor.getText();
                 expectedText = currentText == null ? "" : currentText.toString();
                 previous = prefillsByEditor.get(editor);
-                if (previous != null && previous.conversationId.equals(boundConversationId)) return;
+                if (previous != null && previous.conversationId.equals(boundConversationId)) { DouAiLog.event("auto_message", "eligibility", "already_prefilled", "conversation_ref=" + DouAiLog.reference(boundConversationId)); return; }
                 boolean stillOwnsPreviousText = previous != null
                         && expectedText.equals(previous.insertedText);
-                if (!expectedText.isEmpty() && !stillOwnsPreviousText) return;
+                if (!expectedText.isEmpty() && !stillOwnsPreviousText) { DouAiLog.event("auto_message", "eligibility", "user_draft_present", "chars=" + expectedText.length()); return; }
                 prefillsByEditor.put(editor, pending);
             }
 
+            DouAiLog.Operation trace = DouAiLog.begin("auto_message", "composer_bound");
+            trace.stage("draft_apply", "conversation_ref=" + DouAiLog.reference(boundConversationId) + ";manual_send=true");
             boolean applied = false;
             try {
                 FeatureSettings latestFeatures = featureSettings;
@@ -240,11 +243,14 @@ public final class AutoMessageDraftHook implements AutoCloseable {
                 setText.invoke(drawer, draftText, null, draftText,
                         Collections.emptyList(), Collections.emptyMap());
                 applied = true;
+                boolean observed = draftText.contentEquals(editor.getText() == null ? "" : editor.getText());
+                trace.finish(observed ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.UNCONFIRMED, observed ? "draft_text_observed" : "draft_setter_returned", "chars=" + draftText.length() + ";editor_matches=" + observed + ";message_sent=false");
                 safeLog("Updated the native direct-message draft; sending remains manual");
             } finally {
-                if (!applied) restorePrefillRecord(editor, pending, previous);
+                if (!applied) { trace.finish(DouAiLog.Outcome.CANCELLED, "draft_apply_guard_changed_or_failed", "restored_prefill_record=true;message_sent=false"); restorePrefillRecord(editor, pending, previous); }
             }
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            DouAiLog.failure("auto_message", "apply_draft", failure);
             safeLog("Could not prefill the active direct-message editor: " + failure.getMessage());
         }
     }

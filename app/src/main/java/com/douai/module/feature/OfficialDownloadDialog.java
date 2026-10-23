@@ -8,6 +8,7 @@ import android.widget.Toast;
 
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.ThirdPartyDownloadSettings;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.ui.ModuleTheme;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
 
@@ -36,6 +37,8 @@ final class OfficialDownloadDialog implements AutoCloseable {
     private AlertDialog dialog;
     private boolean closed;
     private long navigation;
+    private final DouAiLog.Operation operation;
+    private boolean selectionFinished;
 
     OfficialDownloadDialog(Context context, Object aweme, LocalOptions options,
                            Consumer<String> log, BooleanSupplier valid) {
@@ -51,9 +54,16 @@ final class OfficialDownloadDialog implements AutoCloseable {
         this.log = log == null ? ignored -> { } : log;
         this.valid = valid == null ? () -> true : valid;
         this.liveSaver = liveSaver == null ? OfficialLivePhotoDownload::start : liveSaver;
+        operation = DouAiLog.begin("official_download_selection", "user_official_media_picker");
+        operation.stage("configured", "tree_selected=" + !this.options.downloadSaveTree().isEmpty()
+                + "; watermark_removal=" + this.options.enabled("remove_watermark", true));
     }
 
     void show() {
+        runUi("show_categories", this::showCategories);
+    }
+
+    private void showCategories() {
         if (!available()) return;
         List<Object> images = images();
         ArrayList<Integer> liveIndexes = new ArrayList<>();
@@ -85,7 +95,10 @@ final class OfficialDownloadDialog implements AutoCloseable {
                     new Choice("保存音频（原声/配乐）", () -> saveAudio(audio))), this::show)));
         }
         logChoices(images, motionIndexes.size(), liveIndexes.size(), choices);
+        operation.stage("categories_ready", "images=" + images.size() + "; motion=" + motionIndexes.size()
+                + "; live=" + liveIndexes.size() + "; choices=" + choices.size() + "; tasks_created=false");
         if (choices.isEmpty()) {
+            finishSelection(DouAiLog.Outcome.SKIPPED, "no_media_sources", "tasks_created=false");
             toast("当前作品没有可保存的媒体地址");
             close();
             return;
@@ -100,13 +113,14 @@ final class OfficialDownloadDialog implements AutoCloseable {
         for (int i = 0; i < labels.length; i++) labels[i] = choices.get(i).label;
         AlertDialog.Builder builder = new MiuixDialogBuilder(context, true).setTitle(title)
                 .setItems(labels, (ignored, which) -> {
-                    if (available() && navigation == page && which >= 0 && which < choices.size()) {
-                        choices.get(which).action.run();
-                    }
+                    runUi("choice_selected", () -> {
+                        if (available() && navigation == page && which >= 0 && which < choices.size()) choices.get(which).action.run();
+                        else operation.stage("choice_ignored", "stale_page_or_invalid_choice=true");
+                    });
                 })
-                .setNegativeButton("取消", (ignored, which) -> close());
+                .setNegativeButton("取消", (ignored, which) -> operation.wrap(this::close).run());
         if (back != null) builder.setNeutralButton("返回", (ignored, which) -> {
-            if (available() && navigation == page) back.run();
+            runUi("navigate_back", () -> { if (available() && navigation == page) back.run(); });
         });
         AlertDialog next = builder.create();
         replace(next);
@@ -138,19 +152,22 @@ final class OfficialDownloadDialog implements AutoCloseable {
         boolean[] selected = new boolean[indexes.size()];
         for (int i = 0; i < labels.length; i++) labels[i] = "第 " + (indexes.get(i) + 1) + " 张" + category.selectionSuffix;
         AlertDialog next = new MiuixDialogBuilder(context, true).setTitle("选择" + category.label)
-                .setMultiChoiceItems(labels, selected, (ignored, which, checked) -> selected[which] = checked)
+                .setMultiChoiceItems(labels, selected, (ignored, which, checked) -> operation.wrap(() -> {
+                    selected[which] = checked;
+                    operation.stage("selection_changed", "category=" + category.name() + "; position=" + which + "; selected=" + checked);
+                }).run())
                 .setPositiveButton("保存", null)
-                .setNegativeButton("取消", (ignored, which) -> close())
+                .setNegativeButton("取消", (ignored, which) -> operation.wrap(this::close).run())
                 .setNeutralButton("返回", (ignored, which) -> {
-                    if (available() && navigation == page) showCategory(category, images, indexes);
+                    runUi("navigate_back", () -> { if (available() && navigation == page) showCategory(category, images, indexes); });
                 }).create();
-        next.setOnShowListener(ignored -> next.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(button -> {
+        next.setOnShowListener(ignored -> operation.wrap(() -> next.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(button -> runUi("selection_confirmed", () -> {
             if (!available() || navigation != page) return;
             ArrayList<Integer> chosen = new ArrayList<>();
             for (int i = 0; i < selected.length; i++) if (selected[i]) chosen.add(indexes.get(i));
-            if (chosen.isEmpty()) { toast("请先选择" + category.label); return; }
+            if (chosen.isEmpty()) { skippedAttempt("empty_selection", "category=" + category.name()); toast("请先选择" + category.label); return; }
             saveSelection(category, images, toIndexes(chosen));
-        }));
+        }))).run());
         replace(next);
         next.show();
         ModuleTheme.bind(next.getWindow().getDecorView());
@@ -165,8 +182,8 @@ final class OfficialDownloadDialog implements AutoCloseable {
     private void replace(AlertDialog next) {
         AlertDialog previous = dialog;
         dialog = next;
-        next.setOnCancelListener(ignored -> close());
-        next.setOnDismissListener(ignored -> { if (dialog == next) close(); });
+        next.setOnCancelListener(ignored -> operation.wrap(this::close).run());
+        next.setOnDismissListener(ignored -> operation.wrap(() -> { if (dialog == next) close(); }).run());
         if (previous != null) previous.dismiss();
     }
 
@@ -174,15 +191,16 @@ final class OfficialDownloadDialog implements AutoCloseable {
         if (!readyToSave()) return;
         ArrayList<DownloadActionHook.MediaAsset> assets = new ArrayList<>();
         for (int index : indexes) {
-            if (index < 0 || index >= images.size()) { toast("当前图片位置不可用"); return; }
+            if (index < 0 || index >= images.size()) { skippedAttempt("invalid_image_index", "category=image"); toast("当前图片位置不可用"); return; }
             String url = imageUrl(images.get(index));
-            if (url == null) { toast("所选图片没有可保存的媒体地址"); return; }
+            if (url == null) { skippedAttempt("image_source_missing", "category=image; position=" + index); toast("所选图片没有可保存的媒体地址"); return; }
             assets.add(new DownloadActionHook.MediaAsset(url,
                     MediaNaming.forAweme(aweme, options, "picture", index + 1, imageExtension(url)), true));
         }
         Context target = context;
         String tree = options.downloadSaveTree();
         Consumer<String> logger = log;
+        handoff("image", assets.size());
         close();
         analytics.manual("download_request", "下载任务请求", "request");
         int accepted = 0;
@@ -190,6 +208,7 @@ final class OfficialDownloadDialog implements AutoCloseable {
             if (MediaStoreDownloader.downloadImage(target, asset.url, asset.name, tree, logger)) accepted++;
         }
         if (accepted > 0) analytics.manual("download_queued", "下载任务已加入", "accepted");
+        handoffResult("image", assets.size(), accepted);
         if (accepted < assets.size()) Toast.makeText(target, "部分图片未加入下载，请检查下载任务", Toast.LENGTH_SHORT).show();
     }
 
@@ -199,9 +218,12 @@ final class OfficialDownloadDialog implements AutoCloseable {
         String name = MediaNaming.forAweme(aweme, options, "video", imageIndex, "mp4");
         String tree = options.downloadSaveTree();
         Consumer<String> logger = log;
+        handoff("video", 1);
         close();
         analytics.manual("download_request", "下载任务请求", "request");
-        if (!MediaStoreDownloader.download(target, source, name, false, tree, logger)) {
+        boolean accepted = MediaStoreDownloader.download(target, source, name, false, tree, logger);
+        handoffResult("video", 1, accepted ? 1 : 0);
+        if (!accepted) {
             Toast.makeText(target, "视频未加入下载，请检查下载任务", Toast.LENGTH_SHORT).show();
         } else analytics.manual("download_queued", "下载任务已加入", "accepted");
     }
@@ -212,9 +234,12 @@ final class OfficialDownloadDialog implements AutoCloseable {
         String name = MediaNaming.forAweme(aweme, options, "audio", 0, "mp3");
         String tree = options.downloadSaveTree();
         Consumer<String> logger = log;
+        handoff("audio", 1);
         close();
         analytics.manual("download_request", "下载任务请求", "request");
-        if (!MediaStoreDownloader.download(target, source, name, true, tree, logger)) {
+        boolean accepted = MediaStoreDownloader.download(target, source, name, true, tree, logger);
+        handoffResult("audio", 1, accepted ? 1 : 0);
+        if (!accepted) {
             Toast.makeText(target, "音频未加入下载，请检查下载任务", Toast.LENGTH_SHORT).show();
         } else analytics.manual("download_queued", "下载任务已加入", "accepted");
     }
@@ -223,15 +248,16 @@ final class OfficialDownloadDialog implements AutoCloseable {
         if (!readyToSave()) return;
         ArrayList<DownloadActionHook.MediaAsset> assets = new ArrayList<>();
         for (int index : indexes) {
-            if (index < 0 || index >= images.size()) { toast("当前图片位置不可用"); return; }
+            if (index < 0 || index >= images.size()) { skippedAttempt("invalid_image_index", "category=motion"); toast("当前图片位置不可用"); return; }
             String video = motionUrl(images.get(index));
-            if (video == null) { toast("所选动态视频缺少可下载的媒体地址"); return; }
+            if (video == null) { skippedAttempt("motion_source_missing", "position=" + index); toast("所选动态视频缺少可下载的媒体地址"); return; }
             assets.add(new DownloadActionHook.MediaAsset(video,
                     MediaNaming.forAweme(aweme, options, "video", index + 1, "mp4"), false));
         }
         Context target = context;
         String tree = options.downloadSaveTree();
         Consumer<String> logger = log;
+        handoff("motion", assets.size());
         close();
         analytics.manual("download_request", "下载任务请求", "request");
         int accepted = 0;
@@ -239,6 +265,7 @@ final class OfficialDownloadDialog implements AutoCloseable {
             if (MediaStoreDownloader.download(target, asset.url, asset.name, false, tree, logger)) accepted++;
         }
         if (accepted > 0) analytics.manual("download_queued", "下载任务已加入", "accepted");
+        handoffResult("motion", assets.size(), accepted);
         if (accepted < assets.size()) {
             Toast.makeText(target, accepted == 0 ? "动态视频未加入下载，请检查下载任务"
                     : "部分动态视频未加入下载，请检查下载任务", Toast.LENGTH_SHORT).show();
@@ -247,11 +274,13 @@ final class OfficialDownloadDialog implements AutoCloseable {
 
     private void saveLivePhotos(int[] imageIndexes) {
         if (!readyToSave()) return;
-        if (imageIndexes.length == 0) { toast("请先选择实况"); return; }
+        if (imageIndexes.length == 0) { skippedAttempt("empty_selection", "category=live"); toast("请先选择实况"); return; }
         // Validate every selected source before any task can be queued.
         for (int imageIndex : imageIndexes) {
             try { OfficialLivePhotoDownload.plan(aweme, imageIndex, options); }
             catch (RuntimeException failure) {
+                operation.error("live_source_validation", failure);
+                skippedAttempt("live_source_missing_or_unsupported", "position=" + imageIndex);
                 toast("所选实况缺少可下载的图片或动态视频");
                 return;
             }
@@ -260,6 +289,7 @@ final class OfficialDownloadDialog implements AutoCloseable {
         Object work = aweme;
         LocalOptions current = options;
         Consumer<String> logger = log;
+        handoff("live", imageIndexes.length);
         close();
         analytics.manual("download_request", "下载任务请求", "request");
         int accepted = 0;
@@ -267,6 +297,7 @@ final class OfficialDownloadDialog implements AutoCloseable {
             if (liveSaver.start(target, work, imageIndex, current, logger)) accepted++;
         }
         if (accepted > 0) analytics.manual("download_queued", "下载任务已加入", "accepted");
+        handoffResult("live", imageIndexes.length, accepted);
         if (accepted < imageIndexes.length) {
             Toast.makeText(target, accepted == 0 ? "实况未加入下载，请检查下载任务"
                     : "部分实况未加入下载，请检查下载任务", Toast.LENGTH_SHORT).show();
@@ -323,6 +354,7 @@ final class OfficialDownloadDialog implements AutoCloseable {
         if (options.downloadSaveTree().isEmpty() && Build.VERSION.SDK_INT < 29
                 && context.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 != PackageManager.PERMISSION_GRANTED) {
+            skippedAttempt("legacy_storage_permission_missing", "task_created=false; selection_kept_open=true");
             toast("请先授予抖音存储权限");
             return false;
         }
@@ -330,11 +362,21 @@ final class OfficialDownloadDialog implements AutoCloseable {
     }
 
     private boolean available() {
-        if (closed || context == null || aweme == null) return false;
+        if (closed) return false;
+        if (context == null || aweme == null) {
+            finishSelection(DouAiLog.Outcome.SKIPPED, "selection_context_or_work_missing", "tasks_created=false");
+            return false;
+        }
         boolean active;
         try { active = valid.getAsBoolean(); }
-        catch (RuntimeException failure) { active = false; }
-        if (!active || new ThirdPartyDownloadSettings(options).thirdParty) {
+        catch (RuntimeException failure) { operation.error("owner_validity", failure); active = false; }
+        if (!active) {
+            finishSelection(DouAiLog.Outcome.CANCELLED, "owner_invalid", "tasks_created=false");
+            close();
+            return false;
+        }
+        if (new ThirdPartyDownloadSettings(options).thirdParty) {
+            finishSelection(DouAiLog.Outcome.SKIPPED, "third_party_provider_selected", "official_tasks_created=false");
             close();
             return false;
         }
@@ -401,7 +443,43 @@ final class OfficialDownloadDialog implements AutoCloseable {
         if (context != null) Toast.makeText(context, message, Toast.LENGTH_SHORT).show();
     }
 
+    private void runUi(String stage, Runnable action) {
+        operation.wrap(() -> {
+            operation.stage(stage, "business_result=pending");
+            try { action.run(); }
+            catch (RuntimeException | LinkageError failure) {
+                operation.error(stage, failure);
+                if (!selectionFinished) finishSelection(DouAiLog.Outcome.FAILED, "selection_ui_or_handoff_failed", "stage=" + stage);
+                else DouAiLog.event("official_download_selection", "handoff_exception", "result_unconfirmed", "stage=" + stage);
+                throw failure;
+            }
+        }).run();
+    }
+
+    private void skippedAttempt(String reason, String evidence) {
+        operation.stage("save_attempt_skipped", "reason=" + reason + "; " + evidence);
+        operation.wrap(() -> DouAiLog.begin("official_download_save_attempt", "user_selection")
+                .finish(DouAiLog.Outcome.SKIPPED, reason, evidence)).run();
+    }
+
+    private void finishSelection(DouAiLog.Outcome outcome, String reason, String evidence) {
+        if (selectionFinished) return;
+        selectionFinished = true;
+        operation.finish(outcome, reason, evidence);
+    }
+
+    private void handoff(String category, int count) {
+        finishSelection(DouAiLog.Outcome.UNCONFIRMED, "selection_closed_for_save_handoff", "category=" + category
+                + "; selected_count=" + count + "; files_saved=unobserved; follow_linked_download_operations=true");
+    }
+
+    private void handoffResult(String category, int requested, int accepted) {
+        DouAiLog.event("official_download_selection", "save_handoff", "queue_submission_returned", "category=" + category
+                + "; requested=" + requested + "; accepted=" + accepted + "; files_saved=unobserved");
+    }
+
     @Override public void close() {
+        if (!closed && !selectionFinished) finishSelection(DouAiLog.Outcome.CANCELLED, "selection_closed", "tasks_created=false");
         closed = true;
         AlertDialog current = dialog;
         dialog = null;

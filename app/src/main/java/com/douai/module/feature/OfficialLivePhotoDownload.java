@@ -121,8 +121,12 @@ final class OfficialLivePhotoDownload {
             transfer.phase("正在编码实况");
             transfer.check();
             Encoded result = selectedEncoder.encode(plan.loader, image, video);
+            transfer.evidence("live_photo_encoder_returned", "code=" + (result == null ? "null" : result.code)
+                    + "; business_result=validating");
             transfer.check();
             File output = validatedOutput(result, plan.loader, selectedEncoder);
+            transfer.evidence("live_photo_validated", "is_live_photo=true; bytes=" + output.length()
+                    + "; output_ref=" + com.douai.module.diagnostics.DouAiLog.reference(output.getAbsolutePath()));
             transfer.check();
             String extension = extension(output);
             String name = MediaNaming.sanitize(plan.name.substring(0, plan.name.length() - 4), extension);

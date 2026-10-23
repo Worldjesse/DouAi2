@@ -1,5 +1,7 @@
 package com.douai.module.feature;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.app.Activity;
 import android.app.Application;
 import android.app.Dialog;
@@ -129,19 +131,26 @@ public final class AiMessageEntryHook implements Application.ActivityLifecycleCa
     }
 
     private void openConversation(Activity activity, String modelId) {
-        if (closed || activity.isFinishing() || activity.isDestroyed()) return;
+        if (closed || activity.isFinishing() || activity.isDestroyed()) { DouAiLog.event("ai_contacts", "eligibility", "activity_unavailable", ""); return; }
+        DouAiLog.Operation trace = DouAiLog.begin("ai_contacts", "contact_click");
         try {
             // Read again at click time so removed/disabled contacts never use a stale API profile.
             for (AiModelConfig model : AiModelSettings.read(store).configs) {
                 if (!model.id.equals(modelId) || !model.messageContactEnabled) continue;
                 WeakReference<Dialog> reference = conversations.get(activity);
                 Dialog previous = reference == null ? null : reference.get();
-                if (previous != null && previous.isShowing()) return;
+                if (previous != null && previous.isShowing()) { trace.finish(DouAiLog.Outcome.SKIPPED, "already_showing", "dialog_showing=true"); return; }
                 Dialog dialog = opener.open(activity, model);
                 if (dialog != null) conversations.put(activity, new WeakReference<>(dialog));
+                trace.finish(dialog != null && dialog.isShowing() ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.UNCONFIRMED,
+                        "dialog_readback", "dialog_present=" + (dialog != null) + ";showing=" + (dialog != null && dialog.isShowing()));
                 return;
             }
-        } catch (RuntimeException failure) { safeLog("Could not open AI contact: " + failure.getClass().getSimpleName()); }
+            trace.finish(DouAiLog.Outcome.SKIPPED, "model_removed_or_disabled", "");
+        } catch (RuntimeException failure) {
+            trace.error("open_dialog", failure); trace.finish(DouAiLog.Outcome.FAILED, "dialog_open_failed", "");
+            safeLog("Could not open AI contact: " + failure.getClass().getSimpleName());
+        }
     }
 
     private final class Monitor implements ViewTreeObserver.OnGlobalLayoutListener {
@@ -186,10 +195,10 @@ public final class AiMessageEntryHook implements Application.ActivityLifecycleCa
                     cachedSettings = serialized;
                 }
                 List<AiModelConfig> contacts = cachedContacts;
-                if (contacts.isEmpty()) { restore(); return; }
+                if (contacts.isEmpty()) { DouAiLog.event("ai_contacts", "eligibility", "no_enabled_contacts", "configured_count=0"); restore(); return; }
                 View list = uniqueMessageList(activity);
                 if (insertion != null && (insertion.list != list || !insertion.isIntact())) restore();
-                if (list == null) return;
+                if (list == null) { DouAiLog.event("ai_contacts", "eligibility", "message_list_not_unique_or_missing", ""); return; }
                 if (insertion == null) {
                     insertion = InlineContacts.attach(activity, list);
                     appliedSettings = null;
@@ -200,6 +209,7 @@ public final class AiMessageEntryHook implements Application.ActivityLifecycleCa
                     appliedSettings = serialized;
                 }
                 insertion.resize();
+                DouAiLog.event("ai_contacts", "view_applied", "insertion_readback", "intact=" + insertion.isIntact() + ";contact_count=" + contacts.size());
                 failedSettings = null;
             } catch (ReflectiveOperationException | RuntimeException failure) {
                 restore();

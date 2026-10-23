@@ -1,5 +1,7 @@
 package com.douai.module.ui;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ClipData;
@@ -98,6 +100,8 @@ final class DebugLogDialog implements AutoCloseable {
     private DebugLogView.Selection filtered = index.select(DebugLogView.Category.ALL, "");
     private final Runnable filterChanged = this::renderSelection;
     private AutoCloseable selection;
+    private DouAiLog.Operation exportTrace;
+    private Button ownExportButton;
     private AlertDialog entryPicker, entryDetails;
 
     DebugLogDialog(Context context, SettingsStore store, boolean miuix) {
@@ -114,7 +118,7 @@ final class DebugLogDialog implements AutoCloseable {
         body.setOrientation(LinearLayout.VERTICAL);
         int padding = dp(16);
         body.setPadding(padding, 0, padding, padding);
-        body.addView(text("入口：关于 → 调试与日志。开启后自动记录已触发功能的过程、评论与聊天 JSON（已脱敏），并写入 LSPosed，无需手动提供 JSON。关闭后仅新增启动、状态、执行结果与错误等简要日志，已记录的详细日志仍保留。开关保存后立即生效。",
+        body.addView(text("全局调试开关同时控制模块日志与 LSPosed：关闭保留功能状态、根操作开始/终态、简要异常与完整性说明；开启增加详细阶段、配置、Hook 类型/耗时和异常栈。按 trace_id 查看原因、进度及结果依据。正文与凭据不记录。开关立即生效，历史明细保留；只看新记录时请先清空再复现。",
                 "debug.logs.note", 14), matchWrap());
         enabled = miuix ? MiuixFormControls.checkbox(context, "全局调试日志", false) : new Switch(context);
         enabled.setText("全局调试日志"); enabled.setTag("debug.logs.enabled");
@@ -127,6 +131,9 @@ final class DebugLogDialog implements AutoCloseable {
         LinearLayout second = row(body);
         copyButton = button(second, miuix, "复制", "debug.logs.copy", this::copy);
         exportButton = button(second, miuix, "导出", "debug.logs.export", this::export);
+        if (com.douai.module.BuildConfig.APPLICATION_ID.equals(context.getPackageName())) {
+            ownExportButton = button(row(body), miuix, "导出模块进程日志", "debug.logs.export-own", this::exportOwn);
+        }
         LinearLayout filters = row(body);
         category = miuix ? MiuixFormControls.spinner(context) : new Spinner(context);
         category.setTag("debug.logs.category");
@@ -147,7 +154,7 @@ final class DebugLogDialog implements AutoCloseable {
         summary.setTextColor(0xFF69737A); body.addView(summary, matchWrap());
         status = text("正在读取日志…", "debug.logs.status", 13);
         status.setTextColor(0xFF69737A); body.addView(status, matchWrap());
-        TextView range = text("页面检索最近 128K 字符。筛选与搜索仅影响页面和复制；导出仍包含完整保留日志（最多 2 MiB）。条目里的 JSON 是宿主对象快照，不等于原始 HTTP 响应。",
+        TextView range = text("页面检索最近 128K 字符。筛选与搜索仅影响页面和复制；导出包含保留日志及完整性清单（最多 2 MiB）。请结合结果证据、未闭合操作及丢失说明判断。",
                 "debug.logs.range", 12);
         range.setTextColor(0xFF69737A); body.addView(range, matchWrap());
         logText = text("", "debug.logs.text", 12);
@@ -320,44 +327,66 @@ final class DebugLogDialog implements AutoCloseable {
 
     private void export() {
         if (closed || busy || !available || activity == null) return;
+        DouAiLog.Operation trace = DouAiLog.begin("diagnostics", "export_logs");
+        exportTrace = trace;
         long token = start("正在准备完整日志…");
         try {
-            source.export(snapshot -> {
+            trace.stage("snapshot_read", "source_available=" + available);
+            source.export(trace.wrapConsumer(snapshot -> {
                 if (!current(token)) return;
-                if (snapshot == null || !snapshot.available) { finish(token, "读取完整日志失败，请打开抖音后重试。"); return; }
-                choose(token, snapshot.text);
-            });
-        } catch (RuntimeException unavailable) { finish(token, "导出失败，请稍后重试。"); }
+                if (snapshot == null || !snapshot.available) { trace.finish(DouAiLog.Outcome.FAILED, "log_source_unavailable", ""); finish(token, "读取完整日志失败，请打开抖音后重试。"); return; }
+                choose(token, snapshot.text, trace);
+            }));
+        } catch (RuntimeException unavailable) { trace.error("snapshot_read", unavailable); trace.finish(DouAiLog.Outcome.FAILED, "log_export_failed", ""); finish(token, "导出失败，请稍后重试。"); }
+    }
+    private void exportOwn() {
+        if (closed || busy || activity == null) return;
+        DouAiLog.Operation trace = DouAiLog.begin("diagnostics", "export_module_process_logs");
+        exportTrace = trace; long token = start("正在读取模块进程日志（不含宿主）…");
+        DebugLog.exportOwnProcess(context, trace.wrapConsumer(text -> {
+            if (!current(token)) return;
+            if (DebugLog.UNAVAILABLE_TEXT.equals(text)) {
+                trace.finish(DouAiLog.Outcome.FAILED, "module_log_source_unavailable", "host_channel_unchanged=true");
+                finish(token, "模块进程日志不可用。"); return;
+            }
+            choose(token, text, trace);
+        }));
     }
 
-    private void choose(long token, String data) {
+    private void choose(long token, String data, DouAiLog.Operation trace) {
         status.setText("请选择日志文件保存位置。");
         AtomicBoolean delivered = new AtomicBoolean();
         AutoCloseable pending;
         try {
-            pending = exporter.choose(activity, uri -> {
+            trace.stage("destination_picker", "snapshot_chars=" + data.length());
+            pending = exporter.choose(activity, trace.wrapConsumer(uri -> {
                 if (!delivered.compareAndSet(false, true) || !current(token)) return;
                 selection = null;
-                if (uri == null) { finish(token, "已取消导出。"); return; }
+                if (uri == null) { trace.finish(DouAiLog.Outcome.CANCELLED, "user_cancelled", ""); finish(token, "已取消导出。"); return; }
                 status.setText("正在导出日志…");
                 try {
-                    worker.execute(() -> {
+                    worker.execute(trace.wrap(() -> {
                         String result;
-                        try { exporter.write(uri, data, () -> current(token)); result = "日志已导出。"; }
-                        catch (Exception failure) { result = "导出失败，请重新选择保存位置。"; }
+                        try {
+                            trace.stage("write_snapshot", "bytes=" + data.getBytes(StandardCharsets.UTF_8).length);
+                            exporter.write(uri, data, () -> current(token)); result = "日志已导出。";
+                            trace.finish(DouAiLog.Outcome.SUCCESS, "log_stream_closed", "export_write_returned=true;readback_verified=false;snapshot_captured_before_export_completion=true");
+                        }
+                        catch (Exception failure) { trace.error("write_snapshot", failure); trace.finish(current(token) ? DouAiLog.Outcome.FAILED : DouAiLog.Outcome.CANCELLED, "log_export_write_failed", ""); result = "导出失败，请重新选择保存位置。"; }
                         String message = result;
                         main.post(() -> finish(token, message));
-                    });
+                    }));
                 } catch (RuntimeException unavailable) {
+                    trace.finish(DouAiLog.Outcome.FAILED, "export_queue_rejected", "cleanup_requested=true");
                     Thread cleanup = new Thread(() -> exporter.delete(uri), "DouAi-debug-cleanup");
                     cleanup.setDaemon(true); cleanup.start();
                     finish(token, "导出任务繁忙，请稍后重试。");
                 }
-            });
-        } catch (RuntimeException unavailable) { finish(token, "无法打开文件选择器。"); return; }
+            }));
+        } catch (RuntimeException unavailable) { trace.error("destination_picker", unavailable); trace.finish(DouAiLog.Outcome.FAILED, "log_picker_unavailable", ""); finish(token, "无法打开文件选择器。"); return; }
         if (!delivered.get() && current(token)) {
             selection = pending;
-            if (pending == null) finish(token, "无法打开文件选择器，请在当前应用的设置页面重试。");
+            if (pending == null) { trace.finish(DouAiLog.Outcome.FAILED, "log_picker_unavailable", ""); finish(token, "无法打开文件选择器，请在当前应用的设置页面重试。"); }
         } else close(pending);
     }
 
@@ -367,9 +396,11 @@ final class DebugLogDialog implements AutoCloseable {
     private boolean current(long token) { return !closed && generation == token; }
     private void finish(long token, String message) {
         if (!current(token)) return;
+        exportTrace = null;
         busy = false; status.setText(message); controls();
     }
     private void controls() {
+        if (ownExportButton != null) ownExportButton.setEnabled(!closed && !busy);
         enabled.setEnabled(!closed && !busy && available);
         refreshButton.setEnabled(!closed && !busy);
         clearButton.setEnabled(!closed && !busy && available);
@@ -381,6 +412,7 @@ final class DebugLogDialog implements AutoCloseable {
     }
     @Override public void close() {
         if (closed) return;
+        if (exportTrace != null) { exportTrace.finish(DouAiLog.Outcome.CANCELLED, "log_dialog_closed", ""); exportTrace = null; }
         closed = true; generation++; main.removeCallbacks(filterChanged); close(selection); selection = null;
         if (entryPicker != null) entryPicker.dismiss();
         if (entryDetails != null) entryDetails.dismiss();

@@ -1,6 +1,7 @@
 package com.douai.module.feature;
 
 import com.douai.module.config.SpeechSettings;
+import com.douai.module.diagnostics.DouAiLog;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -71,6 +72,10 @@ public final class MiniMaxSpeechClient {
 
     public static List<String> fetchModels(SpeechHttpClient.Request request,
                                            SpeechSettings settings) throws IOException {
+        return SpeechHttpClient.observeCatalog("minimax_model_catalog", () -> fetchModelsChecked(request, settings));
+    }
+    private static List<String> fetchModelsChecked(SpeechHttpClient.Request request,
+                                                   SpeechSettings settings) throws IOException {
         request.ensureActive();
         try {
             String json = request.fetchText(endpoint(settings.minimaxBaseUrl, "models"), apiHeaders(settings));
@@ -91,6 +96,9 @@ public final class MiniMaxSpeechClient {
     }
 
     static List<String> fetchDocumentModels(SpeechHttpClient.Request request, String url) throws IOException {
+        return SpeechHttpClient.observeCatalog("minimax_document_model_catalog", () -> fetchDocumentModelsChecked(request, url));
+    }
+    private static List<String> fetchDocumentModelsChecked(SpeechHttpClient.Request request, String url) throws IOException {
         request.ensureActive();
         try {
             // A fixed public documentation endpoint is unrelated to the user's private API credentials.
@@ -108,6 +116,10 @@ public final class MiniMaxSpeechClient {
 
     public static List<VoiceCatalog.Entry> fetchVoices(SpeechHttpClient.Request request,
                                                        SpeechSettings settings) throws IOException {
+        return SpeechHttpClient.observeCatalog("minimax_voice_catalog", () -> fetchVoicesChecked(request, settings));
+    }
+    private static List<VoiceCatalog.Entry> fetchVoicesChecked(SpeechHttpClient.Request request,
+                                                               SpeechSettings settings) throws IOException {
         request.ensureActive();
         try {
             JSONObject response = post(request, settings, "get_voice", new JSONObject().put("voice_type", "all"));
@@ -170,6 +182,7 @@ public final class MiniMaxSpeechClient {
             throw new IllegalArgumentException("MiniMax 语音响应缺少状态码");
         }
         int code = integer(status.opt("status_code"));
+        DouAiLog.event("minimax_speech", "provider_status", "response_validating", "provider_code=" + code + "; audio_verified=false");
         if (code != 0) {
             // status_msg may contain submitted text or credentials. Report only a bounded numeric code.
             String hint;

@@ -1,5 +1,7 @@
 package com.douai.module.ui;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.app.Activity;
 import android.content.Intent;
 import android.content.ComponentName;
@@ -59,16 +61,20 @@ final class HostAppRestarter {
 
     Result restart(Activity activity, String identity, AcknowledgmentWriter acknowledgment,
                    Consumer<String> failureListener) {
+        DouAiLog.Operation trace = DouAiLog.begin("restart", "adaptation_confirmation");
         if (identity == null || identity.isEmpty() || acknowledgment == null) {
+            trace.finish(DouAiLog.Outcome.SKIPPED, "missing_identity_or_writer", "restart_not_requested=true");
             return Result.failed("无法保存适配确认，请重试。");
         }
         boolean saved;
         try {
             saved = acknowledgment.commit(identity);
         } catch (RuntimeException failure) {
+            trace.error("confirmation_commit", failure); trace.finish(DouAiLog.Outcome.FAILED, "confirmation_write_failed", "");
             return Result.failed("无法保存适配确认，请重试：" + reason(failure));
         }
         if (!saved) {
+            trace.finish(DouAiLog.Outcome.FAILED, "confirmation_write_failed", "commit=false");
             return Result.failed("无法保存适配确认，请重试。");
         }
         // Restart availability must not invalidate a successfully saved scan confirmation.
@@ -77,21 +83,28 @@ final class HostAppRestarter {
             prepared = scheduler.prepare(activity);
             if (prepared == null) throw new IllegalStateException("Restart scheduling returned no handle");
         } catch (Exception failure) {
+            trace.error("restart_prepare", failure); trace.finish(DouAiLog.Outcome.FAILED, "restart_prepare_failed", "confirmation_saved=true");
             return Result.restartFailed("无法安排抖音重启：" + reason(failure));
         }
         prepared.setFailureListener(message -> {
+            trace.finish(DouAiLog.Outcome.FAILED, "restart_relay_failed", "confirmation_saved=true;detail_ref=" + DouAiLog.reference(message));
             if (failureListener != null) failureListener.accept(message);
         });
         try {
+            trace.stage("relay_start", "confirmation_saved=true");
             prepared.start(identity);
         } catch (RuntimeException failure) {
+            trace.error("relay_start", failure); trace.finish(DouAiLog.Outcome.FAILED, "relay_start_failed", "");
             cancel(prepared);
             return Result.restartFailed("无法打开重启中转页面：" + reason(failure));
         }
         try {
+            trace.stage("termination_request", "relay_requested=true;restart_completion=unobserved");
             prepared.terminate();
+            trace.finish(DouAiLog.Outcome.UNCONFIRMED, "restart_requested", "process_relaunch=unobserved");
             return Result.success();
         } catch (RuntimeException failure) {
+            trace.error("termination_request", failure); trace.finish(DouAiLog.Outcome.FAILED, "termination_request_failed", "");
             cancel(prepared);
             return Result.restartFailed("无法结束抖音进程：" + reason(failure));
         }

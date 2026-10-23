@@ -9,6 +9,7 @@ import android.view.View;
 import android.view.ViewTreeObserver;
 
 import com.douai.module.config.LocalOptions;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostScanReport;
 
 import io.github.libxposed.api.XposedInterface;
@@ -141,7 +142,18 @@ public final class HostBehaviorHooks implements AutoCloseable {
                         || (!returnsBoolean && target.getReturnType() != void.class)) {
                     throw new IllegalStateException("Suppression contract changed: " + target);
                 }
-                group.add(framework, target, chain -> enabled(key) ? skippedResult : chain.proceed());
+                group.add(framework, target, chain -> {
+                    boolean apply = enabled(key);
+                    DouAiLog.event(key, "decision", apply ? "enabled_host_call_blocked" : "disabled_host_call_forwarded",
+                            "host_invoked=" + !apply + ";result_scope=local_interception");
+                    if (apply) {
+                        DouAiLog.Operation operation = DouAiLog.begin(key, "host_gate");
+                        operation.finish(DouAiLog.Outcome.SUCCESS, "host_call_suppressed",
+                                "host_invoked=false;result_scope=local_interception;durable_effect=unobserved");
+                        return skippedResult;
+                    }
+                    return chain.proceed();
+                });
             }
             reportInstalled(key, targets.size());
         } catch (Throwable failure) { group.fail(failure); }
@@ -243,6 +255,12 @@ public final class HostBehaviorHooks implements AutoCloseable {
     }
 
     private void logHiddenSkipOnce(AtomicBoolean logged, String route) {
+        long count = "current".equals(route) ? hiddenCurrentBlocked.get() : hiddenBackgroundBlocked.get();
+        if (count == 1 || (count & (count - 1)) == 0) DouAiLog.event(HIDDEN_SKIP, "decision", "safety_task_suppressed",
+                "route=" + route + ";current_hits=" + hiddenCurrentHits.get()
+                        + ";current_blocked=" + hiddenCurrentBlocked.get()
+                        + ";background_hits=" + hiddenBackgroundHits.get()
+                        + ";background_blocked=" + hiddenBackgroundBlocked.get() + ";result_scope=local_interception");
         if (!logged.compareAndSet(false, true)) return;
         try { log.accept("Hidden video auto-skip blocked: route=" + route); }
         catch (Throwable ignored) { }
@@ -258,7 +276,10 @@ public final class HostBehaviorHooks implements AutoCloseable {
                 throw new IllegalStateException("Update notification is no longer a Dialog");
             }
             group.add(framework, Dialog.class.getDeclaredMethod("show"), chain -> {
-                if (enabled(key) && notification.isInstance(chain.getThisObject())) return null;
+                if (enabled(key) && notification.isInstance(chain.getThisObject())) {
+                    DouAiLog.event(key, "decision", "dialog_show_suppressed", "host_invoked=false;dialog_kind=notification");
+                    return null;
+                }
                 return chain.proceed();
             });
             Class<?> fragment = Class.forName("androidx.fragment.app.DialogFragment", false, loader);
@@ -269,12 +290,18 @@ public final class HostBehaviorHooks implements AutoCloseable {
             }
             for (String name : new String[] { "show", "showNow" }) {
                 group.add(framework, fragment.getDeclaredMethod(name, manager, String.class), chain -> {
-                    if (enabled(key) && bottom.isInstance(chain.getThisObject())) return null;
+                    if (enabled(key) && bottom.isInstance(chain.getThisObject())) {
+                        DouAiLog.event(key, "decision", "dialog_show_suppressed", "host_invoked=false;dialog_kind=bottom_sheet");
+                        return null;
+                    }
                     return chain.proceed();
                 });
             }
             group.add(framework, fragment.getDeclaredMethod("show", transaction, String.class), chain -> {
-                if (enabled(key) && bottom.isInstance(chain.getThisObject())) return -1;
+                if (enabled(key) && bottom.isInstance(chain.getThisObject())) {
+                    DouAiLog.event(key, "decision", "dialog_show_suppressed", "host_invoked=false;dialog_kind=transaction");
+                    return -1;
+                }
                 return chain.proceed();
             });
             reportInstalled(key, 4);
@@ -424,6 +451,8 @@ public final class HostBehaviorHooks implements AutoCloseable {
             if (target.getVisibility() != applied) {
                 original = target.getVisibility();
                 target.setVisibility(applied);
+                DouAiLog.event(key, "view_state", "visibility_applied", "expected=" + applied
+                        + ";actual=" + target.getVisibility() + ";result_scope=current_view");
             }
         }
 
@@ -447,6 +476,8 @@ public final class HostBehaviorHooks implements AutoCloseable {
             observer = null;
             View target = view.get();
             if (target != null && target.getVisibility() == applied) target.setVisibility(original);
+            if (target != null) DouAiLog.event(key, "view_state", "restored",
+                    "expected=" + original + ";actual=" + target.getVisibility() + ";result_scope=current_view");
         }
     }
 }

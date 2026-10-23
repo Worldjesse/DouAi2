@@ -1,5 +1,7 @@
 package com.douai.module.ui;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.content.ClipData;
 import android.content.ContentResolver;
 import android.content.ContentValues;
@@ -44,6 +46,8 @@ final class ReportImageShare {
         ContentResolver resolver = application.getContentResolver();
         boolean media = Build.VERSION.SDK_INT >= 29 && destination == null;
         Saved saved = null;
+        DouAiLog.Operation trace = DouAiLog.begin("report_export", "save_report");
+        trace.stage("encode_and_write", "format=" + format.name() + ";media_store=" + media);
         try {
             Uri uri = destination;
             if (media) {
@@ -70,8 +74,11 @@ final class ReportImageShare {
                 if (resolver.update(uri, complete, null, null) < 1) throw new IOException("无法完成报告文件保存");
             }
             ReportImageExport.check(valid);
+            trace.finish(DouAiLog.Outcome.SUCCESS, "stream_closed_and_published", "output_stream_closed=true;provider_publish=" + media + ";file_ref=" + DouAiLog.reference(uri.toString()) + ";sharing_not_confirmed=true");
             return saved;
         } catch (IOException | RuntimeException | OutOfMemoryError failure) {
+            trace.error("encode_and_write", failure);
+            trace.finish(failure instanceof java.util.concurrent.CancellationException ? DouAiLog.Outcome.CANCELLED : DouAiLog.Outcome.FAILED, "report_save_failed", "cleanup_requested=true");
             cleanup(saved); throw failure;
         }
     }
@@ -97,6 +104,7 @@ final class ReportImageShare {
         synchronized void handOff() {
             if (disposed.get()) throw new IllegalStateException("报告导出已取消");
             handedOff = true;
+            DouAiLog.event("report_export", "share_handoff", "unconfirmed", "chooser_requested=true;recipient_received=unobserved");
         }
         synchronized void failedHandOff() { handedOff = false; delete(); }
         void delete() {

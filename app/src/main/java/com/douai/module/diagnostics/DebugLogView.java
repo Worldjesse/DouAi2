@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.json.JSONObject;
 
 /** A read-only index of an already-redacted log tail; continuations stay with their event. */
 public final class DebugLogView {
@@ -51,7 +52,7 @@ public final class DebugLogView {
                     || lower.contains("autoaudio") || lower.contains("native_reply")
                     || lower.contains("prevent_message_recall") || lower.contains("message recall") || lower.contains("[douai.messagejson]")
                     || lower.contains("[douai.replyoverlay]") || lower.contains("streak");
-            hook = lower.startsWith("[douai.trace]") || lower.contains("overlay]")
+            hook = lower.startsWith("[douai.trace]") || lower.contains("\"event\":\"hook_") || lower.contains("overlay]")
                     || lower.startsWith("hook call threw;");
             result = json ? Result.NONE : result(lower);
             String header = text.substring(0, headerEnd);
@@ -137,6 +138,21 @@ public final class DebugLogView {
     }
 
     private static Result result(String value) {
+        if (value.startsWith("{")) {
+            try {
+                JSONObject structured = new JSONObject(value);
+                // Only a root operation terminal is a business outcome; spans/hooks cannot inflate counts.
+                if (!"operation_finished".equals(structured.optString("event"))) return Result.NONE;
+                switch (structured.optString("outcome")) {
+                    case "success": return Result.SENT;
+                    case "failed": return Result.FAILED;
+                    case "unconfirmed": case "timed_out": return Result.SUBMITTED;
+                    case "cancelled": return Result.CANCELLED;
+                    case "skipped": return Result.SKIPPED;
+                    default: return Result.NONE;
+                }
+            } catch (Exception ignored) { return Result.NONE; }
+        }
         Matcher outcome = OUTCOME.matcher(value);
         if (outcome.find()) {
             switch (outcome.group(1).toLowerCase(Locale.ROOT)) {

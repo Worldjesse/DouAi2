@@ -5,6 +5,21 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class FeedFilterPolicyTest {
+    @Test public void reasonUsesTheOriginalFirstMatchingRuleAndBooleanContract() {
+        FeatureSettings allBase = settings(true, true, true, true, true, true, "private-keyword", true, 60, true, 1000);
+        FeedItem overlapping = item(true, true, true, true, "private-keyword", 2, 0);
+        assertEquals(FeedFilterPolicy.Reason.ADVERTISEMENT, FeedFilterPolicy.reason(overlapping, allBase, true, true));
+        assertTrue(FeedFilterPolicy.shouldHide(overlapping, allBase, true, true));
+        FeatureSettings onlyKeyword = settings(true, false, false, false, false, true, "private-keyword", false, 0, false, 0);
+        assertEquals(FeedFilterPolicy.Reason.KEYWORD, FeedFilterPolicy.reason(overlapping, onlyKeyword, false, false));
+        com.douai.module.config.LocalOptions options = new com.douai.module.config.LocalOptions(java.util.Map.of(
+                "hide_product_cards", true, "hide_mini_games", true, "hide_long_videos", true));
+        assertEquals(FeedFilterPolicy.Reason.PRODUCT_CARD, FeedFilterPolicy.reason(overlapping, recommendationSettings(false, false), false, false, true, 112, options));
+        assertEquals(FeedFilterPolicy.Reason.MINI_GAME, FeedFilterPolicy.reason(overlapping, recommendationSettings(false, false), false, false, true, 127, options));
+        assertEquals(FeedFilterPolicy.Reason.LONG_VIDEO, FeedFilterPolicy.reason(overlapping, recommendationSettings(false, false), false, false, false, 127, options));
+        assertEquals(FeedFilterPolicy.Reason.NONE, FeedFilterPolicy.reason(overlapping, FeatureSettings.defaults(), true, true, true, 112, options));
+    }
+
     private FeatureSettings settings(boolean enabled, boolean ads, boolean lives,
                                      boolean images, boolean cards, boolean keywords,
                                      String keyword, boolean duration, int minDuration,

@@ -5,6 +5,7 @@ import android.content.Context;
 import android.view.View;
 import com.douai.module.config.AutomationHistoryStore;
 import com.douai.module.config.LocalOptions;
+import com.douai.module.diagnostics.DebugLog;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -670,6 +671,98 @@ public final class CommentReplyHookTest {
         pump();
         assertEquals(1400, ledger().watermark(100));
         assertEquals(List.of(1000L, 1000L), source.since);
+    }
+
+    @Test public void cancelledInboxScanHasACancelledTerminalWithoutChangingCheckpointOrRecovery() {
+        com.douai.module.diagnostics.DouAiLog.awaitIdle(3000);
+        List<String> records = java.util.Collections.synchronizedList(new ArrayList<>());
+        com.douai.module.diagnostics.DouAiLog.setFrameworkSink((priority, json) -> records.add(json));
+        try {
+            open();
+            source.through = 1400;
+            source.scanFailure = new java.util.concurrent.CancellationException("private account detail");
+            hook.requestScan();
+            pump();
+            assertEquals(1000, ledger().watermark(100));
+            assertTrue(sender.sent.isEmpty());
+            assertTrue(com.douai.module.diagnostics.DouAiLog.awaitIdle(3000));
+            String terminal = records.stream().filter(line -> line.contains("\"feature_id\":\"comment_reply_inbox\"")
+                    && line.contains("\"event\":\"operation_finished\"") && line.contains("scan_cancelled")).findFirst().orElseThrow();
+            assertTrue(terminal, terminal.contains("\"outcome\":\"cancelled\""));
+            assertFalse(terminal.contains("private account detail"));
+            source.scanFailure = null;
+            hook.requestScan();
+            pump();
+            assertEquals(1400, ledger().watermark(100));
+            assertEquals(List.of(1000L, 1000L), source.since);
+        } finally {
+            com.douai.module.diagnostics.DouAiLog.awaitIdle(3000);
+            com.douai.module.diagnostics.DouAiLog.setFrameworkSink(null);
+        }
+    }
+
+    @Test public void scanFailureClassificationPreservesWrappedCancellationTimeoutAndActualFailure() {
+        assertEquals(com.douai.module.diagnostics.DouAiLog.Outcome.CANCELLED,
+                CommentReplyHook.scanFailureOutcome(new java.lang.reflect.InvocationTargetException(
+                        new java.util.concurrent.CancellationException())));
+        assertEquals(com.douai.module.diagnostics.DouAiLog.Outcome.CANCELLED,
+                CommentReplyHook.scanFailureOutcome(new InterruptedException()));
+        assertEquals(com.douai.module.diagnostics.DouAiLog.Outcome.TIMED_OUT,
+                CommentReplyHook.scanFailureOutcome(new java.util.concurrent.ExecutionException(new java.util.concurrent.TimeoutException())));
+        assertEquals(com.douai.module.diagnostics.DouAiLog.Outcome.FAILED,
+                CommentReplyHook.scanFailureOutcome(new NativeCommentReplyInbox.ScanFailure(NativeCommentReplyInbox.FailureReason.RESPONSE_MODEL)));
+    }
+
+    @Test public void queuedReplyRecordsItsActualLiveGenerationAndSendGuardSnapshotsWithoutChangingReadTiming() throws Exception {
+        com.douai.module.diagnostics.DouAiLog.awaitIdle(3000);
+        boolean previousDebug = DebugLog.isEnabled();
+        DebugLog.setEnabled(true);
+        List<String> records = java.util.Collections.synchronizedList(new ArrayList<>());
+        com.douai.module.diagnostics.DouAiLog.setFrameworkSink((priority, json) -> records.add(json));
+        try {
+            String admissionRevision = new LocalOptions(values).diagnosticRevision();
+            com.douai.module.diagnostics.DouAiLog.configRevision(admissionRevision);
+            open();
+            source.events.put(100L, List.of(event("live-config", "root", "200", 1001)));
+            hook.requestScan();
+            pump(); // The delayed task exists, but has not captured generation settings yet.
+            assertTrue(generator.ids.isEmpty());
+            configure("download_enabled", true); // Unrelated settings do not invalidate this task.
+            String generationRevision = new LocalOptions(values).diagnosticRevision();
+            com.douai.module.diagnostics.DouAiLog.configRevision(generationRevision);
+            Map<String, Object> sendValues = new HashMap<>(values);
+            sendValues.put("download_name_template", "guard-fixture-name");
+            String sendRevision = new LocalOptions(sendValues).diagnosticRevision();
+            generator.duringGenerate = () -> {
+                configure("download_name_template", "guard-fixture-name");
+                com.douai.module.diagnostics.DouAiLog.configRevision(sendRevision);
+            };
+            processReplies();
+            assertEquals(List.of("live-config"), generator.ids);
+            assertEquals(List.of("live-config"), sender.sent);
+            assertEquals("sent", history().get(0).status);
+            assertNotEquals(admissionRevision, generationRevision);
+            assertNotEquals(generationRevision, sendRevision);
+            assertTrue(com.douai.module.diagnostics.DouAiLog.awaitIdle(3000));
+            String started = records.stream().filter(line -> line.contains("\"feature_id\":\"auto_comment_reply\"")
+                    && line.contains("\"event\":\"operation_started\"")).findFirst().orElseThrow();
+            String trace = new org.json.JSONObject(started).getString("trace_id");
+            Map<String, String> selected = new HashMap<>();
+            for (String line : records) {
+                org.json.JSONObject logged = new org.json.JSONObject(line);
+                if (!trace.equals(logged.optString("trace_id"))) continue;
+                assertEquals(admissionRevision, logged.getString("config_revision"));
+                if ("configuration_selected".equals(logged.optString("event"))) {
+                    selected.put(logged.getString("config_selection_policy"), logged.getString("effective_config_revision"));
+                }
+            }
+            assertEquals(generationRevision, selected.get("live_at_generation"));
+            assertEquals(sendRevision, selected.get("live_send_guard"));
+        } finally {
+            com.douai.module.diagnostics.DouAiLog.awaitIdle(3000);
+            com.douai.module.diagnostics.DouAiLog.setFrameworkSink(null);
+            DebugLog.setEnabled(previousDebug);
+        }
     }
 
     @Test public void aScanFailureLogsASafeReasonWithoutHostPayload() {

@@ -13,6 +13,7 @@ import android.view.View;
 import android.view.ViewTreeObserver;
 
 import com.douai.module.analytics.LocalAnalytics;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostScanReport;
 
 import java.lang.ref.WeakReference;
@@ -121,7 +122,10 @@ public final class LocalAnalyticsHook implements Application.ActivityLifecycleCa
     private void selected(Object holder, Field root, Method aweme) {
         try {
             LocalAnalytics analytics = LocalAnalytics.get(application);
-            if (!analytics.isEnabled()) return;
+            if (!analytics.isEnabled()) {
+                DouAiLog.event("local_analytics", "decision", "recording_disabled", "visit_started=false");
+                return;
+            }
             long recordingGeneration = analytics.generation();
             // Snapshot the ID at callback time, before a posted callback can observe a recycled holder.
             Object work = aweme.invoke(holder);
@@ -161,6 +165,8 @@ public final class LocalAnalyticsHook implements Application.ActivityLifecycleCa
                     resumedSegment ? "unknown" : LocalAnalytics.consumeAdvanceSource());
             if (token == null) return;
             currentVisit = new Visit(analytics, recordingGeneration, token, expectedId, holder, rootField, aweme);
+            currentVisit.operation.stage("visible_visit", "work_ref=" + DouAiLog.reference(expectedId)
+                    + ";recording_generation=" + recordingGeneration + ";visibility_validated=true");
             retainCandidate(currentVisit, root);
             main.postDelayed(heartbeat, HEARTBEAT_MILLIS);
         } catch (ReflectiveOperationException | RuntimeException ignored) {
@@ -273,6 +279,9 @@ public final class LocalAnalyticsHook implements Application.ActivityLifecycleCa
         if (visit == null) return;
         if (includeLastInterval && stillVisible(visit)) addObservedInterval(visit);
         visit.store.finishVisit(visit.token, visit.visibleMillis, reason);
+        visit.operation.finish(DouAiLog.Outcome.UNCONFIRMED, "visit_submitted_to_local_store",
+                "end_reason=" + reason + ";visible_ms=" + visit.visibleMillis
+                        + ";store_call_returned=true;durable_storage_readback=false;playback_completion=not_inferred");
     }
 
     private static final class Visit {
@@ -282,6 +291,7 @@ public final class LocalAnalyticsHook implements Application.ActivityLifecycleCa
         final WeakReference<Object> holder;
         final Field root;
         final Method aweme;
+        final DouAiLog.Operation operation = DouAiLog.begin("local_analytics", "visible_selection");
         long lastObserved = SystemClock.elapsedRealtime();
         long visibleMillis;
 

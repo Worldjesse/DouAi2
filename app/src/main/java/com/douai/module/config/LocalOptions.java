@@ -33,9 +33,22 @@ public final class LocalOptions {
     }
 
     private final Map<String, ?> values;
+    private volatile String diagnosticRevision;
 
     public LocalOptions(Map<String, ?> values) {
         this.values = Collections.unmodifiableMap(new HashMap<>(values));
+    }
+
+    /** Revision of this immutable snapshot, independent of later preference publications. */
+    public String diagnosticRevision() {
+        String cached = diagnosticRevision;
+        if (cached != null) return cached;
+        synchronized (this) {
+            if (diagnosticRevision == null) {
+                diagnosticRevision = com.douai.module.diagnostics.DouAiLog.configurationRevision(values);
+            }
+            return diagnosticRevision;
+        }
     }
 
     public static LocalOptions readFrom(SharedPreferences preferences) {

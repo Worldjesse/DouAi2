@@ -29,6 +29,7 @@ import com.douai.module.config.ComponentHideSettings;
 import com.douai.module.config.CustomViewLocator;
 import com.douai.module.config.HostSettingsStore;
 import com.douai.module.config.LocalOptions;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.SettingsRepository;
 import com.douai.module.scan.HostScanReport;
 
@@ -920,28 +921,40 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     }
 
     private void dispatch(String action, Object holder, View root) {
-        onMain(() -> {
-            if (closed || holder == null || holder != selectedHolder.get() || root != activeRoot()) return;
+        DouAiLog.Operation operation = DouAiLog.begin("gesture", "action_" + action);
+        onMain(operation.wrap(() -> {
+            if (closed || holder == null || holder != selectedHolder.get() || root != activeRoot()) {
+                operation.finish(DouAiLog.Outcome.SKIPPED, "selection_or_lifecycle_changed", "action=" + action);
+                return;
+            }
             try {
                 Object aweme = awemeAccessor.invoke(holder);
-                if (aweme == null) { toast(root.getContext(), "当前视频数据不可用"); return; }
+                if (aweme == null) {
+                    operation.finish(DouAiLog.Outcome.SKIPPED, "work_unavailable", "action=" + action);
+                    toast(root.getContext(), "当前视频数据不可用"); return;
+                }
+                operation.stage("dispatch", "action=" + action + ";work_ref=" + DouAiLog.reference(readAid(aweme)));
                 switch (action) {
                     case "menu": showMenu(root, holder); break;
                     case "copy_text": copyText(root.getContext(), aweme); break;
                     case "save_media": saveMedia(root, holder, aweme); break;
                     case "open_comments": openComments(root, readAid(aweme)); break;
                     case "toggle_components": componentVisibility.accept(!componentsShown.getAsBoolean()); break;
-                    case "speed": applyConfiguredSpeed(root, holder); break;
+                    case "speed": applyConfiguredSpeed(root, holder, operation); break;
                     case "view_finder": showViewFinder(root, holder); break;
                     default: break;
                 }
+                if (!"speed".equals(action)) operation.finish(DouAiLog.Outcome.UNCONFIRMED, "action_dispatched",
+                        "action=" + action + ";result_evidence=separate_action_events;completion_not_inferred=true");
             } catch (ReflectiveOperationException | RuntimeException failure) {
+                operation.error("dispatch", failure);
+                operation.finish(DouAiLog.Outcome.FAILED, "action_threw", "action=" + action);
                 if ("view_finder".equals(action)) dismissViewFinder();
                 if ("save_media".equals(action)) dismissDialog();
                 safeLog("Feed tool action failed: " + failure.getMessage());
                 toast(root.getContext(), "工具操作失败");
             }
-        });
+        }));
     }
 
     private void showMenu(View root, Object holder) {
@@ -1168,18 +1181,24 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         }
     }
 
-    private void applyConfiguredSpeed(View root, Object holder) throws ReflectiveOperationException {
+    private void applyConfiguredSpeed(View root, Object holder, DouAiLog.Operation operation) throws ReflectiveOperationException {
         if (playerAccessor == null || speedHolderAccessor == null || setSpeed == null || getSpeed == null) {
+            operation.finish(DouAiLog.Outcome.SKIPPED, "speed_contract_unavailable", "setter_invoked=false");
             toast(root.getContext(), "倍速入口未适配"); return;
         }
         Object panel = panel(holder);
         if (panel == null || !playerAccessor.getDeclaringClass().isInstance(panel)
                 || speedHolderAccessor.invoke(panel) != holder) {
+            operation.finish(DouAiLog.Outcome.SKIPPED, "player_panel_unavailable", "setter_invoked=false");
             toast(root.getContext(), "当前播放器不可用"); return;
         }
         Object player = playerAccessor.invoke(panel);
-        if (player == null) { toast(root.getContext(), "当前播放器不可用"); return; }
+        if (player == null) {
+            operation.finish(DouAiLog.Outcome.SKIPPED, "player_unavailable", "setter_invoked=false");
+            toast(root.getContext(), "当前播放器不可用"); return;
+        }
         if (!setSpeed.getDeclaringClass().isInstance(player) || !getSpeed.getDeclaringClass().isInstance(player)) {
+            operation.finish(DouAiLog.Outcome.SKIPPED, "player_type_mismatch", "setter_invoked=false");
             safeLog("Gesture speed rejected player type=" + player.getClass().getName());
             toast(root.getContext(), "当前播放器未适配"); return;
         }
@@ -1187,7 +1206,10 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         float currentSpeed = readCurrentSpeed(player);
         if (closed || holder != selectedHolder.get() || root != activeRoot()
                 || panel(holder) != panel || speedHolderAccessor.invoke(panel) != holder
-                || playerAccessor.invoke(panel) != player) return;
+                || playerAccessor.invoke(panel) != player) {
+            operation.finish(DouAiLog.Outcome.CANCELLED, "selection_changed", "setter_invoked=false");
+            return;
+        }
 
         Object aweme = awemeAccessor.invoke(holder);
         String aid = readAid(aweme);
@@ -1204,6 +1226,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
             originalSpeed = currentSpeed;
         }
         cancelSpeedReadback();
+        speedOperation = operation;
         LocalOptions current = options == null ? new LocalOptions(Collections.emptyMap()) : options;
         boolean enable = !manualSpeedEnabled;
         float requested = enable ? PlaybackBehaviorHooks.playbackSpeed(current) : 1f;
@@ -1218,10 +1241,14 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
             manualSpeedHolder = new WeakReference<>(holder);
             manualSpeedAid = aid;
             safeLog("Gesture speed submitted=" + requested + "; player=" + player.getClass().getName());
-            scheduleSpeedReadback(holder, root, player, requested, speedRevision, 0);
+            operation.stage("speed_submitted", "requested=" + requested + ";readback_pending=true");
+            scheduleSpeedReadback(holder, root, player, requested, speedRevision, 0, operation);
             toast(root.getContext(), enable ? "已开启倍速：" + speedLabel(requested) + "x"
                     : "已关闭倍速，恢复 1x");
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            operation.error("speed_submit", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "setter_failed", "restoration_attempted=true");
+            speedOperation = null;
             restoreOwnedSpeed();
             safeLog("Gesture speed failed: " + failure.getMessage());
             toast(root.getContext(), "倍速设置失败");
@@ -1257,44 +1284,73 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
         return new java.math.BigDecimal(Float.toString(value)).stripTrailingZeros().toPlainString();
     }
 
+    private DouAiLog.Operation speedOperation;
+
     private void scheduleSpeedReadback(Object holder, View root, Object player,
-                                       float requested, long revision, int attempt) {
+                                       float requested, long revision, int attempt, DouAiLog.Operation operation) {
         WeakReference<Object> expectedHolder = new WeakReference<>(holder);
         WeakReference<View> expectedRoot = new WeakReference<>(root);
         WeakReference<Object> expectedPlayer = new WeakReference<>(player);
-        speedReadback = () -> {
+        speedReadback = operation.wrap(() -> {
+            operation.attempt(attempt + 1);
             speedReadback = null;
             Object currentHolder = expectedHolder.get();
             View currentRoot = expectedRoot.get();
             Object currentPlayer = expectedPlayer.get();
             if (closed || revision != speedRevision || currentHolder == null || currentRoot == null
                     || currentPlayer == null || selectedHolder.get() != currentHolder
-                    || activeRoot() != currentRoot || ownedSpeedPlayer.get() != currentPlayer) return;
+                    || activeRoot() != currentRoot || ownedSpeedPlayer.get() != currentPlayer) {
+                operation.finish(DouAiLog.Outcome.CANCELLED, "readback_target_changed", "requested=" + requested);
+                if (speedOperation == operation) speedOperation = null;
+                return;
+            }
             try {
                 Object currentPanel = panel(currentHolder);
                 if (currentPanel == null || speedHolderAccessor.invoke(currentPanel) != currentHolder
-                        || playerAccessor.invoke(currentPanel) != currentPlayer) return;
+                        || playerAccessor.invoke(currentPanel) != currentPlayer) {
+                    operation.finish(DouAiLog.Outcome.CANCELLED, "readback_panel_changed", "requested=" + requested);
+                    if (speedOperation == operation) speedOperation = null;
+                    return;
+                }
                 float reported = ((Number) getSpeed.invoke(currentPlayer)).floatValue();
-                if (revision != speedRevision || ownedSpeedPlayer.get() != currentPlayer) return;
+                if (revision != speedRevision || ownedSpeedPlayer.get() != currentPlayer) {
+                    operation.finish(DouAiLog.Outcome.CANCELLED, "readback_revision_changed", "requested=" + requested);
+                    if (speedOperation == operation) speedOperation = null;
+                    return;
+                }
                 if (sameSpeed(reported, requested)) {
                     speedReadbackConfirmed = true;
+                    operation.finish(DouAiLog.Outcome.SUCCESS, "speed_getter_readback",
+                            "requested=" + requested + ";reported=" + reported + ";result_scope=current_player;later_playback=unobserved");
+                    if (speedOperation == operation) speedOperation = null;
                     safeLog("Gesture speed readback confirmed: requested=" + requested + "; reported=" + reported);
                     return;
                 }
                 if (attempt == 2) {
+                    operation.finish(DouAiLog.Outcome.UNCONFIRMED, "readback_mismatch",
+                            "requested=" + requested + ";reported=" + reported + ";attempts=3");
+                    if (speedOperation == operation) speedOperation = null;
                     safeLog("Gesture speed readback unconfirmed: requested=" + requested + "; reported="
                             + reported + "; setter completed, playback may update asynchronously");
                 }
             } catch (ReflectiveOperationException | RuntimeException failure) {
+                operation.error("speed_readback", failure);
+                if (attempt == 2) {
+                    operation.finish(DouAiLog.Outcome.UNCONFIRMED, "readback_unavailable", "setter_returned=true;attempts=3");
+                    if (speedOperation == operation) speedOperation = null;
+                }
                 if (attempt == 2) safeLog("Gesture speed readback unavailable: " + failure.getMessage());
             }
             if (attempt < 2 && revision == speedRevision) scheduleSpeedReadback(currentHolder, currentRoot, currentPlayer,
-                    requested, revision, attempt + 1);
-        };
+                    requested, revision, attempt + 1, operation);
+        });
         main.postDelayed(speedReadback, attempt == 0 ? 150L : attempt == 1 ? 350L : 500L);
     }
 
     private void cancelSpeedReadback() {
+        DouAiLog.Operation operation = speedOperation;
+        speedOperation = null;
+        if (operation != null) operation.finish(DouAiLog.Outcome.CANCELLED, "speed_readback_replaced_or_closed", "pending_callback_removed=true");
         speedRevision++;
         if (speedReadback != null) main.removeCallbacks(speedReadback);
         speedReadback = null;
@@ -1437,6 +1493,8 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     }
 
     private void logGestureGate(String kind, int callbacks, View root, String reason) {
+        DouAiLog.event("gesture", "decision", reason, "gesture_kind=" + kind
+                + ";holder=" + (selectedHolder.get() != null) + ";foreground=" + (resumed.get() != null));
         if (callbacks <= 3) safeLog("Feed gesture " + kind + " skipped: reason=" + reason
                 + ", holder=" + (selectedHolder.get() != null) + ", foreground=" + (resumed.get() != null)
                 + ", touchMatches=" + (root == null ? 0 : touchCount(root)));
@@ -1447,6 +1505,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     }
 
     private void logGestureAction(String kind, String action, int region) {
+        DouAiLog.event("gesture", "gesture_action", "assigned_action", "kind=" + kind + ";action=" + action + ";region=" + region);
         if (gestureActions <= 20) safeLog("Feed gesture " + kind + " handled: action=" + action
                 + ", region=" + regionLabel(region) + ", handled=" + gestureActions);
     }

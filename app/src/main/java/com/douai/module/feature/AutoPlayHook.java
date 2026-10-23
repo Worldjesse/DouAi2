@@ -13,6 +13,7 @@ import android.view.ViewConfiguration;
 
 import com.douai.module.config.ExtendedSettings;
 import com.douai.module.config.LocalOptions;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.scan.HostScanReport;
 
 import io.github.libxposed.api.XposedInterface;
@@ -321,14 +322,20 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
     private void complete(String aid, long token) {
         ExtendedSettings current = settings;
         View root = activeRoot();
-        if (closed || !group.isActive() || current == null || !current.autoPlay) return;
+        if (closed || !group.isActive() || current == null || !current.autoPlay) {
+            DouAiLog.event("auto_play", "decision", "disabled_or_not_ready", "advance_invoked=false");
+            return;
+        }
         if (generation != token) { skipped("stale_session", "已忽略过期播放完成事件"); return; }
         if (paused || touching) { skipped("paused_or_touching", "暂停或手动操作中，暂不翻页"); return; }
-        if (attempted) return;
+        if (attempted) { skipped("already_attempted", "已处理当前播放完成事件"); return; }
         if (root == null || !root.hasWindowFocus()) { skipped("not_foreground", "当前视频不在前台，暂不翻页"); return; }
         if (aid == null || aid.isEmpty() || !aid.equals(selectedAid)) {
             skipped("different_video", "完成事件不属于当前视频，暂不翻页"); return;
         }
+        DouAiLog.Operation operation = DouAiLog.begin("auto_play", "playback_complete");
+        boolean terminal = false;
+        operation.stage("validate_current_selection", "work_ref=" + DouAiLog.reference(aid) + ";generation=" + token);
         try {
             Object holder = selectedHolder.get();
             Object panel = panel();
@@ -347,7 +354,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
                 }
             }
             Object pagerContext = pagerContextField.get(panel);
-            if (pagerContext == null) return;
+            if (pagerContext == null) { skipped("pager_context_unavailable", "翻页上下文不可用"); return; }
             attempted = true;
             // UP goes to the next item; DOWN goes to the previous item. The pager checks boundaries.
             boolean followDirection = local == null || local.enabled("smart_swipe", true);
@@ -355,6 +362,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
             // The host may deliver the next selection synchronously during invoke().
             com.douai.module.analytics.LocalAnalytics.markAutomaticAdvance();
             Object moved;
+            operation.stage("native_advance", "direction=" + targetDirection + ";request_only=true");
             try {
                 moved = (targetDirection > 0 ? next : previous).invoke(pagerContext, "DouAiAutoSlide", true);
             } catch (ReflectiveOperationException | RuntimeException failure) {
@@ -366,9 +374,25 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
             } else com.douai.module.analytics.LocalAnalytics.cancelAutomaticAdvance();
             diagnostic = Boolean.TRUE.equals(moved) ? (targetDirection > 0 ? "已请求向上翻页" : "已请求向下翻页")
                     : "当前列表边界未能翻页";
+            boolean selectionChanged = selectedAid != null && !aid.equals(selectedAid);
+            terminal = true;
+            operation.finish(!Boolean.TRUE.equals(moved) ? DouAiLog.Outcome.SKIPPED : selectionChanged
+                            ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.UNCONFIRMED,
+                    !Boolean.TRUE.equals(moved) ? "pager_rejected_or_boundary" : selectionChanged
+                            ? "selection_callback_changed" : "advance_accepted_selection_unobserved",
+                    "native_accepted=" + Boolean.TRUE.equals(moved) + ";selection_changed=" + selectionChanged
+                            + ";result_scope=selected_card;playback_started=unobserved");
             safeLog("DouAi auto-slide advance direction=" + (targetDirection > 0 ? "UP" : "DOWN")
                     + "; moved=" + moved);
-        } catch (ReflectiveOperationException | RuntimeException failure) { fail(failure); }
+        } catch (ReflectiveOperationException | RuntimeException failure) {
+            terminal = true;
+            operation.error("native_advance", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "advance_failed", "rollback_requested=true");
+            fail(failure);
+        } finally {
+            // Earlier validation returns are terminal skips, not an unfinished request.
+            if (!terminal) operation.finish(DouAiLog.Outcome.SKIPPED, "validation_gate", "reason=" + lastSkip + ";advance_invoked=false");
+        }
     }
 
     private Object panel() throws IllegalAccessException {
@@ -426,6 +450,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
     }
 
     private void skipped(String reason, String message) {
+        DouAiLog.event("auto_play", "decision", reason, "advance_invoked=false;generation=" + generation);
         diagnostic = message;
         if (!reason.equals(lastSkip)) {
             lastSkip = reason;

@@ -1,5 +1,7 @@
 package com.douai.module.ui;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.app.Activity;
 import android.app.Application;
 import android.app.Dialog;
@@ -25,7 +27,7 @@ public final class AiConversationDialog {
         HostNativeChatViews nativeViews;
         try { nativeViews = HostNativeChatViews.create(activity); }
         catch (ReflectiveOperationException | RuntimeException | LinkageError failure) {
-            android.util.Log.w("DouAi.AiContact", "Native chat views unavailable", failure);
+            DouAiLog.legacy(5, "DouAi.AiContact", "Native chat views unavailable", failure);
             Toast.makeText(activity, "当前抖音原生聊天界面未适配，请查看模块适配信息", Toast.LENGTH_LONG).show();
             return null;
         }
@@ -42,7 +44,7 @@ public final class AiConversationDialog {
             return dialog;
         } catch (RuntimeException | LinkageError failure) {
             if (dialog != null) dialog.dismiss();
-            android.util.Log.w("DouAi.AiContact", "Native chat could not open", failure);
+            DouAiLog.legacy(5, "DouAi.AiContact", "Native chat could not open", failure);
             Toast.makeText(activity, "原生聊天界面暂时无法打开，请重新进入消息页", Toast.LENGTH_LONG).show();
             return null;
         }

@@ -1,5 +1,7 @@
 package com.douai.module.feature;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import com.douai.module.scan.HostScanReport;
 
 import java.lang.reflect.Constructor;
@@ -551,7 +553,7 @@ final class NativeCommentThreadLookup implements NativeCommentReplyInbox.ThreadL
     private static boolean emptyReference(Object value) { return value == null || value instanceof String && !nonzero((String) value); }
     private static boolean same(String left, String right) { return (left == null ? "" : left).equals(right == null ? "" : right); }
     private static IllegalStateException contract() { return new IllegalStateException("thread_lookup_contract"); }
-    private void safeLog(String message) { try { if (log != null) log.accept(message); } catch (RuntimeException ignored) { } }
+    private void safeLog(String message) { try { DouAiLog.event("comment_reply_thread_lookup", "lookup_observation", "host_lookup", message); if (log != null) log.accept(message); } catch (RuntimeException ignored) { } }
 
     @Override public void close() {
         closed = true;

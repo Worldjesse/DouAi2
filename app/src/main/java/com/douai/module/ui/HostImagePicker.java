@@ -1,5 +1,7 @@
 package com.douai.module.ui;
 
+import com.douai.module.diagnostics.DouAiLog;
+
 import android.app.Activity;
 import android.net.Uri;
 
@@ -16,6 +18,8 @@ final class HostImagePicker implements AutoCloseable {
     private Object launcher;
     private Class<?> launcherType;
     private boolean closed;
+    private boolean resultReceived;
+    private final DouAiLog.Operation trace = DouAiLog.begin("media_picker", "HostImagePicker");
 
     private HostImagePicker(Activity activity) { this.activity = activity; }
 
@@ -43,9 +47,13 @@ final class HostImagePicker implements AutoCloseable {
                     return "DouAiImageSelection";
                 }
                 if (!"onActivityResult".equals(method.getName()) || picker.closed) return null;
+                picker.resultReceived = true;
+                picker.trace.stage("selection_callback", "callback_received=true");
                 picker.close();
                 Object value = arguments == null || arguments.length == 0 ? null : arguments[0];
-                selected.accept(value instanceof Uri ? (Uri) value : null);
+                picker.trace.finish(value instanceof Uri ? DouAiLog.Outcome.SUCCESS : DouAiLog.Outcome.CANCELLED,
+                        value instanceof Uri ? "selection_returned" : "user_cancelled", "uri_present=" + (value instanceof Uri) + ";file_content_verified=false");
+                picker.trace.wrapConsumer(selected).accept(value instanceof Uri ? (Uri) value : null);
                 return null;
             });
             picker.launcher = registryType.getMethod("register", String.class, contract, callback)
@@ -54,6 +62,8 @@ final class HostImagePicker implements AutoCloseable {
             picker.launcherType.getMethod("launch", Object.class).invoke(picker.launcher, (Object) mimeTypes.clone());
             return picker;
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            picker.resultReceived = true;
+            picker.trace.finish(DouAiLog.Outcome.FAILED, "picker_unavailable", "selection_not_started");
             picker.close();
             return null;
         }
@@ -64,6 +74,7 @@ final class HostImagePicker implements AutoCloseable {
     @Override public void close() {
         if (closed) return;
         closed = true;
+        if (!resultReceived) trace.finish(DouAiLog.Outcome.CANCELLED, "picker_closed", "no_selection_consumed");
         if (PENDING.get(activity) == this) PENDING.remove(activity);
         if (launcher != null) {
             try { launcherType.getMethod("unregister").invoke(launcher); }

@@ -3,6 +3,7 @@ package com.douai.module.feature;
 import android.content.Context;
 
 import com.douai.module.config.LocalOptions;
+import com.douai.module.diagnostics.DouAiLog;
 
 import java.io.File;
 import java.util.concurrent.CancellationException;
@@ -53,16 +54,23 @@ final class SpeechPreparation {
 
     static Audio prepare(Context context, String text, LocalOptions options, long maximumDuration,
                          BooleanSupplier valid, Synthesizer synthesizer, Encoder encoder) throws Exception {
-        if (!valid.getAsBoolean()) throw new CancellationException("语音任务已取消");
+        DouAiLog.Operation operation = DouAiLog.begin("speech_preparation", encoder == null ? "comment_audio" : "im_audio");
+        if (!valid.getAsBoolean()) {
+            operation.finish(DouAiLog.Outcome.CANCELLED, "owner_invalid", "synthesis_started=false");
+            throw new CancellationException("语音任务已取消");
+        }
         CountDownLatch ready = new CountDownLatch(1);
-        Completion completion = new Completion(ready);
+        Completion completion = new Completion(ready, operation);
         AutoCloseable request = null;
         DirectMessageSpeechHook.AudioFile encoded = null;
         boolean delivered = false;
         String stage = "synthesis";
         long sourceDuration = 0;
         try {
-            request = synthesizer.synthesize(context, text, options, completion::complete);
+            operation.stage("synthesis", "maximum_duration_ms=" + maximumDuration + "; text_chars=" + (text == null ? 0 : text.length()));
+            AutoCloseable[] started = new AutoCloseable[1];
+            operation.wrap(() -> started[0] = synthesizer.synthesize(context, text, options, completion::complete)).run();
+            request = started[0];
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(70);
             while (!ready.await(100, TimeUnit.MILLISECONDS)) {
                 if (!valid.getAsBoolean() || Thread.currentThread().isInterrupted()) throw new CancellationException("语音任务已取消");
@@ -74,22 +82,34 @@ final class SpeechPreparation {
             sourceDuration = audio.durationMillis;
             if (sourceDuration <= 0) throw new IllegalArgumentException("生成的语音文件无效");
             if (audio.durationMillis > maximumDuration) throw new IllegalArgumentException("语音超过当前发送入口的时长限制");
+            operation.stage("source_validated", "source_duration_ms=" + sourceDuration + "; maximum_duration_ms=" + maximumDuration);
             if (encoder == null) {
                 if (!valid.getAsBoolean()) throw new CancellationException("语音任务已取消");
                 completion.transfer();
+                operation.finish(DouAiLog.Outcome.SUCCESS, "comment_audio_prepared", "duration_ms=" + audio.durationMillis
+                        + "; output_ref=" + DouAiLog.reference(audio.file.getAbsolutePath()) + "; sent=false");
                 return new Audio(audio.file, audio.durationMillis);
             }
             stage = "encoding";
+            operation.stage("encoding", "source_duration_ms=" + sourceDuration);
             encoded = encoder.encode(audio.file, context);
             if (!valid.getAsBoolean()) throw new CancellationException("语音任务已取消");
             if (encoded.durationMillis <= 0) throw new IllegalArgumentException("生成的语音文件无效");
             if (encoded.durationMillis > maximumDuration) throw new IllegalArgumentException("语音超过当前发送入口的时长限制");
             delivered = true;
+            operation.finish(DouAiLog.Outcome.SUCCESS, "im_audio_prepared", "encoded_duration_ms=" + encoded.durationMillis
+                    + "; output_ref=" + DouAiLog.reference(encoded.file.getAbsolutePath()) + "; sent=false");
             return new Audio(encoded.file, encoded.durationMillis);
         } catch (CancellationException cancelled) {
+            operation.finish(DouAiLog.Outcome.CANCELLED, "owner_cancelled", "stage=" + stage + "; sent=false");
             throw cancelled;
         } catch (Exception failure) {
-            throw new Failure(stage, sourceDuration, encoded == null ? 0 : encoded.durationMillis, failure);
+            Failure wrapped = new Failure(stage, sourceDuration, encoded == null ? 0 : encoded.durationMillis, failure);
+            operation.error(stage, failure);
+            operation.finish("timeout".equals(wrapped.reason) || "encoding_timeout".equals(wrapped.reason) || wrapped.providerCode == 1001
+                            ? DouAiLog.Outcome.TIMED_OUT : DouAiLog.Outcome.FAILED,
+                    wrapped.reason, wrapped.diagnostic() + "; sent=false");
+            throw wrapped;
         } finally {
             // A callback can arrive after cancellation; close the result owner before the request.
             completion.close();
@@ -163,16 +183,18 @@ final class SpeechPreparation {
 
     private static final class Completion {
         private final CountDownLatch ready;
+        private final DouAiLog.Operation operation;
         private boolean closed;
         private boolean completed;
         private boolean transferred;
         private LocalSpeechSynthesis.Result result;
         private String failure;
 
-        Completion(CountDownLatch ready) { this.ready = ready; }
+        Completion(CountDownLatch ready, DouAiLog.Operation operation) { this.ready = ready; this.operation = operation; }
 
         synchronized void complete(LocalSpeechSynthesis.Result audio, String error) {
             if (closed || completed) {
+                operation.stage("late_or_duplicate_synthesis_callback", "ignored=true; owner_closed=" + closed);
                 if (audio != null && (result == null || !audio.file.equals(result.file))) audio.file.delete();
                 return;
             }

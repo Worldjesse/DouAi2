@@ -14,6 +14,7 @@ import android.view.View;
 import android.widget.EditText;
 import android.widget.Toast;
 
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.scan.HostScanReport;
 
@@ -47,6 +48,7 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
     private final List<XposedInterface.HookHandle> handles = new ArrayList<>();
     private final Map<Object, WeakReference<Object>> audioLogics = new WeakHashMap<>();
     private final Map<Object, Boolean> recordings = new WeakHashMap<>();
+    private final Map<Object, DouAiLog.Operation> recordingTraces = new WeakHashMap<>();
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final AtomicLong generation = new AtomicLong();
@@ -135,6 +137,7 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
                     hook.audioLogics.entrySet().removeIf(entry -> entry.getValue().get() == logic);
                 }
                 synchronized (hook.recordings) { hook.recordings.remove(logic); }
+                synchronized (hook.recordingTraces) { DouAiLog.Operation trace = hook.recordingTraces.remove(logic); if (trace != null) trace.finish(DouAiLog.Outcome.CANCELLED, "audio_logic_destroyed", "record_complete_observed=false"); }
                 return chain.proceed();
             });
             hook.add(framework, HostTargets.method(report, "dm_speech_upload_enqueue", loader), "Queue", chain -> {
@@ -143,7 +146,10 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
                     Object message = chain.getArg(0);
                     Object raw = hook.localExt.invoke(message);
                     if (raw instanceof Map<?, ?> && evidence.file.getAbsolutePath().equals(((Map<?, ?>) raw).get("localpath"))
-                            && evidence.conversation.equals(hook.messageConversation.invoke(message))) evidence.queued = true;
+                            && evidence.conversation.equals(hook.messageConversation.invoke(message))) {
+                        evidence.queued = true;
+                        evidence.trace.stage("native_audio_queued", "local_path_matches=true;conversation_matches=true;remote_ack=false");
+                    }
                 }
                 return chain.proceed();
             });
@@ -174,29 +180,35 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
         preparing = false;
         long epoch = generation.incrementAndGet();
         Context current = context;
-        if (closed || path.isEmpty() || current == null) return;
+        if (closed || path.isEmpty() || current == null) { DouAiLog.event("dm_voice_replace", "eligibility", "disabled_source_missing_or_context_unavailable", "closed=" + closed + ";source_configured=" + !path.isEmpty() + ";context_ready=" + (current != null)); return; }
         preparing = true;
-        worker.execute(() -> {
+        DouAiLog.Operation prepareTrace = DouAiLog.begin("dm_voice_replace", "configured_file_prepare");
+        prepareTrace.stage("source_copy", "source_ref=" + DouAiLog.reference(path));
+        worker.execute(prepareTrace.wrap(() -> {
             try {
                 File copied = copySource(current, path);
+                prepareTrace.stage("source_copied", "bytes=" + copied.length());
                 AudioFile prepared;
                 try { prepared = encode(copied, current); }
                 finally { java.nio.file.Files.deleteIfExists(copied.toPath()); }
-                if (!closed && generation.get() == epoch) replacement = prepared;
-                else java.nio.file.Files.deleteIfExists(prepared.file.toPath());
+                if (!closed && generation.get() == epoch) { replacement = prepared; prepareTrace.finish(DouAiLog.Outcome.SUCCESS, "replacement_audio_validated", "bytes=" + prepared.file.length() + ";duration_ms=" + prepared.durationMillis + ";scope=local_preparation;message_sent=false"); }
+                else { java.nio.file.Files.deleteIfExists(prepared.file.toPath()); prepareTrace.finish(DouAiLog.Outcome.CANCELLED, "replacement_config_changed", "prepared_file_deleted=true"); }
             } catch (Exception failure) {
+                prepareTrace.error("replacement_preparation", failure);
+                prepareTrace.finish(DouAiLog.Outcome.FAILED, "replacement_preparation_failed", "scope=local_preparation");
                 safeLog("Private voice preparation failed: " + failure.getMessage());
                 toast("私聊语音文件不可用：" + safeMessage(failure));
             } finally { if (generation.get() == epoch) preparing = false; }
-        });
+        }));
     }
 
     private Object send(XposedInterface.Chain chain) throws Throwable {
         LocalOptions current = options;
-        if (closed || !current.enabled("dm_tts") || !Boolean.TRUE.equals(userAction.get())) return chain.proceed();
+        if (closed || !current.enabled("dm_tts") || !Boolean.TRUE.equals(userAction.get())) { DouAiLog.event("dm_tts", "eligibility", "disabled_closed_or_not_user_action", "closed=" + closed + ";enabled=" + current.enabled("dm_tts") + ";from_user=" + Boolean.TRUE.equals(userAction.get())); return chain.proceed(); }
         boolean handled;
         try { handled = startSpeech(chain.getThisObject(), current); }
         catch (ReflectiveOperationException | RuntimeException failure) {
+            DouAiLog.failure("dm_tts", "inspect_input", failure);
             safeLog("Private speech input unchanged: " + failure.getMessage());
             toast("私聊语音入口异常，草稿已保留");
             handled = true;
@@ -230,39 +242,44 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
 
     private boolean startSpeech(Object logic, LocalOptions current, HashVoiceGesture gesture) throws ReflectiveOperationException {
         Object ui = inputApi.invoke(logic);
-        if (ui == null) { toast("私聊输入框不可用，草稿已保留"); return true; }
+        if (ui == null) { DouAiLog.event("dm_tts", "eligibility", "input_ui_missing", "ready=false"); toast("私聊输入框不可用，草稿已保留"); return true; }
         String draft = String.valueOf(content.invoke(ui));
         if (gesture == null ? !canStart(current, Boolean.TRUE.equals(userAction.get()), draft)
-                : !canStartLongPress(current, draft) || !gesture.draft.equals(draft) || !gesture.canSend()) return false;
+                : !canStartLongPress(current, draft) || !gesture.draft.equals(draft) || !gesture.canSend()) { DouAiLog.event("dm_tts", "eligibility", "draft_prefix_gesture_or_setting_rejected", "gesture=" + (gesture != null) + ";draft_chars=" + draft.length()); return false; }
         String text = speechText(draft);
         if (text == null) return false;
-        if (text.isEmpty()) { toast("语音内容为空，草稿已保留"); return true; }
+        if (text.isEmpty()) { DouAiLog.event("dm_tts", "eligibility", "speech_text_empty", "draft_retained=true"); toast("语音内容为空，草稿已保留"); return true; }
         Object session = HostTargets.read(logic, "g");
         String conversation = session == null ? "" : String.valueOf(conversationId.invoke(session));
         EditText editor = (EditText) editText.invoke(ui);
         if (context == null || editor == null || !editor.isShown() || !editor.hasWindowFocus()
-                || conversation.isEmpty()) { toast("当前私聊未就绪，草稿已保留"); return true; }
+                || conversation.isEmpty()) { DouAiLog.event("dm_tts", "eligibility", "editor_or_conversation_not_ready", "context_ready=" + (context != null) + ";editor_present=" + (editor != null) + ";conversation_present=" + !conversation.isEmpty()); toast("当前私聊未就绪，草稿已保留"); return true; }
         Object audioLogic = findAudioLogic(conversation);
-        if (audioLogic == null) { toast("私聊语音入口未就绪，草稿已保留"); return true; }
+        if (audioLogic == null) { DouAiLog.event("dm_tts", "eligibility", "native_audio_logic_unavailable_or_ambiguous", "ready=false"); toast("私聊语音入口未就绪，草稿已保留"); return true; }
         synchronized (this) {
-            if (pending != null) { toast("私聊语音正在生成，草稿已保留"); return true; }
+            if (pending != null) { DouAiLog.event("dm_tts", "eligibility", "speech_busy", "pending=true"); toast("私聊语音正在生成，草稿已保留"); return true; }
             if (conversation.equals(submittedConversation) && draft.equals(submittedDraft)
                     && android.os.SystemClock.elapsedRealtime() - submittedAt < 30_000) {
+                DouAiLog.event("dm_tts", "eligibility", "draft_recently_submitted", "dedupe_window_ms=30000;remote_outcome=unknown");
                 toast("此草稿已交给原生语音发送，请检查消息结果"); return true;
             }
             Pending request = new Pending(logic, ui, editor, audioLogic, conversation, draft, gesture);
             pending = request;
             toast("正在生成私聊语音");
-            request.speech = SpeechSynthesis.synthesize(context, text, current, (result, failure) -> {
-                if (result == null) { finish(request, failure == null ? "私聊语音生成失败" : failure); return; }
+            request.trace.stage("speech_synthesis", "chars=" + text.length() + ";conversation_ref=" + DouAiLog.reference(conversation) + ";draft_retained=true");
+            request.trace.wrap(() -> { request.speech = SpeechSynthesis.synthesize(context, text, current, (result, failure) -> {
+                if (result == null) { request.trace.stage("synthesis_failed", "failure_ref=" + DouAiLog.reference(failure)); finish(request, failure == null ? "私聊语音生成失败" : failure); return; }
                 if (closed) request.cancel();
                 if (!request.adoptSource(result.file)) return;
+                request.trace.stage("speech_source_ready", "bytes=" + result.file.length() + ";duration_ms=" + result.durationMillis);
                 FutureTask<Void> encoding = new FutureTask<>(() -> {
                     try {
                         if (request.cancelled || closed) return null;
-                        AudioFile encoded = encode(result.file, context);
-                        if (request.adoptEncoded(encoded)) main.post(() -> submit(request, encoded));
-                    } catch (Exception error) { finish(request, "私聊语音转码失败：" + safeMessage(error)); }
+                        request.trace.stage("audio_encoding", "source_bytes=" + result.file.length());
+                        AudioFile encoded = request.trace.call(() -> encode(result.file, context));
+                        request.trace.stage("audio_encoded", "bytes=" + encoded.file.length() + ";duration_ms=" + encoded.durationMillis);
+                        if (request.adoptEncoded(encoded)) main.post(request.trace.wrap(() -> submit(request, encoded)));
+                    } catch (Exception error) { request.trace.error("audio_encoding", error); finish(request, "私聊语音转码失败：" + safeMessage(error)); }
                     finally { request.releaseSource(result.file); }
                     return null;
                 });
@@ -270,7 +287,7 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
                 try { worker.execute(encoding); } catch (java.util.concurrent.RejectedExecutionException stopped) {
                     finish(request, "私聊语音已停止，草稿已保留");
                 }
-            });
+            }); }).run();
         }
         return true;
     }
@@ -286,20 +303,23 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
                     || target == null || editor == null || !editor.isShown() || !editor.hasWindowFocus()
                     || !request.draft.equals(String.valueOf(content.invoke(ui)))
                     || !request.conversation.equals(conversationId.invoke(HostTargets.read(logic, "g")))) {
+                request.logOutcome = DouAiLog.Outcome.CANCELLED;
+                request.logReason = "conversation_draft_or_settings_changed";
                 finish(request, "私聊或草稿已变化，已取消语音发送");
                 return;
             }
             Object event = newRecord(audio);
             Object callback = callbackConstructor.newInstance(target, 1);
-            QueueEvidence evidence = new QueueEvidence(audio.file, request.conversation);
+            QueueEvidence evidence = new QueueEvidence(audio.file, request.conversation, request.trace);
             if (!request.beginNative(audio, main)) {
                 finish(request, "私聊语音已停止，草稿已保留");
                 return;
             }
             submitting.set(evidence);
-            try { recordEvent.invoke(callback, recordComplete, event); }
+            try { request.trace.stage("native_record_complete", "audio_bytes=" + audio.file.length() + ";duration_ms=" + audio.durationMillis + ";business_success=false"); recordEvent.invoke(callback, recordComplete, event); }
             finally { submitting.remove(); }
             if (!evidence.queued) {
+                request.trace.stage("native_queue_unobserved", "remote_outcome=unknown;draft_retained=true");
                 request.rejectNative();
                 finish(request, "原生语音未进入发送队列，草稿已保留");
                 return;
@@ -308,9 +328,11 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
                 submittedDraft = request.draft; submittedConversation = request.conversation;
                 submittedAt = android.os.SystemClock.elapsedRealtime();
             }
+            request.queued = true;
+            request.trace.stage("native_queue_observed", "path_and_conversation_match=true;remote_ack=false;draft_retained=true");
             safeLog("Native private audio upload entry reached; original draft retained and remote result remains authoritative");
             finish(request, "已交给原生语音发送，草稿已保留");
-        } catch (Exception failure) { finish(request, "私聊语音提交失败：" + safeMessage(failure)); }
+        } catch (Exception failure) { request.trace.error("native_submission", failure); finish(request, "私聊语音提交失败：" + safeMessage(failure)); }
     }
 
     private Object replaceRecording(XposedInterface.Chain chain) throws Throwable {
@@ -319,32 +341,56 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
         Object state = chain.getArg(0);
         if (owner == null || !AUDIO_LOGIC.equals(owner.getClass().getName())) return chain.proceed();
         if (state == recordStart) {
+            if (options.enabled("dm_voice_replace")) synchronized (recordingTraces) {
+                DouAiLog.Operation old = recordingTraces.put(owner, DouAiLog.begin("dm_voice_replace", "user_record_start"));
+                if (old != null) old.finish(DouAiLog.Outcome.CANCELLED, "recording_restarted", "record_complete_observed=false");
+            }
             synchronized (recordings) { recordings.put(owner, true); }
             return chain.proceed();
         }
         if (state != recordComplete) {
             if (state != null && ("RECORD_CANCEL".equals(state.toString()) || "RRCORD_ERROR".equals(state.toString()))) {
                 synchronized (recordings) { recordings.remove(owner); }
+                synchronized (recordingTraces) { DouAiLog.Operation trace = recordingTraces.remove(owner); if (trace != null) trace.finish(DouAiLog.Outcome.CANCELLED, "native_record_cancel_or_error", "record_complete_observed=false"); }
             }
             return chain.proceed();
         }
         boolean wasRecording;
         synchronized (recordings) { wasRecording = recordings.remove(owner) != null; }
-        if (!wasRecording || !options.enabled("dm_voice_replace") || chain.getArg(1) == null) return chain.proceed();
+        DouAiLog.Operation trace;
+        synchronized (recordingTraces) { trace = recordingTraces.remove(owner); }
+        if (!wasRecording || !options.enabled("dm_voice_replace") || chain.getArg(1) == null) {
+            if (trace != null) trace.finish(DouAiLog.Outcome.SKIPPED, "recording_or_setting_or_payload_unavailable", "was_recording=" + wasRecording);
+            DouAiLog.event("dm_voice_replace", "eligibility", "recording_or_setting_or_payload_unavailable", "was_recording=" + wasRecording);
+            return chain.proceed();
+        }
+        if (trace == null) trace = DouAiLog.begin("dm_voice_replace", "record_complete");
         AudioFile audio = replacement;
         if (audio == null || !audio.file.isFile()) {
+            trace.finish(DouAiLog.Outcome.SKIPPED, "replacement_not_ready", "prepared=" + (audio != null) + ";original_recording_retained=true");
             toast("替换语音未准备好，原录音文件已保留");
             return null;
         }
         Object[] args = chain.getArgs().toArray();
         try { args[1] = newRecord(audio); }
         catch (ReflectiveOperationException | RuntimeException failure) {
+            trace.error("replacement_record_model", failure);
+            trace.finish(DouAiLog.Outcome.FAILED, "replacement_record_model_rejected", "native_invoked=false;original_recording_retained=true");
             safeLog("Private replacement recording rejected: " + failure.getMessage());
             toast("替换语音数据异常，原录音文件已保留");
             return null;
         }
+        trace.stage("record_complete_replaced", "bytes=" + audio.file.length() + ";duration_ms=" + audio.durationMillis + ";business_success=false");
         safeLog("Replacing a user RECORD_COMPLETE event with prepared private audio");
-        return chain.proceed(args);
+        try {
+            Object result = chain.proceed(args);
+            trace.finish(DouAiLog.Outcome.UNCONFIRMED, "native_replacement_submitted", "native_record_complete_returned=true;remote_ack=false");
+            return result;
+        } catch (Throwable failure) {
+            trace.error("native_replacement_submit", failure);
+            trace.finish(DouAiLog.Outcome.UNCONFIRMED, "native_replacement_submit_threw", "remote_side_effect_unknown=true");
+            throw failure;
+        }
     }
 
     private Object newRecord(AudioFile audio) throws ReflectiveOperationException {
@@ -381,6 +427,7 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
     }
 
     private synchronized void finish(Pending request, String message) {
+        request.trace.finish(request.nativeStarted ? DouAiLog.Outcome.UNCONFIRMED : request.cancelled ? DouAiLog.Outcome.CANCELLED : request.logOutcome, request.nativeStarted ? "native_audio_submission_unconfirmed" : request.cancelled ? "speech_cancelled" : request.logReason, "native_boundary_passed=" + request.nativeStarted + ";queue_observed=" + request.queued + ";remote_ack=false;draft_retained=true;notice_ref=" + DouAiLog.reference(message));
         request.cleanup();
         if (pending == request) pending = null;
         if (!request.cancelled && !closed) toast(message);
@@ -575,6 +622,7 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
         handles.clear();
         synchronized (audioLogics) { audioLogics.clear(); }
         synchronized (recordings) { recordings.clear(); }
+        synchronized (recordingTraces) { for (DouAiLog.Operation trace : recordingTraces.values()) trace.finish(DouAiLog.Outcome.CANCELLED, "hook_closed", "record_complete_observed=false"); recordingTraces.clear(); }
     }
 
     static final class AudioFile {
@@ -585,10 +633,15 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
     private static final class QueueEvidence {
         final File file;
         final String conversation;
+        final DouAiLog.Operation trace;
         boolean queued;
-        QueueEvidence(File file, String conversation) { this.file = file; this.conversation = conversation; }
+        QueueEvidence(File file, String conversation, DouAiLog.Operation trace) { this.file = file; this.conversation = conversation; this.trace = trace; }
     }
     static final class Pending {
+        final DouAiLog.Operation trace;
+        volatile boolean nativeStarted, queued;
+        volatile DouAiLog.Outcome logOutcome = DouAiLog.Outcome.FAILED;
+        volatile String logReason = "speech_pipeline_failed";
         final WeakReference<Object> logic;
         final WeakReference<Object> ui;
         final WeakReference<EditText> editor;
@@ -612,6 +665,7 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
             this.editor = new WeakReference<>(editor); this.audioLogic = new WeakReference<>(audioLogic);
             this.conversation = conversation; this.draft = draft;
             this.gesture = gesture;
+            trace = DouAiLog.begin(gesture == null ? "dm_tts" : "hash_long_press_voice_dm", "user_send");
         }
 
         boolean enabled(LocalOptions options) {
@@ -645,6 +699,8 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
             if (stopped || cancelled || encoded != audio) return false;
             encoded = null;
             nativeFile = audio.file;
+            nativeStarted = true;
+            trace.stage("native_audio_begin", "audio_owned=true;retention_ms=" + AUDIO_RETENTION_MILLIS + ";business_success=false");
             // From this point native code may start an asynchronous upload even if invocation throws.
             main.postDelayed(() -> delete(audio.file), AUDIO_RETENTION_MILLIS);
             return true;
@@ -657,6 +713,7 @@ public final class DirectMessageSpeechHook implements AutoCloseable {
 
         void cancel() {
             synchronized (this) { cancelled = true; }
+            trace.finish(nativeStarted ? DouAiLog.Outcome.UNCONFIRMED : DouAiLog.Outcome.CANCELLED, "speech_cancelled", "native_boundary_passed=" + nativeStarted + ";remote_ack=false");
             if (gesture != null) gesture.cancel();
             cleanup();
             SpeechSynthesis active = speech;

@@ -25,6 +25,7 @@ import com.douai.module.config.SettingsStore;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.config.ThirdPartyDownloadSettings;
 import com.douai.module.config.ThirdPartyRequestTemplate;
+import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.feature.ThirdPartyGetClient;
 import com.douai.module.feature.ThirdPartyResponse;
 import com.douai.module.ui.miuix.MiuixDialogBuilder;
@@ -394,12 +395,16 @@ final class ThirdPartyDownloadEditor {
         String[] result = new String[1];
         ExecutorService executor = Executors.newSingleThreadExecutor();
         ThirdPartyGetClient.Request[] pending = new ThirdPartyGetClient.Request[1];
+        DouAiLog.Operation[] activeTrace = new DouAiLog.Operation[1], sampleOwner = new DouAiLog.Operation[1];
         Future<?>[] future = new Future<?>[1];
         boolean[] closed = {false};
         Handler handler = new Handler(Looper.getMainLooper());
         AlertDialog dialog = builder("测试 GET").setView(scroll(form)).setNegativeButton("关闭", null).create();
         Runnable cancel = () -> {
             closed[0] = true;
+            DouAiLog.Operation trace = activeTrace[0];
+            activeTrace[0] = null;
+            if (trace != null) trace.finish(DouAiLog.Outcome.CANCELLED, "test_dialog_closed", "response_preview_not_completed=true");
             if (pending[0] != null) pending[0].cancel();
             pending[0] = null;
             if (future[0] != null) future[0].cancel(true);
@@ -410,49 +415,90 @@ final class ThirdPartyDownloadEditor {
             if (closed[0] || pending[0] != null) return;
             String input = share.getText().toString();
             ThirdPartyDownloadSettings config = requestSettings();
+            DouAiLog.Operation trace = DouAiLog.begin("third_party_get_test", "user_test_get");
+            trace.stage("validate_input", "template_ref=" + DouAiLog.reference(config.getTemplate)
+                    + "; share_chars=" + input.length() + "; network_started=false");
             try {
                 if (config.getTemplate.contains("{url}")) ThirdPartyGetClient.extractShareUrl(input);
             }
-            catch (Exception failure) { share.setError(error(failure)); return; }
+            catch (Exception failure) {
+                trace.error("validate_input", failure);
+                trace.finish(DouAiLog.Outcome.SKIPPED, "invalid_share_link", "network_started=false");
+                share.setError(error(failure)); return;
+            }
             share.setError(null);
             ThirdPartyGetClient.Request request = new ThirdPartyGetClient.Request();
             pending[0] = request;
+            activeTrace[0] = trace;
+            sampleOwner[0] = null;
             result[0] = null;
             fetch.setEnabled(false);
             saveSample.setEnabled(false);
             status.setText("请求中...");
             preview.setText("");
-            future[0] = executor.submit(() -> {
+            trace.stage("request_queued", "business_result=pending");
+            future[0] = executor.submit(trace.wrap(() -> {
                 try {
+                    trace.stage("request_started", "business_result=pending");
                     String body = request.fetch(config, input);
+                    trace.stage("response_received", "chars=" + body.length() + "; parsed=false; sample_ref=" + DouAiLog.reference(body));
                     ThirdPartyResponse parsed = ThirdPartyResponse.parse(body);
+                    trace.stage("response_parsed", "value_fields=" + parsed.values().size() + "; download_fields=" + parsed.downloadFields().size());
                     String display = preview(parsed);
-                    handler.post(() -> {
-                        if (closed[0] || !dialog.isShowing() || pending[0] != request) return;
+                    handler.post(trace.wrap(() -> {
+                        if (closed[0] || !dialog.isShowing() || pending[0] != request) {
+                            trace.finish(DouAiLog.Outcome.CANCELLED, "late_response_owner_changed", "preview_displayed=false"); return;
+                        }
                         pending[0] = null;
+                        activeTrace[0] = null;
+                        sampleOwner[0] = trace;
                         future[0] = null;
                         result[0] = body;
                         preview.setText(display);
                         status.setText("解析成功");
                         fetch.setEnabled(true);
                         saveSample.setEnabled(true);
-                    });
+                        trace.finish(DouAiLog.Outcome.SUCCESS, "parsed_preview_displayed", "value_fields=" + parsed.values().size()
+                                + "; download_fields=" + parsed.downloadFields().size() + "; preview_chars=" + display.length()
+                                + "; sample_saved=false; media_downloaded=false");
+                    }));
                 } catch (Exception failure) {
-                    handler.post(() -> {
-                        if (closed[0] || !dialog.isShowing() || pending[0] != request) return;
+                    trace.error("request_or_parse", failure);
+                    handler.post(trace.wrap(() -> {
+                        if (closed[0] || !dialog.isShowing() || pending[0] != request) {
+                            trace.finish(DouAiLog.Outcome.CANCELLED, "late_failure_owner_changed", "preview_displayed=false"); return;
+                        }
                         pending[0] = null;
+                        activeTrace[0] = null;
                         future[0] = null;
                         status.setText(error(failure));
                         fetch.setEnabled(true);
-                    });
+                        String message = failure.getMessage();
+                        trace.finish(failure instanceof java.util.concurrent.CancellationException ? DouAiLog.Outcome.CANCELLED
+                                        : failure instanceof java.net.SocketTimeoutException || message != null && (message.contains("timed out") || message.contains("超时"))
+                                        ? DouAiLog.Outcome.TIMED_OUT : DouAiLog.Outcome.FAILED,
+                                "request_or_response_parse_failed", "preview_displayed=false; sample_saved=false");
+                    }));
                 }
-            });
+            }));
         });
         saveSample.setOnClickListener(ignored -> {
             if (result[0] == null || closed[0]) return;
-            repository.putString(ThirdPartyDownloadSettings.SAMPLE, result[0]);
-            changed.run();
-            status.setText("响应样本已保存");
+            Runnable save = () -> {
+                DouAiLog.Operation trace = DouAiLog.begin("third_party_response_sample", "save_test_response");
+                try {
+                    repository.putString(ThirdPartyDownloadSettings.SAMPLE, result[0]);
+                    trace.stage("settings_save_returned", "sample_ref=" + DouAiLog.reference(result[0]) + "; disk_commit=unconfirmed");
+                    changed.run();
+                    status.setText("响应样本已保存");
+                    trace.finish(DouAiLog.Outcome.UNCONFIRMED, "sample_settings_write_returned", "readback_not_performed=true; disk_commit=unconfirmed");
+                } catch (RuntimeException failure) {
+                    trace.error("sample_save_or_refresh", failure);
+                    trace.finish(DouAiLog.Outcome.FAILED, "sample_save_or_refresh_failed", "disk_commit=unconfirmed");
+                    throw failure;
+                }
+            };
+            if (sampleOwner[0] == null) save.run(); else sampleOwner[0].wrap(save).run();
         });
         try { show(dialog, cancel); }
         catch (RuntimeException failure) { cancel.run(); throw failure; }
