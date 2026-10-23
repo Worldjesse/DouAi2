@@ -18,6 +18,17 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class ConfigTransferTest {
+    @Test public void independentCardFiltersSurviveBackupAndRestore() {
+        MemoryStore source = new MemoryStore(), target = new MemoryStore();
+        source.values.put("feed_filter_enabled", true);
+        source.values.put("hide_product_cards", true);
+        source.values.put("hide_hotspot_rank_cards", false);
+        ConfigTransfer.apply(target, ConfigTransfer.inspect(target, ConfigTransfer.export(source, false)));
+        assertEquals(source.values, target.values);
+        assertTrue(new LocalOptions(target.snapshot()).enabled("hide_product_cards"));
+        assertFalse(new LocalOptions(target.snapshot()).enabled("hide_hotspot_rank_cards"));
+    }
+
     @Test public void miniMaxMixedTransportSettingsRoundTripAndMergedValidationRejectsBrokenCombinations() throws Exception {
         MemoryStore source = new MemoryStore(), target = new MemoryStore();
         source.values.put(SpeechSettings.PROVIDER, SpeechSettings.MINIMAX);

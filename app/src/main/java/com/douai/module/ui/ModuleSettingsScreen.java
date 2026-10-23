@@ -107,7 +107,7 @@ public final class ModuleSettingsScreen {
             new SearchEntry("debug-logs", "调试与日志", "关于 > 调试与日志", "调试 debug 日志 log LSPosed 详细 简要 JSON 刷新 清空 复制 导出", SearchDestination.DEBUG_LOGS),
             new SearchEntry("speed", "自动倍速与自动播放", "自动播放 > 倍速数值", "倍速 播放速度 自动滑动 智能滑动 暂停评论", SearchDestination.AUTOPLAY),
             new SearchEntry("interaction", "互动自动化", "自动播放 > 互动自动化", "自动点赞 自动关注 停止自动化", SearchDestination.INTERACTION),
-            new SearchEntry("feed-filter", "视频筛选", "视频筛选 > 过滤总开关", "过滤 广告 直播 图集 关键词 时长 低赞 推荐商家", SearchDestination.FILTER),
+            new SearchEntry("feed-filter", "视频筛选", "视频筛选 > 过滤总开关", "过滤 广告 直播 图集 关键词 时长 低赞 推荐商家 商品卡 购物卡 热点榜单", SearchDestination.FILTER),
             new SearchEntry("component-hide", "组件隐藏", "组件隐藏 > 隐藏与透明度", "界面 隐藏 透明度 自定义控件 暂停显示", SearchDestination.COMPONENT_HIDE),
             new SearchEntry("streak", "自动续火花", "自动续火花 > 选择用户", "续火花 好友 定时 结果未知 重试", SearchDestination.STREAK),
             new SearchEntry("message-recall", "消息防撤回", "消息管理 > 消息防撤回", "私信 防撤回 撤回背景 消息记录", SearchDestination.MESSAGE),
@@ -836,6 +836,12 @@ public final class ModuleSettingsScreen {
         addSwitch("去推荐商家开关", "", settings.hideRecommendationMerchants,
                 settings.feedFilterEnabled, true,
                 value -> update(s -> withRecommendationMerchants(s, value)));
+        addSwitch("去商品/购物卡片开关", "",
+                repository.getBoolean("hide_product_cards", false), settings.feedFilterEnabled, true,
+                value -> repository.putBoolean("hide_product_cards", value));
+        addSwitch("去热点榜单卡开关", "",
+                repository.getBoolean("hide_hotspot_rank_cards", false), settings.feedFilterEnabled, true,
+                value -> repository.putBoolean("hide_hotspot_rank_cards", value));
         addSwitch("去小游戏开关", "",
                 repository.getBoolean("hide_mini_games", false), settings.feedFilterEnabled, true,
                 value -> repository.putBoolean("hide_mini_games", value));
@@ -2005,7 +2011,7 @@ public final class ModuleSettingsScreen {
     private enum Category {
         BASIC("基本功能", 3),
         INTERFACE("界面相关", 13),
-        FILTER("视频筛选", 14),
+        FILTER("视频筛选", 16),
         DOWNLOAD("下载相关", 14),
         AUTOPLAY("自动播放", 6),
         AUTO_REPLY("自动回复", 13),

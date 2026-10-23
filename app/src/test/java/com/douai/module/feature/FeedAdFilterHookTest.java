@@ -38,7 +38,10 @@ public final class FeedAdFilterHookTest {
         public String desc;
         public Integer duration;
         public Object video;
+        public Object poiDcardStruct;
         public final AwemeStatisticsFixture statistics;
+        public boolean nearbyAdCard;
+        public boolean failLifeSpuClassification;
 
         AwemeFixture(boolean ad) {
             this(ad, false, false, null, "", 20_000, 2_000);
@@ -66,6 +69,16 @@ public final class FeedAdFilterHookTest {
 
         public boolean isImage() {
             return image;
+        }
+
+        public boolean isAdNearbyCard() {
+            return nearbyAdCard;
+        }
+
+        public boolean isLifeSpuCard() {
+            if (failLifeSpuClassification) throw new IllegalStateException("classification unavailable");
+            if (awemeType != 140 || poiDcardStruct == null) return false;
+            return "FeedConcern_LifeGoodsSpu".equals(HostTargets.read(poiDcardStruct, "scene"));
         }
 
         public int getAwemeType() {
@@ -204,6 +217,7 @@ public final class FeedAdFilterHookTest {
         recommendation.awemeType = 145;
         AwemeFixture merchant = new AwemeFixture(false);
         merchant.awemeType = 140;
+        merchant.poiDcardStruct = new PoiDcardFixture("FeedConcern_LifeGoodsSpu");
         AwemeFixture anchoredVideo = new AwemeFixture(false, false, false,
                 new Object(), "", 20_000, 2_000);
         List<AwemeFixture> source = Arrays.asList(photo, recommendation, merchant, anchoredVideo);
@@ -221,6 +235,88 @@ public final class FeedAdFilterHookTest {
         hook.close();
     }
 
+    public static final class PoiDcardFixture {
+        public final String scene;
+        PoiDcardFixture(String scene) { this.scene = scene; }
+    }
+
+    @Test public void merchantClassificationFailurePreservesTheWholePage() throws Throwable {
+        AtomicReference<XposedInterface.Hooker> installed = new AtomicReference<>();
+        try (FeedAdFilterHook hook = FeedAdFilterHook.install(createFramework(installed), createReport(),
+                getClass().getClassLoader(), recommendationSettings(false, true), ignored -> { })) {
+            AwemeFixture merchant = new AwemeFixture(false);
+            merchant.awemeType = 140;
+            merchant.failLifeSpuClassification = true;
+            AwemeFixture regular = new AwemeFixture(false);
+            List<AwemeFixture> source = Arrays.asList(regular, merchant);
+            FeedItemListFixture page = new FeedItemListFixture(source);
+            installed.get().intercept(createChain(page,
+                    new ApiResponseFixture("https://api.example/aweme/v1/feed/")));
+            org.junit.Assert.assertSame(source, page.items);
+            assertEquals(0, hook.getFilteredPages());
+        }
+    }
+
+    @Test
+    public void explicitCardFiltersAndNearbyAdsStaySeparateFromOtherTypes() throws Throwable {
+        AtomicReference<XposedInterface.Hooker> installed = new AtomicReference<>();
+        FeedAdFilterHook hook = FeedAdFilterHook.install(createFramework(installed), createReport(),
+                getClass().getClassLoader(), filterSettings(true, false, false, false,
+                        false, "", false, 0, false, 0), ignored -> { });
+        AwemeFixture nearbyAd = new AwemeFixture(false);
+        nearbyAd.nearbyAdCard = true;
+        AwemeFixture audioDcard = new AwemeFixture(false);
+        audioDcard.awemeType = 140;
+        audioDcard.video = new VideoDurationFixture(20_000);
+        AwemeFixture lifeSpu = new AwemeFixture(false);
+        lifeSpu.awemeType = 140;
+        lifeSpu.poiDcardStruct = new PoiDcardFixture("FeedConcern_LifeGoodsSpu");
+        AwemeFixture product = new AwemeFixture(false);
+        product.awemeType = 112;
+        AwemeFixture shopping = new AwemeFixture(false);
+        shopping.awemeType = 9001;
+        AwemeFixture hotspot = new AwemeFixture(false);
+        hotspot.awemeType = 104;
+        AwemeFixture recommendation = new AwemeFixture(false);
+        recommendation.awemeType = 145;
+        AwemeFixture regular = new AwemeFixture(false);
+        List<AwemeFixture> source = Arrays.asList(nearbyAd, audioDcard, lifeSpu,
+                product, shopping, hotspot, recommendation, regular);
+
+        hook.setOptions(new com.douai.module.config.LocalOptions(Collections.singletonMap(
+                "hide_product_cards", true))
+                .withDefault("hide_hotspot_rank_cards", false));
+        FeedItemListFixture productPage = new FeedItemListFixture(source);
+        installed.get().intercept(createChain(productPage,
+                new ApiResponseFixture("https://api.example/aweme/v1/feed/")));
+        assertEquals(Arrays.asList(audioDcard, lifeSpu, hotspot, recommendation, regular), productPage.items);
+
+        hook.setSettings(filterSettings(false, false, false, false,
+                false, "", false, 0, false, 0));
+        hook.setOptions(new com.douai.module.config.LocalOptions(Collections.singletonMap(
+                "hide_hotspot_rank_cards", true))
+                .withDefault("hide_product_cards", false));
+        FeedItemListFixture hotspotPage = new FeedItemListFixture(source);
+        installed.get().intercept(createChain(hotspotPage,
+                new ApiResponseFixture("https://api.example/aweme/v1/feed/")));
+        assertEquals(Arrays.asList(nearbyAd, audioDcard, lifeSpu, product, shopping, recommendation, regular), hotspotPage.items);
+
+        hook.setSettings(filterSettings(true, false, false, false,
+                false, "", false, 0, false, 0));
+        hook.setOptions(new com.douai.module.config.LocalOptions(Collections.emptyMap()));
+        FeedItemListFixture adsPage = new FeedItemListFixture(source);
+        installed.get().intercept(createChain(adsPage,
+                new ApiResponseFixture("https://api.example/aweme/v1/feed/")));
+        assertEquals(Arrays.asList(audioDcard, lifeSpu, product, shopping, hotspot, recommendation, regular), adsPage.items);
+
+        hook.setSettings(recommendationSettings(false, true));
+        FeedItemListFixture merchantsPage = new FeedItemListFixture(source);
+        installed.get().intercept(createChain(merchantsPage,
+                new ApiResponseFixture("https://api.example/aweme/v1/feed/")));
+        assertEquals(Arrays.asList(nearbyAd, audioDcard, product, shopping, hotspot, recommendation, regular), merchantsPage.items);
+        hook.close();
+    }
+
     @Test
     public void recommendationCardAndMerchantFiltersCanBeEnabledSeparately() throws Throwable {
         AtomicReference<XposedInterface.Hooker> installed = new AtomicReference<>();
@@ -230,6 +326,7 @@ public final class FeedAdFilterHookTest {
         recommendation.awemeType = 145;
         AwemeFixture merchant = new AwemeFixture(false);
         merchant.awemeType = 140;
+        merchant.poiDcardStruct = new PoiDcardFixture("FeedConcern_LifeGoodsSpu");
         AwemeFixture regular = new AwemeFixture(false);
 
         assertFeedKeeps(hook, installed.get(), Arrays.asList(recommendation, merchant, regular),
@@ -337,6 +434,7 @@ public final class FeedAdFilterHookTest {
                 uniqueMethod("aweme_ad_flag", AwemeFixture.class, "getIsAdAweme", "()Z"),
                 uniqueMethod("aweme_is_live", AwemeFixture.class, "isLive", "()Z"),
                 uniqueMethod("aweme_is_image", AwemeFixture.class, "isImage", "()Z"),
+                uniqueMethod("aweme_is_nearby_ad_card", AwemeFixture.class, "isAdNearbyCard", "()Z"),
                 uniqueMethod("aweme_type", AwemeFixture.class, "getAwemeType", "()I"),
                 new RuleScanResult("main_feed_response_model", "feed_filter", Collections.singletonList(
                         new HostCandidate("test.apk", "classes.dex", descriptor(FeedItemListFixture.class),

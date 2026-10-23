@@ -96,4 +96,26 @@ public class FeedFilterPolicyTest {
         assertTrue(FeedFilterPolicy.shouldHide(ordinary, filters, false, false, true, 0, options));
         assertFalse(FeedFilterPolicy.shouldHide(ordinary, FeatureSettings.defaults(), false, false, true, 0, options));
     }
+
+    @Test public void productAndHotspotCardsUseIndependentVerifiedHostTypes() {
+        FeatureSettings filters = recommendationSettings(false, false);
+        java.util.Map<String, Object> values = new java.util.HashMap<>();
+        values.put("hide_product_cards", true);
+        values.put("hide_hotspot_rank_cards", false);
+        com.douai.module.config.LocalOptions options = new com.douai.module.config.LocalOptions(values);
+        FeedItem item = item(false, false, false, false, "", 20, 0);
+
+        assertTrue(FeedFilterPolicy.shouldHide(item, filters, false, false, false, 112, options));
+        assertTrue(FeedFilterPolicy.shouldHide(item, filters, false, false, false, 9001, options));
+        assertFalse(FeedFilterPolicy.shouldHide(item, filters, false, false, false, 104, options));
+        assertFalse(FeedFilterPolicy.shouldHide(item, filters, true, false, false, 145, options));
+        assertFalse(FeedFilterPolicy.shouldHide(item, filters, false, true, false, 140, options));
+
+        values.put("hide_product_cards", false);
+        values.put("hide_hotspot_rank_cards", true);
+        options = new com.douai.module.config.LocalOptions(values);
+        assertFalse(FeedFilterPolicy.shouldHide(item, filters, false, false, false, 112, options));
+        assertFalse(FeedFilterPolicy.shouldHide(item, filters, false, false, false, 9001, options));
+        assertTrue(FeedFilterPolicy.shouldHide(item, filters, false, false, false, 104, options));
+    }
 }

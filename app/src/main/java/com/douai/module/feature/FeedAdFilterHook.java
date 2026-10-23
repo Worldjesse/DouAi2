@@ -25,6 +25,8 @@ public final class FeedAdFilterHook implements AutoCloseable {
     private final Class<?> feedItemListClass;
     private final Class<?> awemeClass;
     private final Method adMarker;
+    private final Method nearbyAdMarker;
+    private final Method lifeSpuMarker;
     private final Method liveMarker;
     private final Method imageMarker;
     private final Method awemeType;
@@ -42,7 +44,8 @@ public final class FeedAdFilterHook implements AutoCloseable {
     private volatile LocalOptions options = new LocalOptions(Collections.emptyMap());
 
     private FeedAdFilterHook(Field itemsField, Class<?> feedItemListClass, Class<?> awemeClass,
-                             Method adMarker, Method liveMarker, Method imageMarker, Method awemeType,
+                             Method adMarker, Method nearbyAdMarker, Method lifeSpuMarker,
+                             Method liveMarker, Method imageMarker, Method awemeType,
                              Field anchorInfoField, Field descField, Field durationField,
                              Field statisticsField, Field diggCountField, Method responseUrl,
                              List<XposedInterface.HookHandle> handles, FeatureSettings settings,
@@ -60,6 +63,8 @@ public final class FeedAdFilterHook implements AutoCloseable {
         this.feedItemListClass = feedItemListClass;
         this.awemeClass = awemeClass;
         this.adMarker = adMarker;
+        this.nearbyAdMarker = nearbyAdMarker;
+        this.lifeSpuMarker = lifeSpuMarker;
         this.liveMarker = liveMarker;
         this.imageMarker = imageMarker;
         this.awemeType = awemeType;
@@ -106,6 +111,8 @@ public final class FeedAdFilterHook implements AutoCloseable {
         Method awemeType = resolveMethod(report, "aweme_type", loader);
         Class<?> feedItemList = resolveClass(report, "main_feed_response_model", loader);
         Class<?> aweme = resolveClass(report, "aweme_feed_attributes", loader);
+        Method nearbyAdMarker = aweme.getMethod("isAdNearbyCard");
+        Method lifeSpuMarker = aweme.getMethod("isLifeSpuCard");
         Class<?> statistics = resolveClass(report, "aweme_statistics_digg_count", loader);
         Field items = feedItemList.getField("items");
         if (!List.class.isAssignableFrom(items.getType())) {
@@ -115,6 +122,8 @@ public final class FeedAdFilterHook implements AutoCloseable {
                 || imageMarker.getDeclaringClass() != aweme
                 || adMarker.getReturnType() != boolean.class || liveMarker.getReturnType() != boolean.class
                 || imageMarker.getReturnType() != boolean.class || awemeType.getReturnType() != int.class
+                || nearbyAdMarker.getReturnType() != boolean.class || lifeSpuMarker.getReturnType() != boolean.class
+                || Modifier.isStatic(nearbyAdMarker.getModifiers()) || Modifier.isStatic(lifeSpuMarker.getModifiers())
                 || responseUrl.getReturnType() != String.class) {
             throw new IllegalStateException("Feed filtering method contract changed");
         }
@@ -129,6 +138,8 @@ public final class FeedAdFilterHook implements AutoCloseable {
         }
         responseUrl.setAccessible(true);
         adMarker.setAccessible(true);
+        nearbyAdMarker.setAccessible(true);
+        lifeSpuMarker.setAccessible(true);
         liveMarker.setAccessible(true);
         imageMarker.setAccessible(true);
         awemeType.setAccessible(true);
@@ -139,7 +150,8 @@ public final class FeedAdFilterHook implements AutoCloseable {
         diggCount.setAccessible(true);
 
         FeedAdFilterHook hook = new FeedAdFilterHook(items, feedItemList, aweme, adMarker,
-                liveMarker, imageMarker, awemeType, anchorInfo, desc, duration, itemStatistics, diggCount,
+                nearbyAdMarker, lifeSpuMarker, liveMarker, imageMarker, awemeType,
+                anchorInfo, desc, duration, itemStatistics, diggCount,
                 responseUrl, Collections.emptyList(), settings, enabled,
                 log == null ? ignored -> { } : log);
         try {
@@ -239,13 +251,15 @@ public final class FeedAdFilterHook implements AutoCloseable {
             throw new IllegalArgumentException("Feed list contains a non-Aweme value");
         }
         boolean ad = current.hideAds && (Boolean.TRUE.equals(adMarker.invoke(item))
+                || Boolean.TRUE.equals(nearbyAdMarker.invoke(item))
                 || Boolean.TRUE.equals(HostTargets.read(HostTargets.read(item, "author"), "isAdFake")));
         boolean live = current.hideLives && Boolean.TRUE.equals(liveMarker.invoke(item));
         int type = ((Number) awemeType.invoke(item)).intValue();
         boolean image = current.hideImagePosts
                 && (Boolean.TRUE.equals(imageMarker.invoke(item)) || type == 68 || type == 163);
         boolean recommendationCard = type == 145;
-        boolean recommendationMerchant = type == 140;
+        boolean recommendationMerchant = current.hideRecommendationMerchants && type == 140
+                && Boolean.TRUE.equals(lifeSpuMarker.invoke(item));
         String desc = current.keywordFilterEnabled ? searchableText(item, (String) descField.get(item)) : "";
         long durationMillis = -1;
         if (current.minimumDurationEnabled || options.enabled("hide_long_videos")) {
@@ -372,6 +386,7 @@ public final class FeedAdFilterHook implements AutoCloseable {
                 || settings.hideRecommendationCards || settings.hideRecommendationMerchants
                 || settings.keywordFilterEnabled
                 || settings.minimumDurationEnabled || settings.minimumLikesEnabled
+                || options.enabled("hide_product_cards") || options.enabled("hide_hotspot_rank_cards")
                 || options.enabled("hide_mini_games") || options.enabled("hide_long_videos");
     }
 

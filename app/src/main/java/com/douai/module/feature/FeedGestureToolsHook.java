@@ -405,14 +405,14 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
                     // Replace the native runnable before its speed/menu interceptors execute.
                     gestureActions++;
                     logGestureAction("long_press", action, region);
+                    discardCurrentEvent.setBoolean(touch, true);
+                    synchronized (pendingReleaseDiscard) {
+                        pendingReleaseDiscard.put(touch, Boolean.TRUE);
+                    }
                     if ("view_finder".equals(action)) {
                         FinderGesture gesture = pendingFinderGesture;
                         if (gesture != null && gesture.matches(touch, selectedHolder.get())) {
                             gesture.confirmed = true;
-                        }
-                        discardCurrentEvent.setBoolean(touch, true);
-                        synchronized (pendingReleaseDiscard) {
-                            pendingReleaseDiscard.put(touch, Boolean.TRUE);
                         }
                         safeLog("View finder consumed pending long-press release");
                     }

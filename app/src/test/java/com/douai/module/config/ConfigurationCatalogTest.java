@@ -11,6 +11,16 @@ import static com.douai.module.config.ConfigurationCatalog.Feature.*;
 import static org.junit.Assert.*;
 
 public final class ConfigurationCatalogTest {
+    @Test public void cardFiltersTransferWithFalseDefaultsAndOnlyRefreshFeedFiltering() {
+        for (String key : new String[]{"hide_product_cards", "hide_hotspot_rank_cards"}) {
+            assertEquals("boolean", ConfigKeys.TYPES.get(key));
+            assertEquals(false, ConfigurationCatalog.settings().get(key).defaultValue);
+            assertConsumers(key, EnumSet.of(FEED_FILTER));
+            ConfigurationChanges removed = ConfigurationChanges.between(Map.of(key, true), Collections.emptyMap());
+            assertTrue(removed.affects(FEED_FILTER));
+        }
+    }
+
     @Test public void globalHashLongPressRefreshesOnlyTheTwoManualSpeechAdapters() {
         assertEquals("boolean", ConfigKeys.TYPES.get(LocalOptions.HASH_LONG_PRESS_VOICE));
         assertEquals(false, ConfigurationCatalog.settings().get(LocalOptions.HASH_LONG_PRESS_VOICE).defaultValue);

@@ -699,6 +699,24 @@ public final class FeedGestureToolsHookTest {
         }
     }
 
+    @Test public void configuredLongPressConsumesTheHostReleaseAfterRunningItsAction() throws Throwable {
+        try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed", "playback_speed", "2.75"))) {
+            f.select();
+            f.touchEvent(MotionEvent.ACTION_DOWN, 2, 2);
+            f.longPress(2, 2);
+
+            assertEquals(2.75f, f.player.getSpeed(), 0f);
+            assertTrue("A configured long press must consume the host release", f.touch.discardCurrentEvent);
+            MotionEvent up = MotionEvent.obtain(0, 200, MotionEvent.ACTION_UP, 250, 550, 0);
+            try {
+                assertEquals(Boolean.FALSE, f.harness.invoke(
+                        TouchLayout.class.getMethod("onTouchEvent", MotionEvent.class), f.touch, up));
+            } finally { up.recycle(); }
+            assertEquals("The native host release must not run after a module action", 0,
+                    f.touch.nativeUpCalls);
+        }
+    }
+
     @Test public void unsetNumericValueAppliesTheSharedDefaultSpeed() throws Throwable {
         try (Fixture f = new Fixture(Map.of("long_press_bottom_right", "speed"))) {
             f.select();

@@ -67,7 +67,8 @@ public final class ConfigurationCatalog {
                 + "comment_media_tools copy_source_data prevent_message_recall confirm_refresh spoof_version auto_speed "
                 + "pause_auto_on_comments smart_swipe comment_append_suffix comment_voice_replace comment_tts colored_comment "
                 + "streak_enabled streak_tip recall_self recall_other dm_voice_replace dm_tts spoof_profile download_custom_name "
-                + "remove_download_limits filter_interrupt hide_mini_games hide_long_videos native_auto_reply native_auto_comment "
+                + "remove_download_limits filter_interrupt hide_mini_games hide_long_videos hide_product_cards "
+                + "hide_hotspot_rank_cards native_auto_reply native_auto_comment "
                 + "reply_voice comment_voice reply_private_chats reply_group_chats reply_global comment_recognize_images "
                 + "comment_recognize_video reply_tip comment_tip reply_save_history comment_save_history "
                 + "toolbar_enabled intercept_native_long_press disable_double_tap_like block_long_press_speed "
@@ -113,7 +114,7 @@ public final class ConfigurationCatalog {
         }
         TRANSFER_TYPES = Collections.unmodifiableMap(keys);
         // These groups replace updateConfiguration's inline lists. Prefixes retain future/legacy keys.
-        depend(Feature.FEED_FILTER, "feed_filter_enabled hide_ads hide_lives hide_image_posts hide_recommendation_cards hide_recommendation_merchants keyword_filter_enabled keyword minimum_duration_enabled minimum_duration_seconds minimum_likes_enabled minimum_like_count filter_interrupt hide_mini_games hide_long_videos maximum_duration_seconds", "");
+        depend(Feature.FEED_FILTER, "feed_filter_enabled hide_ads hide_lives hide_image_posts hide_recommendation_cards hide_recommendation_merchants keyword_filter_enabled keyword minimum_duration_enabled minimum_duration_seconds minimum_likes_enabled minimum_like_count filter_interrupt hide_mini_games hide_long_videos hide_product_cards hide_hotspot_rank_cards maximum_duration_seconds", "");
         depend(Feature.DOWNLOAD, "download_enabled remove_watermark download_custom_name download_name_template remove_download_limits download_method download_directory_uri", "third_party_");
         depend(Feature.REPLY, "automation_enabled native_auto_reply reply_global reply_targets reply_mode reply_prompt reply_delay_seconds auto_message_text reply_daily_limit reply_user_cooldown_minutes reply_recognize_images reply_recognize_video reply_keywords reply_scope_mode reply_scope_relations reply_scope_fields reply_scope_keywords reply_scope_users reply_filter_mode reply_filter_keywords reply_filter_fields reply_private_chats reply_group_chats reply_group_scope_mode reply_group_targets reply_group_mode reply_group_members reply_random ai_model_settings_v2 streak_enabled streak_targets streak_content streak_content_api streak_start streak_end streak_tip streak_reset_token streak_retry_unknown_token reply_voice", "tts_");
         depend(Feature.COMMENT_AUTOMATION, "automation_enabled native_auto_comment comment_mode comment_prompt comment_delay_seconds auto_comment_text comment_daily_limit comment_user_cooldown_minutes comment_recognize_images comment_recognize_video comment_scope_mode comment_scope_relations comment_scope_fields comment_scope_keywords comment_scope_users comment_filter_mode comment_filter_keywords comment_filter_fields ai_model_settings_v2 comment_voice", "tts_");
@@ -145,6 +146,8 @@ public final class ConfigurationCatalog {
         Map<String, Object> defaults = new LinkedHashMap<>();
         defaults.put(LocalOptions.DEBUG_LOGGING, false);
         defaults.put(LocalOptions.HASH_LONG_PRESS_VOICE, false);
+        defaults.put("hide_product_cards", false);
+        defaults.put("hide_hotspot_rank_cards", false);
         defaults.put(PLAYBACK_SPEED, PLAYBACK_SPEED_DEFAULT);
         defaults.put("download_method", DOWNLOAD_METHOD_DEFAULT);
         defaults.put("download_name_template", DOWNLOAD_NAME_DEFAULT);

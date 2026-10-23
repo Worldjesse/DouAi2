@@ -21,6 +21,7 @@ import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.function.Consumer;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Owns completion and feed navigation without enabling the host auto-next model. */
 public final class AutoPlayHook implements Application.ActivityLifecycleCallbacks, AutoCloseable {
@@ -34,6 +35,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
     private final Method currentHolder;
     private final Method commentsShowing;
     private final Method scrollState;
+    private final AtomicBoolean holderRecoveryQueued = new AtomicBoolean();
     private final Field rootField;
     private final Field paramsField;
     private final Field feedContextField;
@@ -43,6 +45,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
     private WeakReference<Object> selectedHolder = new WeakReference<>(null);
     private WeakReference<View> selectedRoot = new WeakReference<>(null);
     private WeakReference<Activity> resumed = new WeakReference<>(null);
+    private WeakReference<Activity> pausedActivity = new WeakReference<>(null);
     private WeakReference<Object> touchPager = new WeakReference<>(null);
     private volatile ExtendedSettings settings;
     private volatile LocalOptions options;
@@ -184,6 +187,16 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
                 installed.main.post(() -> installed.complete(aid, token));
                 return result;
             });
+            hook.group.add(framework, current, chain -> {
+                Object recoveredHolder = chain.proceed();
+                installed.recoverHolder(recoveredHolder, chain.getThisObject());
+                return recoveredHolder;
+            });
+            hook.group.add(framework, aweme, chain -> {
+                Object result = chain.proceed();
+                installed.recoverHolder(chain.getThisObject(), null);
+                return result;
+            });
             hook.application.registerActivityLifecycleCallbacks(hook);
             hook.safeLog("DouAi auto-slide registered; native auto-next model untouched");
             return hook;
@@ -234,6 +247,34 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
             if (!sameSelection) paused = false;
             if (root.hasWindowFocus()) resumed = new WeakReference<>(activity);
         } catch (ReflectiveOperationException | RuntimeException failure) { fail(failure); }
+    }
+
+    private void recoverHolder(Object holder, Object expectedPanel) {
+        if (closed || !group.isActive() || !awemeAccessor.getDeclaringClass().isInstance(holder)
+                || !holderRecoveryQueued.compareAndSet(false, true)) return;
+        onMain(() -> {
+            try {
+                if (closed || !group.isActive() || !recoverableRoot(holder)) return;
+                Object panel = paramsField.get(holder);
+                panel = panel == null ? null : feedContextField.get(panel);
+                if (panel != null && (expectedPanel == null || panel == expectedPanel)
+                        && currentHolder.getDeclaringClass().isInstance(panel)
+                        && currentHolder.invoke(panel) == holder) {
+                    select(holder);
+                }
+            } catch (ReflectiveOperationException | RuntimeException failure) { fail(failure); }
+            finally { holderRecoveryQueued.set(false); }
+        });
+    }
+
+    private boolean recoverableRoot(Object holder) throws IllegalAccessException {
+        Object value = rootField.get(holder);
+        if (!(value instanceof View)) return false;
+        View root = (View) value;
+        Activity owner = activity(root.getContext());
+        return root.isAttachedToWindow() && root.isShown() && root.hasWindowFocus()
+                && owner != null && pausedActivity.get() != owner
+                && !owner.isFinishing() && !owner.isDestroyed();
     }
 
     private void recordTouch(Object pager, MotionEvent event) {
@@ -401,14 +442,19 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
         onMain(() -> { main.removeCallbacksAndMessages(null); clearSelection(); });
     }
 
-    @Override public void onActivityResumed(Activity activity) { resumed = new WeakReference<>(activity); }
+    @Override public void onActivityResumed(Activity activity) {
+        if (pausedActivity.get() == activity) pausedActivity.clear();
+        resumed = new WeakReference<>(activity);
+    }
     @Override public void onActivityPaused(Activity activity) {
+        pausedActivity = new WeakReference<>(activity);
         if (resumed.get() == activity) { resumed.clear(); generation++; touching = false; touchPager.clear(); }
     }
     @Override public void onActivityDestroyed(Activity activity) {
         View root = selectedRoot.get();
         if (root != null && activity(root.getContext()) == activity) clearSelection();
         if (resumed.get() == activity) resumed.clear();
+        if (pausedActivity.get() == activity) pausedActivity.clear();
     }
     @Override public void onActivityCreated(Activity activity, Bundle state) { }
     @Override public void onActivityStarted(Activity activity) { }

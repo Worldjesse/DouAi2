@@ -35,6 +35,8 @@ public final class FeedFilterPolicy {
         if (item == null || settings == null || !settings.feedFilterEnabled) return false;
         if (shouldHide(item, settings, recommendationCard, recommendationMerchant)) return true;
         if (options == null) return false;
+        if (options.enabled("hide_product_cards") && (hostType == 112 || hostType == 9001)) return true;
+        if (options.enabled("hide_hotspot_rank_cards") && hostType == 104) return true;
         if (options.enabled("hide_mini_games") && game) return true;
         if (options.enabled("hide_long_videos")) {
             int threshold = Math.max(1, options.integer("maximum_duration_seconds", 120));

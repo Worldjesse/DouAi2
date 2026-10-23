@@ -85,7 +85,7 @@ public final class ModuleSettingsReferenceTest {
                         "拦截系统长按手势", "长按事件", "双击事件", "沉浸式全屏", "隐藏顶部Tab开关",
                         "设置顶部Tab", "首页刷新确认"},
                 {"FILTER", "过滤总开关", "整页筛空时保留原列表", "去广告开关", "去直播开关", "去推荐卡片开关",
-                        "去推荐商家开关", "去小游戏开关", "去长视频开关", "最长时长（秒）",
+                        "去推荐商家开关", "去商品/购物卡片开关", "去热点榜单卡开关", "去小游戏开关", "去长视频开关", "最长时长（秒）",
                         "最低点赞数（0不限制）", "去图集开关", "屏蔽关键词", "过滤短视频", "最短时长（秒）"},
                 {"DOWNLOAD", "启用下载菜单", "下载方式", "保存位置", "下载任务", "直接保存全部媒体", "自定义文件名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
                 {"AUTOPLAY", "自动滑动到下一个视频", "自动倍速播放", "倍速数值", "打开评论时,不滑动视频",
@@ -444,6 +444,28 @@ public final class ModuleSettingsReferenceTest {
         View reopened = openCategory("FILTER");
         assertFalse(toggle(reopened, "去推荐卡片开关").isChecked());
         assertTrue(toggle(reopened, "去推荐商家开关").isChecked());
+    }
+
+    @Test
+    public void productAndHotspotCardFiltersPersistIndependently() {
+        View page = openCategory("FILTER");
+        toggle(page, "过滤总开关").setChecked(true);
+        Switch product = toggle(page, "去商品/购物卡片开关");
+        Switch hotspot = toggle(page, "去热点榜单卡开关");
+        product.setChecked(true);
+        assertTrue(store.getBoolean("hide_product_cards", false));
+        assertFalse(store.getBoolean("hide_hotspot_rank_cards", false));
+
+        hotspot.setChecked(true);
+        product.setChecked(false);
+        screen.dismissChildPages();
+        View reopened = openCategory("FILTER");
+        assertFalse(toggle(reopened, "去商品/购物卡片开关").isChecked());
+        assertTrue(toggle(reopened, "去热点榜单卡开关").isChecked());
+        toggle(reopened, "过滤总开关").setChecked(false);
+        assertTrue(store.getBoolean("hide_hotspot_rank_cards", false));
+        toggle(reopened, "过滤总开关").setChecked(true);
+        assertTrue(toggle(reopened, "去热点榜单卡开关").isChecked());
     }
 
     @Test

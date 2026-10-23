@@ -454,9 +454,13 @@ class MiuixHostSettingsTest {
         compose.onNodeWithTag("settings.toggle.去广告开关").assertIsNotEnabled()
         compose.onNodeWithTag("settings.toggle.过滤总开关").performClick()
         compose.onNodeWithTag("settings.toggle.去广告开关").assertIsEnabled().performClick()
+        compose.onNodeWithTag("settings.toggle.去商品/购物卡片开关").assertIsEnabled().performClick()
+        compose.onNodeWithTag("settings.toggle.去热点榜单卡开关").assertIsEnabled().performClick()
         compose.runOnIdle {
             assertTrue(store.load().feedFilterEnabled)
             assertTrue(store.load().hideAds)
+            assertTrue(store.getBoolean("hide_product_cards", false))
+            assertTrue(store.getBoolean("hide_hotspot_rank_cards", false))
         }
         compose.onNodeWithTag("settings.toggle.过滤总开关").performClick()
         compose.onNodeWithTag("settings.toggle.去广告开关").assertIsNotEnabled()

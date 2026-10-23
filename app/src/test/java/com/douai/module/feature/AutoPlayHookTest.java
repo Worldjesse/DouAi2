@@ -186,12 +186,46 @@ public final class AutoPlayHookTest {
             assertTrue(f.hook.supports("auto_play"));
             assertTrue(f.hook.supports("smart_swipe"));
             assertTrue(f.hook.supports("pause_auto_on_comments"));
-            assertEquals(7, f.harness.interceptors.size());
+            assertEquals(9, f.harness.interceptors.size());
             for (String key : f.report.getResults().keySet()) assertFalse(key.startsWith("auto_next_vm_"));
             assertFalse(f.harness.interceptors.containsKey(PagerContext.class.getMethod("next", String.class, boolean.class)));
             assertFalse(f.harness.interceptors.containsKey(PagerContext.class.getMethod("previous", String.class, boolean.class)));
             f.completed("one");
             assertEquals(1, f.panel.B3.nextCalls);
+        }
+    }
+
+    @Test
+    public void lateInstallationRecoversAlreadySelectedHolderFromHostCurrentHolderRead() throws Throwable {
+        try (Fixture f = new Fixture(Collections.emptyMap(), true)) {
+            f.harness.invoke(FeedPanel.class.getMethod("currentHolder"), f.panel);
+            idle();
+            f.completed("one");
+
+            assertEquals(1, f.panel.B3.nextCalls);
+        }
+    }
+
+    @Test
+    public void lateInstallationRecoversAlreadySelectedHolderWhenHostReadsItsAweme() throws Throwable {
+        try (Fixture f = new Fixture(Collections.emptyMap(), true)) {
+            f.harness.invoke(Holder.class.getMethod("getAweme"), f.selected);
+            idle();
+            f.completed("one");
+
+            assertEquals(1, f.panel.B3.nextCalls);
+        }
+    }
+
+    @Test
+    public void lateHolderReadDoesNotReviveAnActivityAfterPause() throws Throwable {
+        try (Fixture f = new Fixture(Collections.emptyMap(), true)) {
+            f.hook.onActivityPaused(f.activity);
+            f.harness.invoke(FeedPanel.class.getMethod("currentHolder"), f.panel);
+            idle();
+            f.completed("one");
+
+            assertEquals(0, f.panel.B3.nextCalls);
         }
     }
 
@@ -344,6 +378,36 @@ public final class AutoPlayHookTest {
     }
 
     @Test
+    public void completionDuringTapIsDroppedAndLaterCompletionAdvancesOnlyOnce() throws Throwable {
+        try (Fixture f = new Fixture(Collections.emptyMap())) {
+            f.touch(MotionEvent.ACTION_DOWN, 100, 300);
+            f.completed("one");
+            assertEquals(0, f.panel.B3.nextCalls);
+
+            f.touch(MotionEvent.ACTION_UP, 100, 300);
+            idle();
+            assertEquals(0, f.panel.B3.nextCalls);
+            f.completed("one");
+            assertEquals(1, f.panel.B3.nextCalls);
+            f.completed("one");
+            assertEquals(1, f.panel.B3.nextCalls);
+        }
+    }
+
+    @Test
+    public void completionDuringManualSwipeDoesNotReplayAfterRelease() throws Throwable {
+        try (Fixture f = new Fixture(Collections.emptyMap())) {
+            f.touch(MotionEvent.ACTION_DOWN, 100, 600);
+            f.completed("one");
+            f.touch(MotionEvent.ACTION_UP, 100, 100);
+            idle();
+
+            assertEquals(0, f.panel.B3.nextCalls);
+            assertEquals(0, f.panel.B3.previousCalls);
+        }
+    }
+
+    @Test
     public void pagerBoundaryIsAttemptedOnceWithoutChangingDirectionOrLooping() throws Throwable {
         try (Fixture f = new Fixture(Collections.emptyMap())) {
             f.panel.B3.canMove = false;
@@ -403,16 +467,32 @@ public final class AutoPlayHookTest {
         Holder selected;
 
         Fixture(Map<String, ?> values) throws Throwable {
+            this(values, false);
+        }
+
+        Fixture(Map<String, ?> values, boolean installLate) throws Throwable {
             options = new LocalOptions(values);
             activity.setContentView(root);
             panel.f = new FeedPager(activity);
             report = report();
-            hook = AutoPlayHook.install(harness.framework, report, getClass().getClassLoader(),
-                    activity, settings(true), options, ignored -> { });
-            hook.onActivityResumed(activity);
             assertTrue(root.isAttachedToWindow());
             assertTrue(root.isShown());
-            select(holder("one"));
+            if (installLate) {
+                selected = holder("one");
+                panel.current = selected;
+                selected.selected();
+                idle();
+                hook = installHook();
+            } else {
+                hook = installHook();
+                hook.onActivityResumed(activity);
+                select(holder("one"));
+            }
+        }
+
+        AutoPlayHook installHook() throws Exception {
+            return AutoPlayHook.install(harness.framework, report, getClass().getClassLoader(),
+                    activity, settings(true), options, ignored -> { });
         }
 
         ExtendedSettings settings(boolean enabled) {

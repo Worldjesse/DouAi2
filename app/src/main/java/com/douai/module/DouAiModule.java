@@ -1240,6 +1240,8 @@ public final class DouAiModule extends XposedModule {
                 || settings.hideRecommendationCards || settings.hideRecommendationMerchants
                 || settings.keywordFilterEnabled
                 || settings.minimumDurationEnabled || settings.minimumLikesEnabled
+                || localOptions.enabled("hide_product_cards")
+                || localOptions.enabled("hide_hotspot_rank_cards")
                 || localOptions.enabled("hide_mini_games") || localOptions.enabled("hide_long_videos"));
     }
 
