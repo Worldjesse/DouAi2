@@ -22,6 +22,7 @@ public final class SpeechSettings {
     public static final String DEFAULT_MINIMAX_VOICE_ID = "male-qn-qingse";
     public static final String RATE = "tts_rate";
     public static final String PITCH = "tts_pitch";
+    public static final String LOCAL_VOICE_NAME = "tts_voice_name";
     public static final String GET_TEMPLATE = "tts_get_template";
     public static final String HEADERS = "tts_headers";
     public static final String AUDIO_FIELD = "tts_audio_field";

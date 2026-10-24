@@ -212,7 +212,16 @@ public final class HostUiController implements Application.ActivityLifecycleCall
     }
 
     private void showSettings(Activity activity) {
-        if (closed || !isSettingsPage(activity) || resumedActivity.get() != activity
+        showSettings(activity, true);
+    }
+
+    /** Opens the existing module settings surface from a gesture action on the active feed. */
+    public void showSettingsFromGesture(Activity activity) {
+        mainHandler.post(() -> showSettings(activity, false));
+    }
+
+    private void showSettings(Activity activity, boolean settingsPageOnly) {
+        if (closed || settingsPageOnly && !isSettingsPage(activity) || resumedActivity.get() != activity
                 || activity.isFinishing() || activity.isDestroyed()) return;
         if (settingsDialog != null && settingsDialog.isShowing()) return;
         Dialog dialog = new Dialog(activity, ModuleTheme.dialogTheme(activity));

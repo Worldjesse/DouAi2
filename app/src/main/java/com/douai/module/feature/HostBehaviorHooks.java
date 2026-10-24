@@ -19,6 +19,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
+import java.util.ConcurrentModificationException;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.WeakHashMap;
@@ -29,15 +31,19 @@ import java.util.function.Consumer;
 /** Host 40.6 UI gates and owned view visibility, independent of the host's account state. */
 public final class HostBehaviorHooks implements AutoCloseable {
     private static final String HIDDEN_SKIP = "prevent_skip_hidden";
+    private static final int MAX_VIEW_UPDATES_PER_FRAME = 64;
+    private static final long MAX_VIEW_UPDATE_NANOS_PER_FRAME = 4_000_000L;
     private final Map<String, BehaviorHookGroup> groups = new LinkedHashMap<>();
     private final Map<View, HiddenView> hidden = new WeakHashMap<>();
     private final Map<View, String> observed = new WeakHashMap<>();
+    private final Map<String, Map<View, Boolean>> observedByKey = new LinkedHashMap<>();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Consumer<String> log;
     private final AtomicLong hiddenCurrentHits = new AtomicLong();
     private final AtomicLong hiddenCurrentBlocked = new AtomicLong();
     private final AtomicLong hiddenBackgroundHits = new AtomicLong();
     private final AtomicLong hiddenBackgroundBlocked = new AtomicLong();
+    private final AtomicLong observedRefreshGeneration = new AtomicLong();
     private final AtomicBoolean hiddenCurrentLogged = new AtomicBoolean();
     private final AtomicBoolean hiddenBackgroundLogged = new AtomicBoolean();
     private volatile boolean hiddenSkipReady;
@@ -116,13 +122,47 @@ public final class HostBehaviorHooks implements AutoCloseable {
 
     public void setOptions(LocalOptions options) {
         if (closed) return;
+        LocalOptions previous = this.options;
         this.options = options;
-        onMain(() -> {
-            if (closed) return;
-            for (Map.Entry<View, String> entry : new ArrayList<>(observed.entrySet())) {
-                updateView(entry.getKey(), entry.getValue());
+        java.util.Set<String> changedKeys = new java.util.LinkedHashSet<>();
+        for (String key : new String[]{"hide_video_black_edges", "hide_camera_plus"}) {
+            if (previous == null || options == null || previous.enabled(key) != options.enabled(key)) {
+                changedKeys.add(key);
             }
-        });
+        }
+        // Settings sync republishes full snapshots during startup. The LSPosed trace showed the
+        // weak-map snapshot itself occupying the main thread when none of these gates changed.
+        if (changedKeys.isEmpty()) return;
+        long generation = observedRefreshGeneration.incrementAndGet();
+        onMain(() -> refreshObservedViews(generation, changedKeys));
+    }
+
+    private void refreshObservedViews(long generation, java.util.Set<String> changedKeys) {
+        if (closed || generation != observedRefreshGeneration.get()) return;
+        for (String key : changedKeys) {
+            Map<View, Boolean> views = observedByKey.get(key);
+            if (views != null) refreshObservedBatch(views.entrySet().iterator(), key, generation, changedKeys);
+        }
+    }
+
+    private void refreshObservedBatch(Iterator<Map.Entry<View, Boolean>> iterator, String key,
+                                     long generation, java.util.Set<String> changedKeys) {
+        if (closed || generation != observedRefreshGeneration.get()) return;
+        long started = android.os.SystemClock.uptimeMillis();
+        int count = 0;
+        try {
+            while (count < MAX_VIEW_UPDATES_PER_FRAME
+                    && android.os.SystemClock.uptimeMillis() - started < MAX_VIEW_UPDATE_NANOS_PER_FRAME / 1_000_000L
+                    && iterator.hasNext()) {
+                Map.Entry<View, Boolean> entry = iterator.next();
+                updateView(entry.getKey(), key);
+                count++;
+            }
+            if (iterator.hasNext()) main.postDelayed(
+                    () -> refreshObservedBatch(iterator, key, generation, changedKeys), 16L);
+        } catch (ConcurrentModificationException changed) {
+            main.postDelayed(() -> refreshObservedViews(generation, changedKeys), 16L);
+        }
     }
 
     private boolean enabled(String key) {
@@ -374,6 +414,7 @@ public final class HostBehaviorHooks implements AutoCloseable {
         onMain(() -> {
             if (closed) return;
             observed.put(view, key);
+            observedByKey.computeIfAbsent(key, ignored -> new WeakHashMap<>()).put(view, Boolean.TRUE);
             updateView(view, key);
         });
     }
@@ -403,6 +444,7 @@ public final class HostBehaviorHooks implements AutoCloseable {
                 if (state != null) state.restore();
                 observed.remove(entry.getKey());
             }
+            observedByKey.remove(key);
         });
     }
 
@@ -420,6 +462,7 @@ public final class HostBehaviorHooks implements AutoCloseable {
             for (HiddenView state : new ArrayList<>(hidden.values())) state.restore();
             hidden.clear();
             observed.clear();
+            observedByKey.clear();
         });
     }
 

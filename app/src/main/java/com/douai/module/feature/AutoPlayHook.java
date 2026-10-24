@@ -34,6 +34,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
     private final Method next;
     private final Method previous;
     private final Method currentHolder;
+    private final Method setCurrentItem;
     private final Method commentsShowing;
     private final Method scrollState;
     private final AtomicBoolean holderRecoveryQueued = new AtomicBoolean();
@@ -55,6 +56,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
     private volatile String selectedAid;
     private volatile boolean paused;
     private boolean attempted;
+    private boolean pendingAdvance;
     private boolean touching;
     private boolean multiTouch;
     private float downX;
@@ -62,10 +64,16 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
     private int direction = 1;
     private volatile String diagnostic = "等待当前视频播放完成";
     private String lastSkip;
+    private PlaybackTransitionFrame.Overlay transitionFrame;
+    private String transitionSourceAid;
+    private String transitionPlayingAid;
+    private Runnable transitionTimeout;
+    private Runnable transitionRelease;
+    private boolean transitionRedirecting;
 
     private AutoPlayHook(Application application, ExtendedSettings settings, LocalOptions options,
                          Consumer<String> log, Method awemeAccessor, Method next, Method previous,
-                         Method currentHolder, Method commentsShowing, Method scrollState,
+                         Method currentHolder, Method setCurrentItem, Method commentsShowing, Method scrollState,
                          Field rootField, Field paramsField, Field feedContextField,
                          Field pagerContextField, Field pagerField, Field dialogField) {
         this.application = application;
@@ -77,6 +85,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
         this.next = next;
         this.previous = previous;
         this.currentHolder = currentHolder;
+        this.setCurrentItem = setCurrentItem;
         this.commentsShowing = commentsShowing;
         this.scrollState = scrollState;
         this.rootField = rootField;
@@ -130,6 +139,10 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
             Method completed = HostTargets.method(report, "auto_slide_completed", loader);
             Method playing = HostTargets.method(report, "component_player_playing", loader);
             Method playerPause = HostTargets.method(report, "component_player_pause", loader);
+            Method setCurrentItem = null;
+            try {
+                setCurrentItem = pager.getType().getMethod("setCurrentItem", int.class, boolean.class);
+            } catch (NoSuchMethodException ignored) { }
             if (!View.class.isAssignableFrom(root.getType()) || params.getType() != paramsType
                     || !panel.getType().isAssignableFrom(panelContext.getDeclaringClass())
                     || current.getDeclaringClass() != panelContext.getDeclaringClass()
@@ -143,7 +156,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
                 throw new IllegalStateException("Auto-slide player/pager relationship changed");
             }
             hook = new AutoPlayHook((Application) app, settings, options, sink, aweme, next, previous,
-                    current, comments, scroll, root, params, panel, pagerContext, pager, dialogs);
+                    current, setCurrentItem, comments, scroll, root, params, panel, pagerContext, pager, dialogs);
             AutoPlayHook installed = hook;
             for (Method target : new Method[]{selected, resume}) {
                 hook.group.add(framework, target, chain -> {
@@ -166,15 +179,27 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
                 installed.recordTouch(chain.getThisObject(), (MotionEvent) chain.getArg(0));
                 return chain.proceed();
             });
+            if (setCurrentItem != null) {
+                hook.group.add(framework, setCurrentItem, XposedInterface.PRIORITY_HIGHEST,
+                        installed::interceptPagerSelection);
+            }
             for (Method target : new Method[]{playing, playerPause}) {
                 boolean isPause = target == playerPause;
                 hook.group.add(framework, target, chain -> {
                     Object result = chain.proceed();
                     String aid = (String) chain.getArg(0);
                     installed.onMain(() -> {
+                        if (!isPause && aid != null && installed.transitionFrame != null
+                                && !aid.equals(installed.transitionSourceAid)) {
+                            installed.transitionPlayingAid = aid;
+                            if (aid.equals(installed.selectedAid)) installed.releaseTransitionAfterPlayback(aid);
+                        }
                         if (aid != null && aid.equals(installed.selectedAid)) {
                             installed.paused = isPause;
-                            if (isPause) installed.generation++;
+                            if (isPause) {
+                                installed.generation++;
+                                installed.pendingAdvance = false;
+                            }
                         }
                     });
                     return result;
@@ -221,6 +246,8 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
             this.settings = settings;
             this.options = options;
             generation++;
+            pendingAdvance = false;
+            dismissTransitionFrame(false);
             diagnostic = settings != null && settings.autoPlay ? "等待当前视频播放完成" : "自动滑动已关闭";
         });
     }
@@ -238,6 +265,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
             if (selectedHolder.get() != holder || !aid.equals(selectedAid)) {
                 generation++;
                 attempted = false;
+                pendingAdvance = false;
                 lastSkip = null;
                 diagnostic = "等待当前视频播放完成";
             }
@@ -246,8 +274,97 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
             selectedRoot = new WeakReference<>(root);
             selectedAid = aid;
             if (!sameSelection) paused = false;
+            if (aid.equals(transitionPlayingAid)) releaseTransitionAfterPlayback(aid);
             if (root.hasWindowFocus()) resumed = new WeakReference<>(activity);
         } catch (ReflectiveOperationException | RuntimeException failure) { fail(failure); }
+    }
+
+    /** Normalizes manual ViewPager animation to the same captured-frame handoff as auto-next. */
+    private Object interceptPagerSelection(XposedInterface.Chain chain) throws Throwable {
+        java.util.List<Object> args = chain.getArgs();
+        if (closed || setCurrentItem == null || transitionRedirecting || args == null || args.size() < 2
+                || !(args.get(0) instanceof Number) || !Boolean.TRUE.equals(args.get(1))) {
+            return chain.proceed();
+        }
+        Object pager = chain.getThisObject();
+        View root = activeRoot();
+        String sourceAid = selectedAid;
+        Object panel;
+        try {
+            panel = panel();
+            if (panel == null || pagerField.get(panel) != pager || root == null || sourceAid == null) {
+                return chain.proceed();
+            }
+        } catch (ReflectiveOperationException | RuntimeException unavailable) {
+            return chain.proceed();
+        }
+
+        int target = ((Number) args.get(0)).intValue();
+        long token = generation;
+        DouAiLog.Operation operation = DouAiLog.begin("auto_play", "manual_page_transition");
+        operation.stage("manual_transition_intercept", "target_index=" + target + ";smooth_scroll=true");
+        AtomicBoolean claimed = new AtomicBoolean();
+        Runnable fallback = operation.wrap(() -> {
+            if (!claimed.compareAndSet(false, true)) return;
+            operation.stage("transition_frame", "captured=false;reason=capture_timeout;manual=true");
+            invokeManualSelection(pager, target, root, sourceAid, token, operation, null);
+        });
+        main.postDelayed(fallback, 120L);
+        PlaybackTransitionFrame.capture(root, main, operation.wrapConsumer(frame -> {
+            if (!claimed.compareAndSet(false, true)) {
+                if (frame != null) frame.close();
+                return;
+            }
+            main.removeCallbacks(fallback);
+            operation.stage("transition_frame", "captured=" + (frame != null) + ";memory_only=true;manual=true");
+            invokeManualSelection(pager, target, root, sourceAid, token, operation, frame);
+        }));
+        return null;
+    }
+
+    private void invokeManualSelection(Object pager, int target, View root, String sourceAid, long token,
+                                       DouAiLog.Operation operation, PlaybackTransitionFrame.Overlay frame) {
+        if (closed || generation != token || activeRoot() != root || !sourceAid.equals(selectedAid)
+                || panelPager() != pager) {
+            if (frame != null) frame.close();
+            operation.finish(DouAiLog.Outcome.CANCELLED, "manual_transition_target_changed",
+                    "advance_invoked=false");
+            return;
+        }
+        if (frame != null) {
+            dismissTransitionFrame(false);
+            transitionFrame = frame;
+            transitionSourceAid = sourceAid;
+            transitionPlayingAid = null;
+            transitionTimeout = () -> {
+                if (transitionFrame == frame) dismissTransitionFrame(true);
+            };
+            main.postDelayed(transitionTimeout, 4500L);
+        }
+        try {
+            transitionRedirecting = true;
+            setCurrentItem.invoke(pager, target, false);
+            operation.stage("native_advance", "direction=manual;target_index=" + target
+                    + ";smooth_scroll=false;request_only=true;transition_frame=" + (frame != null));
+            operation.finish(DouAiLog.Outcome.SUCCESS, "manual_selection_redirected",
+                    "native_accepted=true;result_scope=selected_card;playback_started=unobserved");
+        } catch (ReflectiveOperationException | RuntimeException failure) {
+            if (frame != null) dismissTransitionFrame(false);
+            operation.error("manual_transition_redirect", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "manual_selection_redirect_failed",
+                    "advance_invoked=false");
+        } finally {
+            transitionRedirecting = false;
+        }
+    }
+
+    private Object panelPager() {
+        try {
+            Object panel = panel();
+            return panel == null ? null : pagerField.get(panel);
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            return null;
+        }
     }
 
     private void recoverHolder(Object holder, Object expectedPanel) {
@@ -283,6 +400,8 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
         try {
             int action = event.getActionMasked();
             if (action == MotionEvent.ACTION_DOWN) {
+                pendingAdvance = false;
+                dismissTransitionFrame(false);
                 Object panel = panel();
                 if (panel == null || pagerField.get(panel) != pager || activeRoot() == null) return;
                 touching = true;
@@ -328,50 +447,133 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
         }
         if (generation != token) { skipped("stale_session", "已忽略过期播放完成事件"); return; }
         if (paused || touching) { skipped("paused_or_touching", "暂停或手动操作中，暂不翻页"); return; }
-        if (attempted) { skipped("already_attempted", "已处理当前播放完成事件"); return; }
+        if (attempted || pendingAdvance) { skipped("already_attempted", "已处理当前播放完成事件"); return; }
         if (root == null || !root.hasWindowFocus()) { skipped("not_foreground", "当前视频不在前台，暂不翻页"); return; }
         if (aid == null || aid.isEmpty() || !aid.equals(selectedAid)) {
             skipped("different_video", "完成事件不属于当前视频，暂不翻页"); return;
         }
+
         DouAiLog.Operation operation = DouAiLog.begin("auto_play", "playback_complete");
-        boolean terminal = false;
         operation.stage("validate_current_selection", "work_ref=" + DouAiLog.reference(aid) + ";generation=" + token);
         try {
             Object holder = selectedHolder.get();
             Object panel = panel();
             if (panel == null || !aid.equals(aid(holder)) || currentHolder.invoke(panel) != holder) {
-                skipped("holder_changed", "当前视频已切换，暂不翻页"); return;
+                skipped("holder_changed", "当前视频已切换，暂不翻页");
+                operation.finish(DouAiLog.Outcome.SKIPPED, "validation_gate", "advance_invoked=false;reason=holder_changed");
+                return;
             }
             Object pager = pagerField.get(panel);
             if (pager == null || ((Number) scrollState.invoke(pager)).intValue() != 0) {
-                skipped("pager_scrolling", "视频正在滑动，暂不翻页"); return;
+                skipped("pager_scrolling", "视频正在滑动，暂不翻页");
+                operation.finish(DouAiLog.Outcome.SKIPPED, "validation_gate", "advance_invoked=false;reason=pager_scrolling");
+                return;
             }
             LocalOptions local = options;
             if (local != null && local.enabled("pause_auto_on_comments")) {
                 Object dialogs = dialogField.get(panel);
                 if (dialogs == null || Boolean.TRUE.equals(commentsShowing.invoke(dialogs, true))) {
-                    skipped("comments_showing", "评论已展开，暂不翻页"); return;
+                    skipped("comments_showing", "评论已展开，暂不翻页");
+                    operation.finish(DouAiLog.Outcome.SKIPPED, "validation_gate", "advance_invoked=false;reason=comments_showing");
+                    return;
                 }
             }
             Object pagerContext = pagerContextField.get(panel);
-            if (pagerContext == null) { skipped("pager_context_unavailable", "翻页上下文不可用"); return; }
-            attempted = true;
-            // UP goes to the next item; DOWN goes to the previous item. The pager checks boundaries.
+            if (pagerContext == null) {
+                skipped("pager_context_unavailable", "翻页上下文不可用");
+                operation.finish(DouAiLog.Outcome.SKIPPED, "validation_gate", "advance_invoked=false;reason=pager_context_unavailable");
+                return;
+            }
             boolean followDirection = local == null || local.enabled("smart_swipe", true);
             int targetDirection = followDirection ? direction : 1;
-            // The host may deliver the next selection synchronously during invoke().
+            pendingAdvance = true;
+            operation.stage("capture_current_video_frame", "memory_only=true;network=false");
+
+            AtomicBoolean claimed = new AtomicBoolean();
+            Runnable fallback = operation.wrap(() -> {
+                if (!claimed.compareAndSet(false, true)) return;
+                pendingAdvance = false;
+                operation.stage("transition_frame", "captured=false;reason=capture_timeout");
+                advance(aid, token, root, panel, pagerContext, targetDirection, operation, null);
+            });
+            main.postDelayed(fallback, 120L);
+            PlaybackTransitionFrame.capture(root, main, operation.wrapConsumer(frame -> {
+                if (!claimed.compareAndSet(false, true)) {
+                    if (frame != null) frame.close();
+                    return;
+                }
+                main.removeCallbacks(fallback);
+                pendingAdvance = false;
+                operation.stage("transition_frame", "captured=" + (frame != null) + ";memory_only=true");
+                advance(aid, token, root, panel, pagerContext, targetDirection, operation, frame);
+            }));
+        } catch (ReflectiveOperationException | RuntimeException failure) {
+            pendingAdvance = false;
+            operation.error("prepare_transition", failure);
+            operation.finish(DouAiLog.Outcome.FAILED, "transition_capture_failed", "advance_invoked=false");
+            fail(failure);
+        }
+    }
+
+    private void advance(String aid, long token, View root, Object panel, Object pagerContext,
+                         int targetDirection, DouAiLog.Operation operation,
+                         PlaybackTransitionFrame.Overlay frame) {
+        boolean terminal = false;
+        try {
+            Object currentPager = panel == null ? null : pagerField.get(panel);
+            Object currentHolder = panel == null ? null : this.currentHolder.invoke(panel);
+            Object currentPagerContext = panel == null ? null : pagerContextField.get(panel);
+            Object currentScrollState = currentPager == null ? null : scrollState.invoke(currentPager);
+            if (closed || !group.isActive() || settings == null || !settings.autoPlay
+                    || generation != token || paused || touching || attempted
+                    || !aid.equals(selectedAid) || selectedHolder.get() == null
+                    || activeRoot() != root || currentHolder != selectedHolder.get()
+                    || currentPagerContext != pagerContext || !(currentScrollState instanceof Number)
+                    || ((Number) currentScrollState).intValue() != 0) {
+                if (frame != null) frame.close();
+                terminal = true;
+                operation.finish(DouAiLog.Outcome.CANCELLED, "transition_target_changed",
+                        "advance_invoked=false;generation=" + generation);
+                return;
+            }
+            LocalOptions local = options;
+            if (local != null && local.enabled("pause_auto_on_comments")) {
+                Object dialogs = dialogField.get(panel);
+                if (dialogs == null || Boolean.TRUE.equals(commentsShowing.invoke(dialogs, true))) {
+                    if (frame != null) frame.close();
+                    terminal = true;
+                    operation.finish(DouAiLog.Outcome.CANCELLED, "comments_opened_during_transition_capture",
+                            "advance_invoked=false");
+                    return;
+                }
+            }
+            if (frame != null) {
+                transitionFrame = frame;
+                transitionSourceAid = aid;
+                transitionPlayingAid = null;
+                transitionTimeout = () -> {
+                    if (transitionFrame == frame) dismissTransitionFrame(true);
+                };
+                main.postDelayed(transitionTimeout, 4500L);
+            }
+            attempted = true;
             com.douai.module.analytics.LocalAnalytics.markAutomaticAdvance();
+            operation.stage("native_advance", "direction=" + targetDirection
+                    + ";smooth_scroll=false;request_only=true;transition_frame=" + (frame != null));
             Object moved;
-            operation.stage("native_advance", "direction=" + targetDirection + ";request_only=true");
             try {
-                moved = (targetDirection > 0 ? next : previous).invoke(pagerContext, "DouAiAutoSlide", true);
+                moved = (targetDirection > 0 ? next : previous).invoke(pagerContext, "DouAiAutoSlide", false);
             } catch (ReflectiveOperationException | RuntimeException failure) {
                 com.douai.module.analytics.LocalAnalytics.cancelAutomaticAdvance();
+                dismissTransitionFrame(false);
                 throw failure;
             }
             if (Boolean.TRUE.equals(moved)) {
                 com.douai.module.analytics.LocalAnalytics.action(aid, "auto_slide", "自动翻页", "automatic", "accepted");
-            } else com.douai.module.analytics.LocalAnalytics.cancelAutomaticAdvance();
+            } else {
+                com.douai.module.analytics.LocalAnalytics.cancelAutomaticAdvance();
+                dismissTransitionFrame(false);
+            }
             diagnostic = Boolean.TRUE.equals(moved) ? (targetDirection > 0 ? "已请求向上翻页" : "已请求向下翻页")
                     : "当前列表边界未能翻页";
             boolean selectionChanged = selectedAid != null && !aid.equals(selectedAid);
@@ -383,16 +585,41 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
                     "native_accepted=" + Boolean.TRUE.equals(moved) + ";selection_changed=" + selectionChanged
                             + ";result_scope=selected_card;playback_started=unobserved");
             safeLog("DouAi auto-slide advance direction=" + (targetDirection > 0 ? "UP" : "DOWN")
-                    + "; moved=" + moved);
+                    + "; smooth_scroll=false; transition_frame=" + (frame != null) + "; moved=" + moved);
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            if (frame != null && transitionFrame != frame) frame.close();
             terminal = true;
             operation.error("native_advance", failure);
             operation.finish(DouAiLog.Outcome.FAILED, "advance_failed", "rollback_requested=true");
             fail(failure);
         } finally {
-            // Earlier validation returns are terminal skips, not an unfinished request.
-            if (!terminal) operation.finish(DouAiLog.Outcome.SKIPPED, "validation_gate", "reason=" + lastSkip + ";advance_invoked=false");
+            if (!terminal) operation.finish(DouAiLog.Outcome.SKIPPED, "validation_gate",
+                    "reason=" + lastSkip + ";advance_invoked=false");
         }
+    }
+
+    private void releaseTransitionAfterPlayback(String aid) {
+        PlaybackTransitionFrame.Overlay frame = transitionFrame;
+        if (frame == null || aid == null || aid.equals(transitionSourceAid)) return;
+        if (transitionRelease != null) main.removeCallbacks(transitionRelease);
+        transitionRelease = () -> {
+            if (transitionFrame == frame && aid.equals(selectedAid)) dismissTransitionFrame(true);
+        };
+        main.postDelayed(transitionRelease, 180L);
+    }
+
+    private void dismissTransitionFrame(boolean fade) {
+        if (transitionTimeout != null) main.removeCallbacks(transitionTimeout);
+        if (transitionRelease != null) main.removeCallbacks(transitionRelease);
+        transitionTimeout = null;
+        transitionRelease = null;
+        transitionSourceAid = null;
+        transitionPlayingAid = null;
+        PlaybackTransitionFrame.Overlay frame = transitionFrame;
+        transitionFrame = null;
+        if (frame == null) return;
+        if (fade) frame.fadeAndClose(180L);
+        else frame.close();
     }
 
     private Object panel() throws IllegalAccessException {
@@ -428,6 +655,8 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
 
     private void clearSelection() {
         generation++;
+        pendingAdvance = false;
+        dismissTransitionFrame(false);
         selectedHolder.clear();
         selectedRoot.clear();
         selectedAid = null;
@@ -473,7 +702,10 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
     }
     @Override public void onActivityPaused(Activity activity) {
         pausedActivity = new WeakReference<>(activity);
-        if (resumed.get() == activity) { resumed.clear(); generation++; touching = false; touchPager.clear(); }
+        if (resumed.get() == activity) {
+            resumed.clear(); generation++; pendingAdvance = false; touching = false; touchPager.clear();
+            dismissTransitionFrame(false);
+        }
     }
     @Override public void onActivityDestroyed(Activity activity) {
         View root = selectedRoot.get();

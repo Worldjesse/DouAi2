@@ -126,7 +126,8 @@ public final class AutoPlayHookTest {
             assertEquals(1, f.panel.B3.nextCalls);
             assertEquals(0, f.panel.B3.previousCalls);
             assertEquals("DouAiAutoSlide", f.panel.B3.source);
-            assertTrue(f.panel.B3.smooth);
+            assertFalse("Automatic advance skips the blank SurfaceView smooth-scroll transition",
+                    f.panel.B3.smooth);
             f.select(f.holder("two"));
             f.completed("two");
             assertEquals(2, f.panel.B3.nextCalls);
@@ -142,6 +143,8 @@ public final class AutoPlayHookTest {
             f.completed("one");
             assertEquals(0, f.panel.B3.nextCalls);
             assertEquals(1, f.panel.B3.previousCalls);
+            assertFalse("Automatic playback advance does not animate a blank SurfaceView handoff",
+                    f.panel.B3.smooth);
             f.select(f.holder("two"));
             f.completed("two");
             assertEquals(0, f.panel.B3.nextCalls);

@@ -1065,6 +1065,7 @@ public final class DouAiModule extends XposedModule {
                 feedGestureToolsHook = FeedGestureToolsHook.install(hookFramework(), hostScanReport, hostClassLoader,
                         targetContext, localOptions, message -> moduleLog(3, TAG, message));
                 HostUiController ui = hostUiController;
+                if (ui != null) feedGestureToolsHook.setModuleSettingsLauncher(ui::showSettingsFromGesture);
                 Activity activity = ui == null ? null : ui.getResumedActivity();
                 if (activity != null) feedGestureToolsHook.onActivityResumed(activity);
                 AutoPlayHook pauseState = autoPlayHook;

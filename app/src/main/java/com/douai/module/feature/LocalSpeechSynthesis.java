@@ -90,14 +90,22 @@ public final class LocalSpeechSynthesis implements AutoCloseable {
             return;
         }
         Locale language = Locale.forLanguageTag(options.text("tts_language", "zh-CN"));
+        String preferredVoiceName = options.text(SpeechSettings.LOCAL_VOICE_NAME, "").trim();
         Voice selected = null;
+        Voice languageMatch = null;
         if (current.getVoices() != null) {
             for (Voice voice : current.getVoices()) {
                 if (voice.isNetworkConnectionRequired()
                         || !voice.getLocale().getLanguage().equals(language.getLanguage())) continue;
-                if (selected == null || voice.getLocale().equals(language)) selected = voice;
+                if (languageMatch == null || voice.getLocale().equals(language)) languageMatch = voice;
+                if (!preferredVoiceName.isEmpty() && preferredVoiceName.equals(voice.getName())
+                        && voice.getLocale().equals(language)) {
+                    selected = voice;
+                    break;
+                }
             }
         }
+        if (selected == null) selected = languageMatch;
         if (selected == null) {
             complete(null, "请先在系统语音引擎中安装离线中文语音");
             return;

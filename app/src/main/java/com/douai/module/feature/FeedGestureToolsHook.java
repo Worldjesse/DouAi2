@@ -32,6 +32,11 @@ import com.douai.module.config.LocalOptions;
 import com.douai.module.diagnostics.DouAiLog;
 import com.douai.module.config.SettingsRepository;
 import com.douai.module.scan.HostScanReport;
+import com.douai.module.ui.GestureQuickFeaturesDialog;
+import com.douai.module.ui.GestureQuickModelDialog;
+import com.douai.module.ui.GestureQuickVoiceDialog;
+import com.douai.module.ui.HostDialogBounds;
+import com.douai.module.ui.miuix.MiuixDialogBuilder;
 
 import io.github.libxposed.api.XposedInterface;
 
@@ -54,6 +59,10 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
             "open_comments", "toggle_components", "speed", "view_finder" };
     public static final String[] ACTION_LABELS = { "无", "快捷菜单", "复制文案", "保存媒体",
             "打开评论", "隐藏/显示组件", "倍速", "视图查找" };
+    private static final String[] QUICK_MENU_ACTIONS = { "copy_text", "save_media", "open_comments",
+            "toggle_components", "speed", "view_finder", "select_model", "module_settings", "quick_features" };
+    private static final String[] QUICK_MENU_LABELS = { "复制文案", "保存媒体", "打开评论",
+            "隐藏/显示组件", "倍速", "视图查找", "切换模型", "模块设置", "功能快捷" };
     public static final String[] REGION_IDS = { "top_left", "top_center", "top_right",
             "middle_left", "middle_center", "middle_right", "bottom_left", "bottom_center", "bottom_right" };
     public static final String[] REGION_LABELS = { "左上", "上中", "右上", "左中", "中央", "右中",
@@ -91,6 +100,7 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
     private Field finderDiscardCurrentEvent;
     private final ThreadLocal<Boolean> replayingFinderTouch = new ThreadLocal<>();
     private volatile LocalOptions options;
+    private volatile Consumer<Activity> moduleSettingsLauncher;
     private volatile boolean closed;
     private WeakReference<Object> selectedHolder = new WeakReference<>(null);
     private WeakReference<Object> pausedHolder = new WeakReference<>(null);
@@ -219,6 +229,10 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
 
     public void setPausedStateProvider(Function<String, Boolean> provider) {
         pausedState = provider == null ? ignored -> null : provider;
+    }
+
+    public void setModuleSettingsLauncher(Consumer<Activity> launcher) {
+        moduleSettingsLauncher = launcher;
     }
 
     public boolean supports(String key) {
@@ -942,6 +956,9 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
                     case "toggle_components": componentVisibility.accept(!componentsShown.getAsBoolean()); break;
                     case "speed": applyConfiguredSpeed(root, holder, operation); break;
                     case "view_finder": showViewFinder(root, holder); break;
+                    case "select_model": showModelPicker(root); break;
+                    case "module_settings": openModuleSettings(root); break;
+                    case "quick_features": showQuickFeatures(root); break;
                     default: break;
                 }
                 if (!"speed".equals(action)) operation.finish(DouAiLog.Outcome.UNCONFIRMED, "action_dispatched",
@@ -959,12 +976,85 @@ public final class FeedGestureToolsHook implements Application.ActivityLifecycle
 
     private void showMenu(View root, Object holder) {
         dismissDialog();
-        String[] labels = java.util.Arrays.copyOfRange(ACTION_LABELS, 2, ACTION_LABELS.length);
-        actionDialog = new AlertDialog.Builder(root.getContext()).setTitle("DouAi")
-                .setItems(labels, (dialog, index) -> dispatch(ACTION_IDS[index + 2], holder, root))
+        Activity owner = activity(root.getContext());
+        if (owner == null || owner != resumed.get()) {
+            toast(root.getContext(), "当前页面暂不可打开快捷菜单");
+            return;
+        }
+        AlertDialog menu = new MiuixDialogBuilder(owner, true).setTitle("快捷菜单")
+                .setItems(QUICK_MENU_LABELS, (dialog, index) -> {
+                    if (index >= 0 && index < QUICK_MENU_ACTIONS.length) {
+                        dispatch(QUICK_MENU_ACTIONS[index], holder, root);
+                    }
+                })
                 .setNegativeButton("取消", null).create();
-        actionDialog.show();
+        presentActionDialog(owner, menu);
         com.douai.module.analytics.LocalAnalytics.feature("gesture_menu", "快捷菜单打开");
+    }
+
+    private void showModelPicker(View root) {
+        Activity owner = activeOwner(root);
+        if (owner == null) return;
+        HostSettingsStore store = new HostSettingsStore(application);
+        AlertDialog picker = GestureQuickModelDialog.create(owner, store,
+                () -> openModuleSettings(owner));
+        presentActionDialog(owner, picker);
+    }
+
+    private void openModuleSettings(View root) {
+        openModuleSettings(activeOwner(root));
+    }
+
+    private void openModuleSettings(Activity owner) {
+        if (owner == null) return;
+        dismissDialog();
+        Consumer<Activity> launcher = moduleSettingsLauncher;
+        if (launcher == null) {
+            toast(owner, "模块设置入口暂不可用");
+            return;
+        }
+        launcher.accept(owner);
+    }
+
+    private void showQuickFeatures(View root) {
+        Activity owner = activeOwner(root);
+        if (owner == null) return;
+        HostSettingsStore store = new HostSettingsStore(application);
+        AlertDialog dialog = GestureQuickFeaturesDialog.create(owner, store,
+                () -> showVoicePicker(owner, store),
+                message -> toast(owner, message));
+        presentActionDialog(owner, dialog);
+    }
+
+    private void showVoicePicker(Activity owner, HostSettingsStore store) {
+        if (owner == null || owner != resumed.get() || owner.isFinishing() || owner.isDestroyed()) return;
+        AlertDialog picker = GestureQuickVoiceDialog.create(owner, store,
+                () -> openModuleSettings(owner), dialog -> presentActionDialog(owner, dialog));
+        presentActionDialog(owner, picker);
+    }
+
+    private Activity activeOwner(View root) {
+        Activity owner = activity(root == null ? null : root.getContext());
+        if (owner == null || owner != resumed.get() || owner.isFinishing() || owner.isDestroyed()) {
+            if (root != null) toast(root.getContext(), "当前页面暂不可打开快捷菜单");
+            return null;
+        }
+        return owner;
+    }
+
+    private void presentActionDialog(Activity owner, AlertDialog dialog) {
+        dismissDialog();
+        actionDialog = dialog;
+        dialog.setOwnerActivity(owner);
+        try {
+            dialog.show();
+            HostDialogBounds.install(owner, dialog, true);
+        } catch (RuntimeException | LinkageError failure) {
+            actionDialog = null;
+            dialog.dismiss();
+            safeLog("Could not show gesture action dialog: " + failure.getClass().getSimpleName());
+            toast(owner, "快捷菜单打开失败");
+        }
     }
 
     private void showViewFinder(View root, Object holder) throws ReflectiveOperationException {
