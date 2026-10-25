@@ -53,14 +53,40 @@ public final class SpeechHttpClient {
     public static final class Resource {
         public final byte[] bytes;
         public final String contentType;
+        final java.io.File file;
+        private final byte[] header, meaningful;
+        private final long length;
 
         Resource(byte[] bytes, String contentType) {
             this.bytes = bytes;
             this.contentType = contentType == null ? "" : contentType;
+            this.file = null;
+            this.header = bytes;
+            int start = 0; while (start < bytes.length && (bytes[start] & 255) <= 32) start++;
+            this.meaningful = java.util.Arrays.copyOfRange(bytes, start, Math.min(bytes.length, start + 16));
+            this.length = bytes.length;
+        }
+
+        private Resource(java.io.File file, Probe probe, long length, String contentType) {
+            this.bytes = null; this.file = file; this.length = length;
+            this.header = java.util.Arrays.copyOf(probe.first, probe.firstSize);
+            this.meaningful = java.util.Arrays.copyOf(probe.meaningful, probe.meaningfulSize);
+            this.contentType = contentType == null ? "" : contentType;
+        }
+
+        long sizeBytes() { return length; }
+
+        byte[] readBytes() throws IOException {
+            if (bytes != null) return bytes;
+            if (file.length() > MAX_AUDIO_BYTES) throw tooLarge(MAX_AUDIO_BYTES);
+            return java.nio.file.Files.readAllBytes(file.toPath());
         }
 
         public String text() {
-            if (bytes.length > MAX_TEXT_BYTES) throw new IllegalArgumentException("第三方语音文本响应超过 2 MiB");
+            if (length > MAX_TEXT_BYTES) throw new IllegalArgumentException("第三方语音文本响应超过 2 MiB");
+            byte[] textBytes;
+            try { textBytes = readBytes(); }
+            catch (IOException failure) { throw new IllegalArgumentException("第三方语音响应无法读取"); }
             Charset charset = StandardCharsets.UTF_8;
             Matcher declared = CHARSET.matcher(contentType);
             if (declared.find()) {
@@ -71,7 +97,7 @@ public final class SpeechHttpClient {
             }
             try {
                 String value = charset.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
-                        .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString();
+                        .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(textBytes)).toString();
                 return value.startsWith("\uFEFF") ? value.substring(1) : value;
             } catch (CharacterCodingException ignored) {
                 throw new IllegalArgumentException("第三方语音响应不是有效的 JSON/TXT");
@@ -79,21 +105,21 @@ public final class SpeechHttpClient {
         }
 
         public boolean isAudio() {
+            byte[] bytes = header;
             if (starts("RIFF") && bytes.length >= 12 && ascii(8, "WAVE")) return true;
             if (starts("ID3") || starts("OggS") || starts("fLaC")
                     || (bytes.length >= 8 && ascii(4, "ftyp"))
                     || (bytes.length >= 2 && (bytes[0] & 255) == 255 && (bytes[1] & 224) == 224)) return true;
             String type = contentType.toLowerCase(Locale.ROOT);
             if (!type.startsWith("audio/") && !type.startsWith("application/octet-stream")) return false;
-            int index = 0;
-            while (index < bytes.length && (bytes[index] & 255) <= 32) index++;
-            if (index == bytes.length) return false;
-            byte first = bytes[index];
+            if (meaningful.length == 0) return false;
+            byte first = meaningful[0];
             return first != '{' && first != '[' && first != '"' && first != '<'
-                    && !ascii(index, "http://") && !ascii(index, "https://");
+                    && !ascii(meaningful, 0, "http://") && !ascii(meaningful, 0, "https://");
         }
 
         public String audioExtension() {
+            byte[] bytes = header;
             if (starts("RIFF") && bytes.length >= 12 && ascii(8, "WAVE")) return ".wav";
             if (starts("OggS")) return ".ogg";
             if (starts("fLaC")) return ".flac";
@@ -114,9 +140,27 @@ public final class SpeechHttpClient {
 
         private boolean starts(String value) { return ascii(0, value); }
         private boolean ascii(int offset, String value) {
+            return ascii(header, offset, value);
+        }
+        private static boolean ascii(byte[] bytes, int offset, String value) {
             if (offset + value.length() > bytes.length) return false;
             for (int i = 0; i < value.length(); i++) if (bytes[offset + i] != value.charAt(i)) return false;
             return true;
+        }
+    }
+
+    private static final class Probe {
+        final byte[] first = new byte[16], meaningful = new byte[16];
+        int firstSize, meaningfulSize;
+        boolean found;
+        void accept(byte[] buffer, int count) {
+            int copied = Math.min(count, first.length - firstSize);
+            System.arraycopy(buffer, 0, first, firstSize, copied); firstSize += copied;
+            if (meaningfulSize == meaningful.length) return;
+            for (int i = 0; i < count && meaningfulSize < meaningful.length; i++) {
+                if (!found && (buffer[i] & 255) <= 32) continue;
+                found = true; meaningful[meaningfulSize++] = buffer[i];
+            }
         }
     }
 
@@ -127,6 +171,10 @@ public final class SpeechHttpClient {
 
         public Resource fetchResource(String url, String headers) throws IOException {
             return fetch(url, headers, MAX_AUDIO_BYTES);
+        }
+
+        Resource fetchResource(String url, String headers, java.io.File destination) throws IOException {
+            return fetch(url, headers, MAX_AUDIO_BYTES, null, destination);
         }
 
         public String fetchText(String url, String headers) throws IOException {
@@ -157,6 +205,10 @@ public final class SpeechHttpClient {
         }
 
         private Resource fetch(String url, String headersJson, int limit, String body) throws IOException {
+            return fetch(url, headersJson, limit, body, null);
+        }
+
+        private Resource fetch(String url, String headersJson, int limit, String body, java.io.File destination) throws IOException {
             URI endpoint = endpoint(url);
             Map<String, String> headers = headers(headersJson);
             String operation = body == null ? "第三方语音 GET" : "MiniMax 语音 POST";
@@ -169,6 +221,7 @@ public final class SpeechHttpClient {
             transportEvent("request_started", "provider_request", "method=" + (body == null ? "GET" : "POST")
                     + "; endpoint_ref=" + DouAiLog.reference(url) + "; result=pending");
             long deadline = System.nanoTime() + 45_000_000_000L;
+            boolean complete = false;
             try {
                 opened = (HttpURLConnection) endpoint.toURL().openConnection();
                 synchronized (this) { ensureActive(); connection = opened; }
@@ -200,23 +253,29 @@ public final class SpeechHttpClient {
                 }
                 if (status < 200 || status >= 300) throw new IOException(operation + " 返回 HTTP " + status);
                 if (opened.getContentLengthLong() > limit) throw tooLarge(limit);
-                byte[] bytes;
-                try (InputStream input = opened.getInputStream(); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                ByteArrayOutputStream memory = destination == null ? new ByteArrayOutputStream() : null;
+                Probe probe = new Probe();
+                long total = 0;
+                try (InputStream input = opened.getInputStream(); OutputStream output = destination == null
+                        ? memory : new java.io.FileOutputStream(destination)) {
                     byte[] buffer = new byte[8192];
                     int count;
                     while ((count = input.read(buffer)) != -1) {
                         ensureActive();
                         if (System.nanoTime() > deadline) throw new SocketTimeoutException();
-                        if (count > limit - output.size()) throw tooLarge(limit);
+                        if (count > limit - total) throw tooLarge(limit);
+                        probe.accept(buffer, count); total += count;
                         output.write(buffer, 0, count);
                     }
-                    bytes = output.toByteArray();
                 }
                 ensureActive();
                 if (System.nanoTime() > deadline) throw new SocketTimeoutException();
-                if (bytes.length == 0) throw new IllegalArgumentException("第三方语音响应为空");
-                transportEvent("body_read", "bounded_response", "bytes=" + bytes.length + "; result=validating");
-                return new Resource(bytes, opened.getContentType());
+                if (total == 0) throw new IllegalArgumentException("第三方语音响应为空");
+                transportEvent("body_read", "bounded_response", "bytes=" + total + "; result=validating");
+                Resource resource = destination == null ? new Resource(memory.toByteArray(), opened.getContentType())
+                        : new Resource(destination, probe, total, opened.getContentType());
+                complete = true;
+                return resource;
             } catch (SocketTimeoutException ignored) {
                 ensureActive();
                 throw new IOException(operation + " 请求超时");
@@ -236,6 +295,9 @@ public final class SpeechHttpClient {
             } finally {
                 synchronized (this) { connection = null; inProgress = false; }
                 if (opened != null) opened.disconnect();
+                if (!complete && destination != null) {
+                    try { java.nio.file.Files.deleteIfExists(destination.toPath()); } catch (IOException ignored) { }
+                }
             }
         }
 

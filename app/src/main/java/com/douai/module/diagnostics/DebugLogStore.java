@@ -14,6 +14,8 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -31,7 +33,8 @@ final class DebugLogStore implements AutoCloseable {
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS").withZone(ZoneId.systemDefault());
     private final ArrayDeque<Event> pending = new ArrayDeque<>();
     private final ArrayDeque<byte[]> memory = new ArrayDeque<>();
-    private final ThreadPoolExecutor worker = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+    private final ThreadLocal<StructuredBatch> structuredBatch = new ThreadLocal<>();
+    private final ThreadPoolExecutor worker = new ThreadPoolExecutor(1, 1, 30L, TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(16), runnable -> { Thread thread = new Thread(runnable, "DouAi-DebugLog"); thread.setDaemon(true); return thread; });
     private final File directory;
     private final Object fileMonitor;
@@ -40,10 +43,12 @@ final class DebugLogStore implements AutoCloseable {
     private boolean scheduled, closed, clearing;
     private long dropped, totalDropped, ioFailures, serializationFailures, rotations, clears;
     private long generation;
+    private long structuredBatches, structuredRecords, structuredOutputOpens;
     private String readSource = "not_read", readReason = "none";
     private String lastClear = "not_requested";
 
     DebugLogStore(File directory) {
+        worker.allowCoreThreadTimeOut(true);
         this.directory = directory;
         String path;
         try { path = directory.getCanonicalPath(); }
@@ -74,10 +79,104 @@ final class DebugLogStore implements AutoCloseable {
             new org.json.JSONObject(json);
             byte[] bytes = line(priority, "DouAi.Event", false, json, "", 0).getBytes(StandardCharsets.UTF_8);
             if (bytes.length > ENTRY_BYTES) { synchronized (this) { serializationFailures++; lose("structured_entry_capacity", json); } return; }
-            write(bytes, epoch, json, true);
+            StructuredEntry entry = new StructuredEntry(bytes, epoch, json);
+            StructuredBatch batch = structuredBatch.get();
+            if (batch == null) writeStructuredBatch(java.util.Collections.singletonList(entry));
+            else {
+                if (batch.entries.size() >= 16 || batch.bytes + bytes.length > 64 * 1024) flushStructuredBatch();
+                if (bytes.length > 64 * 1024) writeStructuredBatch(java.util.Collections.singletonList(entry));
+                else { batch.entries.add(entry); batch.bytes += bytes.length; }
+            }
         } catch (RuntimeException | org.json.JSONException | LinkageError invalid) {
             synchronized (this) { serializationFailures++; lose("serialization_failure", json); }
         }
+    }
+
+    /** A delivery-thread batch has no second rejection queue and never outlives its delivery lock. */
+    void beginStructuredBatch() {
+        if (structuredBatch.get() != null) throw new IllegalStateException("Nested structured delivery batch");
+        structuredBatch.set(new StructuredBatch());
+    }
+
+    void flushStructuredBatch() {
+        StructuredBatch batch = structuredBatch.get();
+        if (batch == null || batch.entries.isEmpty()) return;
+        List<StructuredEntry> entries = new ArrayList<>(batch.entries);
+        batch.entries.clear(); batch.bytes = 0;
+        writeStructuredBatch(entries);
+    }
+
+    void endStructuredBatch() {
+        try { flushStructuredBatch(); }
+        finally { structuredBatch.remove(); }
+    }
+
+    private void writeStructuredBatch(List<StructuredEntry> entries) {
+        synchronized (fileMonitor) {
+            List<StructuredEntry> accepted = new ArrayList<>(entries.size());
+            synchronized (this) {
+                for (StructuredEntry entry : entries) {
+                    if (entry.generation != generation || clearing || closed) {
+                        lose("clear_or_close_generation", entry.json); continue;
+                    }
+                    if (entry.bytes.length > TAIL_BYTES) {
+                        losses.record("memory_entry_capacity", entry.json);
+                        remember("{\"event\":\"memory_record_omitted\",\"reason_code\":\"memory_entry_capacity\",\"see\":\"storage_integrity\"}\n".getBytes(StandardCharsets.UTF_8));
+                    } else remember(entry.bytes);
+                    accepted.add(entry);
+                }
+            }
+            if (accepted.isEmpty()) return;
+            try {
+                locked(() -> { appendStructuredBatch(accepted); return null; });
+            } catch (IOException | RuntimeException unavailable) {
+                synchronized (this) {
+                    for (StructuredEntry entry : accepted) if (!entry.persisted && !entry.skipped) {
+                        ioFailures++; lose("disk_write_failure_memory_only", entry.json);
+                    }
+                }
+            }
+        }
+    }
+
+    private void appendStructuredBatch(List<StructuredEntry> entries) throws IOException {
+        File current = new File(directory, "debug.log"), previous = new File(directory, "debug.1.log");
+        FileOutputStream output = null;
+        List<StructuredEntry> openRecords = new ArrayList<>();
+        long length = current.length();
+        synchronized (this) { structuredBatches++; }
+        try {
+            for (StructuredEntry entry : entries) {
+                synchronized (this) {
+                    if (entry.generation != generation || clearing || closed) {
+                        entry.skipped = true; lose("clear_or_close_generation", entry.json); continue;
+                    }
+                }
+                if (length + entry.bytes.length > FILE_BYTES) {
+                    if (output != null) {
+                        output.close(); output = null;
+                        for (StructuredEntry saved : openRecords) saved.persisted = true;
+                        openRecords.clear();
+                    }
+                    account(previous, "retention_rotation_candidate"); delete(previous);
+                    if (current.exists() && !current.renameTo(previous)) throw new IOException("Log rotation unavailable");
+                    synchronized (this) { rotations++; }
+                    length = 0;
+                }
+                if (output == null) {
+                    output = new FileOutputStream(current, true);
+                    synchronized (this) { structuredOutputOpens++; }
+                }
+                openRecords.add(entry);
+                output.write(entry.bytes); length += entry.bytes.length;
+                synchronized (this) { structuredRecords++; }
+            }
+            if (output != null) {
+                output.close(); output = null;
+                for (StructuredEntry saved : openRecords) saved.persisted = true;
+                openRecords.clear();
+            }
+        } finally { if (output != null) output.close(); }
     }
 
     /** One bounded startup batch; initialization never performs disk IO on the host main thread. */
@@ -367,6 +466,8 @@ final class DebugLogStore implements AutoCloseable {
         return "{\"event\":\"storage_integrity\",\"lost_count\":" + totalDropped + ",\"io_failures\":" + ioFailures
                 + ",\"serialization_failures\":" + serializationFailures + ",\"rotations\":" + rotations
                 + ",\"clears\":" + clears + ",\"last_clear_status\":\"" + lastClear + "\",\"pending_count\":" + pending.size()
+                + ",\"structured_batches\":" + structuredBatches + ",\"structured_records\":" + structuredRecords
+                + ",\"structured_output_opens\":" + structuredOutputOpens
                 + ",\"lost_count_semantics\":\"rejected_or_not_persisted_memory_may_retain\",\"structured_delivery\":\"evidence_worker_direct_no_secondary_queue\",\"read_source\":\"" + readSource
                 + "\",\"read_reason\":\"" + readReason + "\",\"affected_records\":" + losses.json()
                 + ",\"file_capacity_bytes\":" + TOTAL_BYTES + ",\"retention\":\"bounded_tail\",\"retention_accounting\":\"discard_candidates_check_io_failures_and_clear_status\",\"external_loss\":\"unknown\"}";
@@ -376,6 +477,14 @@ final class DebugLogStore implements AutoCloseable {
 
     @Override public synchronized void close() { closed = true; for (Event event : pending) lose("store_close_pending", event.message); pending.clear(); queuedChars = 0; notifyAll(); worker.shutdownNow(); }
     private interface Io<T> { T run() throws IOException; }
+    private static final class StructuredBatch {
+        final List<StructuredEntry> entries = new ArrayList<>(16); int bytes;
+    }
+    private static final class StructuredEntry {
+        final byte[] bytes; final long generation; final String json;
+        boolean persisted, skipped;
+        StructuredEntry(byte[] bytes, long generation, String json) { this.bytes = bytes; this.generation = generation; this.json = json; }
+    }
     private static final class Event {
         final long when = System.currentTimeMillis();
         final boolean detail; final int priority; final String tag, message, trace; final long generation;

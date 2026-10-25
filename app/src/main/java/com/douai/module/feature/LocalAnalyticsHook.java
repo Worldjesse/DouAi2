@@ -152,12 +152,12 @@ public final class LocalAnalyticsHook implements Application.ActivityLifecycleCa
             Object work = aweme.invoke(holder);
             Object actualId = AnalyticsAwemeReader.value(work, "getAid", "aid", "aweme_id");
             if (!expectedId.equals(actualId)) return;
-            AnalyticsAwemeReader.Metadata metadata = AnalyticsAwemeReader.read(work);
-            if (metadata == null) return;
             Visit existing = currentVisit;
             // Some host paths fire both selection callbacks. They describe one uninterrupted visit.
             if (existing != null && existing.store == analytics && existing.generation == recordingGeneration
                     && existing.holder.get() == holder && existing.id.equals(expectedId)) return;
+            AnalyticsAwemeReader.Metadata metadata = AnalyticsAwemeReader.read(work);
+            if (metadata == null) return;
             finish("selection_changed", false);
             discardCandidate();
             String token = analytics.beginVisit(recordingGeneration, metadata.id, metadata.type, metadata.authorId,

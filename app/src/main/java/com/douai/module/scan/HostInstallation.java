@@ -13,6 +13,21 @@ import java.util.List;
 public final class HostInstallation {
     private HostInstallation() { }
 
+    /** A cheap process-local freshness check; module upgrades do not change host DEX semantics. */
+    public static String hostIdentity(List<File> hostArchives) throws IOException {
+        if (hostArchives == null || hostArchives.isEmpty()) throw new IOException("Host archives unavailable");
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            digest.update("douai-host-installation-v1\n".getBytes(StandardCharsets.UTF_8));
+            List<File> archives = new ArrayList<>(hostArchives);
+            archives.sort(Comparator.comparing(File::getAbsolutePath));
+            for (File archive : archives) stamp(digest, archive);
+            StringBuilder result = new StringBuilder();
+            for (byte value : digest.digest()) result.append(String.format(java.util.Locale.ROOT, "%02x", value & 255));
+            return result.toString();
+        } catch (NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
+    }
+
     public static String identity(String moduleVersion, File moduleApk, List<File> hostArchives)
             throws IOException {
         if (moduleVersion == null || hostArchives == null || hostArchives.isEmpty()) {

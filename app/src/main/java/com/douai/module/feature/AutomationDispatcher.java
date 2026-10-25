@@ -107,6 +107,9 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
 
     public boolean isForeground(Activity activity) { return !closed && activity != null && resumed.get() == activity; }
 
+    /** Current presentation owner state also fences cancellation during a configuration handoff. */
+    boolean isEnabled(String kind) { return !closed && enabled(kind); }
+
     public void trackComment(Entry entry, int count, int retries, String phase,
                              BooleanSupplier stillValid, Runnable cancelGeneration,
                              Runnable cancelLatest) {
@@ -136,7 +139,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
 
     /** Preparation is visible before AI/TTS; the same pending item later owns its normal preview. */
     public void trackReply(Entry entry, String phase, BooleanSupplier stillValid, Runnable cancelGeneration) {
-        if (entry == null || !AutomationHistoryStore.REPLY.equals(entry.kind)
+        if (entry == null || !isReply(entry.kind)
                 || stillValid == null || cancelGeneration == null) throw new IllegalArgumentException("Reply preparation is required");
         onMain(() -> {
             if (closed || !enabled(entry.kind)) return;
@@ -167,22 +170,27 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         pending.put(identity, item);
         remember(entry.kind, entry.id);
         // A reply can still return before it produces content; persist at ready/failure/cancel.
-        if (!AutomationHistoryStore.REPLY.equals(entry.kind)) record(entry);
+        if (!isReply(entry.kind)) record(entry);
         return item;
     }
 
     private int admittedPendingCount() {
         int count = 0;
         for (Pending item : pending.values()) {
-            if (!AutomationHistoryStore.REPLY.equals(item.kind) || !item.early || item.ready) count++;
+            if (!isReply(item.kind) || !item.early || item.ready) count++;
         }
         return count;
     }
 
     /** A failed/invalid generator must not leave a preparation ring after releasing its task. */
     public void discardReplyPreparation(String id) {
+        discardReplyPreparation(AutomationHistoryStore.REPLY, id);
+    }
+
+    public void discardReplyPreparation(String kind, String id) {
+        if (!isReply(kind)) throw new IllegalArgumentException("Reply preparation kind is required");
         onMain(() -> {
-            Pending item = pending.get(key(AutomationHistoryStore.REPLY, id));
+            Pending item = pending.get(key(kind, id));
             if (item == null || !item.early || item.ready || item.state.get() >= SENDING) return;
             item.state.set(FINISHED);
             pending.remove(key(item.kind, item.entry.id));
@@ -234,11 +242,11 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
                 existing.entry = entry;
                 existing.action = action;
                 existing.outcome = outcome;
-                if (AutomationHistoryStore.REPLY.equals(kind) && admittedPendingCount() >= MAX_PENDING) {
+                if (isReply(kind) && admittedPendingCount() >= MAX_PENDING) {
                     existing.entry = entry.withDiagnostics(Reason.QUEUE_FULL, Stage.QUEUE, entry.queueMillis,
                             entry.mediaMillis, entry.generationMillis, entry.sendMillis);
                     safeLog("Automatic action cancelled because the preview queue is full");
-                    cancel(existing);
+                    cancel(existing, AutomationHistoryStore.COMMENT_REPLY.equals(kind) ? "deferred" : "cancelled");
                     return;
                 }
                 existing.ready = true;
@@ -478,6 +486,10 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
     }
 
     private void cancel(Pending item) {
+        cancel(item, "cancelled");
+    }
+
+    private void cancel(Pending item, String outcome) {
         int state;
         do {
             state = item.state.get();
@@ -487,7 +499,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         pending.remove(key(item.kind, item.entry.id));
         removeNotice(item);
         record(withStatus(item.entry, "cancelled"));
-        item.outcome.accept("cancelled");
+        item.outcome.accept(outcome);
     }
 
     private static Entry withStatus(Entry entry, String status) {
@@ -702,11 +714,31 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
 
     private void replyPresentation(Activity activity, String state, String phase, int count) {
         String owner = activity == null ? "none" : activity.getClass().getSimpleName();
-        String next = state + '|' + phase + '|' + count + '|' + owner;
+        Pending item = currentReply();
+        if (item == null && submittedReply != null && enabled(submittedReply.kind)) item = submittedReply;
+        Entry failure = item == null ? lastReplyFailure() : null;
+        String kind = item != null ? item.kind : failure == null ? "none" : failure.kind;
+        CommentRingView view = replyRing.view();
+        boolean attached = view.isAttachedToWindow();
+        boolean shown = view.isShown();
+        boolean parentMatch = activity != null && activity.getWindow() != null
+                && view.getParent() == activity.getWindow().getDecorView();
+        String next = state + '|' + phase + '|' + count + '|' + owner + '|' + kind
+                + '|' + attached + '|' + shown + '|' + parentMatch + '|' + tipEnabled(AutomationHistoryStore.REPLY)
+                + '|' + (item == null ? "" : item.trace.traceId());
         if (next.equals(replyPresentation)) return;
         replyPresentation = next;
         safeLog("[DouAi.ReplyOverlay] state=" + state + " phase=" + phase + " count=" + count
                 + " activity=" + owner + " tip=" + tipEnabled(AutomationHistoryStore.REPLY));
+        String evidence = "kind=" + kind + ";phase=" + phase + ";count=" + count + ";activity=" + owner
+                + ";tip=" + tipEnabled(AutomationHistoryStore.REPLY) + ";attached=" + attached
+                + ";shown=" + shown + ";parent_match=" + parentMatch;
+        // A request and observed View flags do not prove visibility above other windows.
+        Runnable record = () -> DouAiLog.event("automation_dispatch", "reply_overlay_state",
+                "show".equals(state) ? "show_requested" : state, evidence);
+        try {
+            if (item == null) record.run(); else item.trace.wrap(record).run();
+        } catch (RuntimeException | LinkageError ignored) { /* Presentation diagnostics cannot affect delivery. */ }
     }
 
     private void openReplyDetails() {
@@ -851,6 +883,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
         resumed.clear();
         commentRing.detach();
         replyRing.detach();
+        replyPresentation(null, "no_activity", "", 0);
         if (failureDetails != null) failureDetails.dismiss();
         if (submittedReply != null && submittedReply.details != null) submittedReply.details.dismiss();
         for (Pending item : new ArrayList<>(pending.values())) if (item.details != null) {
@@ -875,6 +908,7 @@ public final class AutomationDispatcher implements Application.ActivityLifecycle
             if (submittedReply != null) { removeNotice(submittedReply); submittedReply = null; }
             failureNotices.clear();
             resumed.clear();
+            replyPresentation(null, "closed", "", 0);
             application.unregisterActivityLifecycleCallbacks(this);
             worker.shutdown();
         });

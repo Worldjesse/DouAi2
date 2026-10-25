@@ -65,8 +65,8 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
     private volatile LocalOptions options;
     private SpeechPreparation.Preparer speechPreparer = SpeechPreparation::prepareComment;
     private volatile boolean closed;
-    private WeakReference<Object> holder = new WeakReference<>(null);
-    private WeakReference<View> root = new WeakReference<>(null);
+    private volatile WeakReference<Object> holder = new WeakReference<>(null);
+    private volatile WeakReference<View> root = new WeakReference<>(null);
 
     private AutoCommentHook(Context context, ClassLoader loader, LocalOptions options,
                             AutomationDispatcher dispatcher, Field holderRoot, Method holderAweme,
@@ -97,7 +97,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
         application.registerActivityLifecycleCallbacks(this);
         followListUpdates = NativeFollowLists.listen(() -> {
             Object selected = holder.get();
-            if (!closed && selected != null) selected(selected);
+            if (enabled() && selected != null) selected(selected);
         });
     }
 
@@ -128,7 +128,8 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                         .setExceptionMode(XposedInterface.ExceptionMode.PASSTHROUGH).intercept(chain -> {
                             Object result = chain.proceed();
                             Object owner = chain.getThisObject();
-                            hook.main.post(() -> hook.selected(owner));
+                            if (hook.enabled()) hook.main.post(() -> hook.selected(owner));
+                            else hook.rememberSelection(owner);
                             return result;
                         });
                 if (handle == null) throw new IllegalStateException("Empty automatic comment hook");
@@ -139,6 +140,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
                 XposedInterface.HookHandle handle = framework.hook(playing).setId("DouAi.AutoComment.Playing")
                         .setExceptionMode(XposedInterface.ExceptionMode.PASSTHROUGH).intercept(chain -> {
                             Object result = chain.proceed();
+                            if (!hook.enabled()) return result;
                             Object argument = chain.getArg(0);
                             hook.main.post(() -> {
                                 Object current = hook.holder.get();
@@ -191,8 +193,22 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
     private boolean enabled() { return !closed && options.enabled("native_auto_comment"); }
     public boolean ownsPublish(Object model) { return publisher.ownsPublish(model); }
 
+    /** Keep hot enable and incoming-message relation context without scheduling comment work. */
+    private void rememberSelection(Object selected) {
+        if (closed) return;
+        try {
+            boolean video = holderAweme.getDeclaringClass().isInstance(selected);
+            Object work = (video ? holderAweme : imageAweme).invoke(selected);
+            AutomationScopePolicy.rememberUser(modelValue(work, "author", "getAuthor"));
+            holder = new WeakReference<>(selected);
+            Object view = (video ? holderRoot : imageRoot).get(selected);
+            root = new WeakReference<>(view instanceof View ? (View) view : null);
+        } catch (ReflectiveOperationException | RuntimeException ignored) { }
+    }
+
     private void selected(Object selected) {
         if (closed) return;
+        if (!enabled()) { rememberSelection(selected); return; }
         DouAiLog.Operation selectionTrace = null;
         try {
             boolean video = holderAweme.getDeclaringClass().isInstance(selected);
@@ -674,7 +690,7 @@ public final class AutoCommentHook implements Application.ActivityLifecycleCallb
 
     @Override public void onActivityResumed(Activity activity) {
         Object selected = holder.get();
-        if (!closed && selected != null && activity(root.get()) == activity) main.post(() -> selected(selected));
+        if (enabled() && selected != null && activity(root.get()) == activity) main.post(() -> selected(selected));
     }
     @Override public void onActivityPaused(Activity activity) { }
     @Override public void onActivityDestroyed(Activity activity) { }

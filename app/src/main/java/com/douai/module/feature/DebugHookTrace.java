@@ -20,6 +20,8 @@ import java.util.Objects;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import io.github.libxposed.api.XposedInterface;
 
@@ -181,13 +183,14 @@ public final class DebugHookTrace {
                 }
                 if (Boolean.TRUE.equals(OBSERVING.get())) return original.intercept(chain);
                 long started = now();
-                long dropped = limiter.takePendingDrops(started / 1_000_000L);
+                long decision = limiter.sample(id, started / 1_000_000L);
+                long dropped = decision >>> 1;
                 if (dropped != 0) emit("[DouAi.Trace] dropped=" + dropped + " total=" + limiter.totalDropped()
                         + " windowMs=" + Limiter.WINDOW_MS);
-                boolean sampled = limiter.normal(id, started / 1_000_000L);
+                boolean sampled = (decision & 1) != 0;
                 String input = sampled ? inputs(chain) : "not_sampled";
 
-                long invokedAt = now();
+                long invokedAt = sampled ? now() : 0;
                 Object result;
                 try {
                     result = original.intercept(chain);
@@ -201,14 +204,14 @@ public final class DebugHookTrace {
                                         + " elapsedUs=" + elapsed(invokedAt, finishedAt));
                         else limiter.dropped();
                     } else if (sampled || limiter.error(id, finishedAt / 1_000_000L)) {
-                        detail(id, "threw", input, "unavailable", elapsed(invokedAt, finishedAt), failure,
+                        detail(id, "threw", input, "unavailable", sampled ? elapsed(invokedAt, finishedAt) : -1, failure,
                                 "[DouAi.Trace] hook=" + id + " args=" + input + " throws="
-                                        + failure.getClass().getName() + " elapsedUs=" + elapsed(invokedAt, finishedAt));
+                                        + failure.getClass().getName() + " elapsedUs=" + (sampled ? elapsed(invokedAt, finishedAt) : -1));
                     } else limiter.dropped();
 
                     throw failure;
                 }
-                long finishedAt = now();
+                long finishedAt = sampled ? now() : 0;
                 observation.finished(false);
                 if (sampled) {
                     String output;
@@ -228,23 +231,22 @@ public final class DebugHookTrace {
         /** A return is only transport observation. It never closes a business operation as success. */
         private final class Observation {
             final String id, feature;
-            long entered, returned, threw;
-            Boolean previousFailure;
+            final AtomicLong entered = new AtomicLong(), returned = new AtomicLong(), threw = new AtomicLong(), completed = new AtomicLong();
+            final AtomicReference<Boolean> previousFailure = new AtomicReference<>();
             Observation(String id) { this.id = id; feature = FeatureLogCatalog.forHook(id); }
-            synchronized void entered() {
-                entered++;
-                if (entered == 1) report("first_trigger", "entered=1;business_result=unknown");
+            void entered() {
+                if (entered.incrementAndGet() == 1) report("first_trigger", "entered=1;business_result=unknown");
             }
-            synchronized void finished(boolean failure) {
+            void finished(boolean failure) {
                 if (Boolean.TRUE.equals(OBSERVING.get())) return;
-                if (failure) threw++; else returned++;
-                long count = returned + threw;
-                if (previousFailure == null || previousFailure != failure || count >= 64 && (count & (count - 1)) == 0) {
-                    report(failure ? "threw" : "returned", "entered=" + entered + ";returned=" + returned
-                            + ";threw=" + threw + ";aggregated=" + (count > 1)
+                if (failure) threw.incrementAndGet(); else returned.incrementAndGet();
+                long count = completed.incrementAndGet();
+                Boolean previous = previousFailure.getAndSet(failure);
+                if (previous == null || previous.booleanValue() != failure || count >= 64 && (count & (count - 1)) == 0) {
+                    report(failure ? "threw" : "returned", "entered=" + entered.get() + ";returned=" + returned.get()
+                            + ";threw=" + threw.get() + ";aggregated=" + (count > 1)
                             + ";business_result=unknown");
                 }
-                previousFailure = failure;
             }
             void report(String phase, String evidence) {
                 Boolean prior = OBSERVING.get();
@@ -323,14 +325,13 @@ public final class DebugHookTrace {
                 start = now; normal = 0; errors = 0; keys.clear();
             }
         }
-        synchronized long takePendingDrops(long now) {
-            advance(now); long result = pendingDropped; pendingDropped = 0; return result;
-        }
-        synchronized boolean normal(String id, long now) {
-            advance(now); int[] counts = keys.get(id);
-            if (normal >= 200 || counts != null && counts[0] >= 8 || counts == null && keys.size() >= MAX_KEYS) return false;
+        synchronized long sample(String id, long now) {
+            advance(now);
+            long result = pendingDropped << 1; pendingDropped = 0;
+            int[] counts = keys.get(id);
+            if (normal >= 200 || counts != null && counts[0] >= 8 || counts == null && keys.size() >= MAX_KEYS) return result;
             if (counts == null) { counts = new int[2]; keys.put(id, counts); }
-            normal++; counts[0]++; return true;
+            normal++; counts[0]++; return result | 1;
         }
         synchronized boolean error(String id, long now) {
             advance(now); int[] counts = keys.get(id);

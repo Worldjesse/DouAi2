@@ -545,6 +545,61 @@ public final class CommentReplyHookTest {
         internal.finish();
     }
 
+    @Test public void disabledForegroundReplyDoesNotPollTheAccountAndReenableRestartsScanning() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger accountReads = new java.util.concurrent.atomic.AtomicInteger();
+        replaceField("ownAccount", (java.util.function.LongSupplier) () -> {
+            accountReads.incrementAndGet();
+            return account.get();
+        });
+        configure(LocalOptions.COMMENT_REPLY_ENABLED, false);
+        open();
+        accountReads.set(0);
+        advanceMillis(10 * 60_000);
+        assertEquals("Disabled comment replies must not keep an account polling timer", 0, accountReads.get());
+        assertTrue(source.baselines.isEmpty());
+
+        configure(LocalOptions.COMMENT_REPLY_ENABLED, true);
+        advanceMillis(1000);
+        assertEquals(List.of(100L), source.baselines);
+        configure(LocalOptions.COMMENT_REPLY_ENABLED, false);
+        accountReads.set(0);
+        hook.signal();
+        advanceMillis(10 * 60_000);
+        assertEquals(0, accountReads.get());
+        assertTrue(source.scans.isEmpty());
+    }
+
+    @Test public void ownedWorkerExitsWhenIdleRestartsAndHookCloseStillDrainsLedgerCallbacks() throws Exception {
+        java.util.concurrent.ThreadPoolExecutor io = CommentReplyHook.newWorker("comment-reply-idle-test");
+        io.setKeepAliveTime(1, TimeUnit.MILLISECONDS);
+        java.util.concurrent.atomic.AtomicReference<Thread> thread = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.ThreadFactory factory = io.getThreadFactory();
+        io.setThreadFactory(action -> { Thread created = factory.newThread(action); thread.set(created); return created; });
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        try {
+            assertEquals("first", io.submit(() -> "first").get(2, TimeUnit.SECONDS));
+            Thread first = thread.get();
+            first.join(2_000);
+            assertFalse("A completed feature must not keep its ordinary worker alive", first.isAlive());
+            java.util.concurrent.CountDownLatch began = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.atomic.AtomicInteger persisted = new java.util.concurrent.atomic.AtomicInteger();
+            io.execute(() -> {
+                began.countDown();
+                try { release.await(2, TimeUnit.SECONDS); }
+                catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+                persisted.incrementAndGet();
+            });
+            assertTrue(began.await(2, TimeUnit.SECONDS));
+            assertNotSame("The lane must be reusable after idle thread reclamation", first, thread.get());
+            io.execute(persisted::incrementAndGet);
+            replaceField("ledgerWorker", io);
+            hook.close();
+            release.countDown();
+            assertTrue(io.awaitTermination(2, TimeUnit.SECONDS));
+            assertEquals("Closing the hook must preserve already queued durable outcome callbacks", 2, persisted.get());
+        } finally { release.countDown(); io.shutdownNow(); }
+    }
+
     @Test public void leavingTheForegroundDuringGenerationCancelsItAndReopeningProcessesNewReplies() {
         open();
         source.events.put(100L, List.of(event("before-background", "root", "200", 1001)));
@@ -940,6 +995,215 @@ public final class CommentReplyHookTest {
         assertEquals(List.of("manual-cancel"), generator.ids);
     }
 
+    @Test public void generatingCommentReplyShowsTheSharedReplyRingAndCanBeCancelledBeforeNativeSubmission() {
+        configure("reply_tip", true);
+        open();
+        source.events.put(100L, List.of(event("generation-ring", "root", "200", 1001)));
+        generator.duringGenerate = () -> {
+            assertEquals(List.of("generation-ring"), generator.ids);
+            assertTrue("The task must have a durable claim before its generation UI is inspected",
+                    ledger().contains(100, "generation-ring"));
+            assertFalse(ledger().retryable(100, "generation-ring"));
+            View ring = activity.getWindow().getDecorView().findViewWithTag("automation.reply.ring");
+            assertNotNull("An actively generating comment reply with reply_tip enabled must expose its shared reply ring", ring);
+            assertTrue("The generating reply must remain cancellable before native submission", ring.performLongClick());
+        };
+        hook.requestScan();
+        processReplies();
+        assertTrue(sender.sent.isEmpty());
+        assertTrue(ledger().contains(100, "generation-ring"));
+        assertFalse("An explicit user cancellation must not automatically replay the same claim",
+                ledger().retryable(100, "generation-ring"));
+        assertTrue(history().stream().noneMatch(entry -> "sent".equals(entry.status) || "submitted".equals(entry.status)));
+    }
+
+    @Test public void commentReplyPreparationKeepsOneRingAcrossWaitingMediaModelSpeechAndTheOriginalPreview() throws Exception {
+        configure("reply_tip", true);
+        configure("reply_notice_seconds", "3");
+        configure(LocalOptions.REPLY_VOICE, true);
+        List<String> phases = new ArrayList<>();
+        CommentRingView[] preparing = new CommentRingView[1];
+        useMediaLoader((context, event, options, cancellation) -> {
+            assertSame(preparing[0], commentReplyRing());
+            phases.add(commentReplyRing().getPhase());
+            return Collections.emptyList();
+        });
+        generator.duringGenerate = () -> {
+            assertSame(preparing[0], commentReplyRing());
+            phases.add(commentReplyRing().getPhase());
+        };
+        java.io.File audioFile = java.io.File.createTempFile("comment-reply-preparation", ".m4a", activity.getCacheDir());
+        java.nio.file.Files.write(audioFile.toPath(), new byte[]{1, 2, 3});
+        SpeechPreparation.Audio audio = new SpeechPreparation.Audio(audioFile, 2000);
+        HostTargets.field(CommentReplyHook.class, "speechPreparer").set(hook, (SpeechPreparation.Preparer)
+                (context, text, options, maximum, valid) -> {
+                    assertTrue(valid.getAsBoolean());
+                    assertSame(preparing[0], commentReplyRing());
+                    phases.add(commentReplyRing().getPhase());
+                    return audio;
+                });
+        open();
+        source.events.put(100L, List.of(event("phase-ring", "root", "200", 1001)));
+        hook.requestScan();
+        pump();
+        preparing[0] = commentReplyRing();
+        assertNotNull(preparing[0]);
+        phases.add(preparing[0].getPhase());
+        assertTrue(generator.ids.isEmpty());
+        advanceMillis(2000);
+        assertEquals(List.of("waiting", "media", "generating", "speech"), phases);
+        assertSame(preparing[0], commentReplyRing());
+        assertEquals("preview", commentReplyRing().getPhase());
+        assertTrue(sender.sent.isEmpty());
+        advanceMillis(2999);
+        assertTrue("Preparation time must not shorten the existing ready preview", sender.sent.isEmpty());
+        advanceMillis(1);
+        assertEquals(List.of("phase-ring"), sender.sent);
+        assertSame(audio, sender.audios.get(0));
+        assertEquals("sent", history().get(0).status);
+        assertFalse(audioFile.exists());
+    }
+
+    @Test public void cancellingTheQueuedPreparationDoesNotCancelAnotherCommentRepliesActiveGenerator() {
+        configure("reply_tip", true);
+        configure("reply_notice_seconds", "2");
+        open();
+        source.events.put(100L, List.of(event("active-ring", "root-active", "200", 1001),
+                event("queued-ring", "root-queued", "201", 1002)));
+        generator.duringGenerate = () -> {
+            assertEquals(List.of("active-ring"), generator.ids);
+            assertEquals("generating", commentReplyRing().getPhase());
+            assertEquals(2, commentReplyRing().getQueueCount());
+            int cancellations = generator.cancels;
+            assertTrue(commentReplyRing().performLongClick());
+            assertEquals("Cancelling the queued task must not disconnect the current task's model request",
+                    cancellations, generator.cancels);
+        };
+        hook.requestScan();
+        processReplies();
+        generator.duringGenerate = null;
+        assertEquals(List.of("active-ring"), generator.ids);
+        assertTrue(ledger().contains(100, "queued-ring"));
+        assertFalse(ledger().retryable(100, "queued-ring"));
+        advanceMillis(2000);
+        assertEquals(List.of("active-ring"), sender.sent);
+        assertEquals(1, history().stream().filter(entry -> "sent".equals(entry.status)).count());
+    }
+
+    @Test public void disabledReplyTipDoesNotGateCommentGenerationOrSending() {
+        configure("reply_tip", false);
+        open();
+        source.events.put(100L, List.of(event("no-tip", "root", "200", 1001)));
+        generator.duringGenerate = () -> assertNull(commentReplyRing());
+        hook.requestScan();
+        processReplies();
+        assertEquals(List.of("no-tip"), generator.ids);
+        assertEquals(List.of("no-tip"), sender.sent);
+        assertEquals("sent", history().get(0).status);
+        assertNull(commentReplyRing());
+    }
+
+    @Test public void failedOrTimedOutGenerationLeavesAFailureNoticeInsteadOfAStalePreparation() throws Exception {
+        configure("reply_tip", true);
+        open();
+        source.events.put(100L, List.of(event("failed-preparation", "root-failure", "200", 1001)));
+        generator.failureAfterRequest = new java.io.IOException("fixture model failure");
+        hook.requestScan();
+        processReplies();
+        assertEquals("failed", commentReplyRing().getPhase());
+        assertTrue(sender.sent.isEmpty());
+        assertNull(HostTargets.read(hook, "activeGeneratingTask"));
+
+        generator.failureAfterRequest = null;
+        source.events.put(100L, List.of(event("timeout-preparation", "root-timeout", "201", 1002)));
+        generator.duringGenerate = () -> {
+            generator.duringGenerate = null;
+            source.events.clear();
+            advanceMillis(120_000);
+            assertEquals("failed", commentReplyRing().getPhase());
+        };
+        hook.requestScan();
+        processReplies();
+        assertTrue(sender.sent.isEmpty());
+        assertNull(HostTargets.read(hook, "activeGeneratingTask"));
+        assertEquals("failed", commentReplyRing().getPhase());
+    }
+
+    @Test
+    @org.robolectric.annotation.LooperMode(org.robolectric.annotation.LooperMode.Mode.PAUSED)
+    public void lateMainThreadPreparationUpdatesKeepTheWorkersFailureAsTheFinalHistoryOutcome() throws Exception {
+        configure("reply_tip", true);
+        configure("reply_notice_seconds", "2");
+        open();
+        int index = 0;
+        for (Exception failure : List.of(new java.io.IOException("fixture model failure"),
+                new java.net.SocketTimeoutException("fixture model transport timeout"))) {
+            String incoming = "late-phase-failure-" + ++index;
+            source.events.put(100L, List.of(event(incoming, "root-" + index, "200", 1000 + index)));
+            generator.failureAfterRequest = failure;
+            hook.requestScan();
+            pump();
+            @SuppressWarnings("unchecked") Map<String, Object> owned = (Map<String, Object>) HostTargets.read(hook, "tasks");
+            Object task = owned.get("100:" + incoming);
+            assertNotNull(task);
+            String historyId = (String) HostTargets.read(task, "id");
+            assertEquals("waiting", commentReplyRing().getPhase());
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(2));
+            assertEquals(1, generatorWorker.tasks.size());
+
+            java.util.concurrent.atomic.AtomicReference<Throwable> workerFailure = new java.util.concurrent.atomic.AtomicReference<>();
+            Thread worker = new Thread(() -> {
+                try { generatorWorker.runAll(); } catch (Throwable error) { workerFailure.set(error); }
+            }, "comment-reply-late-phase-test");
+            worker.start(); worker.join(2_000);
+            assertFalse("The real generation worker must finish while main remains paused", worker.isAlive());
+            assertNull(workerFailure.get());
+            assertTrue(((java.util.concurrent.atomic.AtomicBoolean) HostTargets.read(task, "finished")).get());
+            assertEquals("Queued media/model updates must not have run on main yet", "waiting", commentReplyRing().getPhase());
+            assertTrue(history().stream().noneMatch(entry -> historyId.equals(entry.id)));
+            source.events.clear();
+
+            ShadowLooper.idleMainLooper();
+            dispatchWorker.runAll(); ledgerWorker.runAll();
+            AutomationHistoryStore.Entry settled = history().stream().filter(entry -> historyId.equals(entry.id)).findFirst().orElseThrow();
+            assertEquals("A late invalid preparation must not replace the completed model failure", "failed", settled.status);
+            assertTrue(settled.modelRequestSent);
+            assertTrue(sender.sent.isEmpty());
+            assertEquals("failed", commentReplyRing().getPhase());
+            ShadowLooper.getShadowMainLooper().idleFor(Duration.ofSeconds(2));
+            pump();
+            assertNull("Only the bounded failure notice may remain; preparation cannot survive its expiry", commentReplyRing());
+            assertEquals("failed", history().stream().filter(entry -> historyId.equals(entry.id)).findFirst().orElseThrow().status);
+            assertTrue(sender.sent.isEmpty());
+        }
+    }
+
+    @Test public void queuedPreparationIsRemovedOnAccountChangeAndHookClose() {
+        configure("reply_tip", true);
+        for (String reason : List.of("account", "close")) {
+            account.set(100);
+            source.events.clear();
+            open();
+            String incoming = "preparation-" + reason;
+            source.events.put(100L, List.of(event(incoming, "root-" + reason, "200", 1001)));
+            hook.requestScan();
+            pump();
+            assertNotNull(commentReplyRing());
+            assertEquals("waiting", commentReplyRing().getPhase());
+            if (reason.equals("account")) { account.set(101); hook.requestScan(); pump(); }
+            else { hook.close(); ledgerWorker.runAll(); ShadowLooper.idleMainLooper(); }
+            assertNull(commentReplyRing());
+            assertTrue(generator.ids.isEmpty());
+            assertTrue(sender.sent.isEmpty());
+            assertTrue(ledger().retryable(100, incoming));
+            if (reason.equals("account")) { hook.close(); createHook(); }
+        }
+    }
+
+    private CommentRingView commentReplyRing() {
+        return (CommentRingView) activity.getWindow().getDecorView().findViewWithTag("automation.reply.ring");
+    }
+
     @Test public void anOldUnsubmittedSenderCancellationCannotOverwriteTheNextClaimsPendingRecord() {
         sender.delaySubmission = true;
         open();
@@ -1130,6 +1394,51 @@ public final class CommentReplyHookTest {
             processReplies();
             assertEquals(++completed, sender.sent.size());
             assertEquals(incoming, sender.sent.get(completed - 1));
+        }
+    }
+
+    @Test public void dispatcherFirstDisableDefersTheEarlyClaimEvenWhenItsLedgerCommitsBeforeTheHookUpdate() throws Exception {
+        assertEarlyPreparationDisableOrder(true);
+    }
+
+    @Test public void hookFirstDisableDefersTheEarlyClaimEvenWhenItsLedgerCommitsBeforeTheDispatcherUpdate() throws Exception {
+        assertEarlyPreparationDisableOrder(false);
+    }
+
+    private void assertEarlyPreparationDisableOrder(boolean dispatcherFirst) throws Exception {
+        configure("reply_tip", true);
+        open();
+        String incoming = dispatcherFirst ? "dispatcher-first-disable" : "hook-first-disable";
+        source.events.put(100L, List.of(event(incoming, "root", "200", 1001)));
+        hook.requestScan();
+        pump();
+        assertNotNull(commentReplyRing());
+        assertFalse(ledger().retryable(100, incoming));
+        java.util.concurrent.ExecutorService independentLedger = java.util.concurrent.Executors.newSingleThreadExecutor(action -> {
+            Thread thread = new Thread(action, "comment-reply-early-ledger-test"); thread.setDaemon(true); return thread;
+        });
+        replaceField("ledgerWorker", independentLedger);
+        Map<String, Object> disabled = new HashMap<>(values);
+        disabled.put("native_auto_reply", false);
+        LocalOptions next = new LocalOptions(disabled);
+        try {
+            if (dispatcherFirst) dispatcher.setOptions(next); else hook.setOptions(next);
+            ShadowLooper.idleMainLooper();
+            // Settle the real writer before updating the other owner, so a later setter cannot repair the verdict.
+            independentLedger.submit(() -> { }).get(2, TimeUnit.SECONDS);
+            assertTrue("Configuration cancellation must remain retryable regardless of setter order or writer timing",
+                    ledger().retryable(100, incoming));
+            if (dispatcherFirst) hook.setOptions(next); else dispatcher.setOptions(next);
+            ShadowLooper.idleMainLooper();
+            independentLedger.submit(() -> { }).get(2, TimeUnit.SECONDS);
+            assertTrue(ledger().retryable(100, incoming));
+            assertTrue(generator.ids.isEmpty());
+            assertTrue(sender.sent.isEmpty());
+            assertNull(commentReplyRing());
+        } finally {
+            hook.close();
+            independentLedger.shutdown();
+            assertTrue(independentLedger.awaitTermination(2, TimeUnit.SECONDS));
         }
     }
 

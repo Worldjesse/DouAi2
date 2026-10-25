@@ -36,6 +36,29 @@ public final class SubmissionLedgerTest {
         assertTrue(recreated.reserve(second, "account-2", 20));
     }
 
+    @Test public void checkingAndCompletingOneReservationNeverCopiesTheWholeLedger() {
+        assertTrue(ledger.reserve(first, "one", 10));
+        java.util.concurrent.atomic.AtomicInteger snapshots = new java.util.concurrent.atomic.AtomicInteger();
+        SharedPreferences counted = (SharedPreferences) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{SharedPreferences.class}, (proxy, method, args) -> {
+                    if (method.getName().equals("getAll")) snapshots.incrementAndGet();
+                    try { return method.invoke(preferences, args); }
+                    catch (java.lang.reflect.InvocationTargetException failure) { throw failure.getCause(); }
+                });
+        SubmissionLedger observed = new SubmissionLedger(counted, 2);
+        for (int i = 0; i < 100; i++) assertTrue(observed.isReserved(first, "one"));
+        assertTrue(observed.complete(first, "one", "sent", 20));
+        assertEquals(0, snapshots.get());
+    }
+
+    @Test public void malformedSingleRecordKeepsOtherReservationsUsable() {
+        assertTrue(ledger.reserve(first, "one", 10));
+        preferences.edit().putInt("send." + first, 7).commit();
+        assertFalse(ledger.isReserved(first, "one"));
+        assertTrue(ledger.contains(first));
+        assertTrue(ledger.reserve(second, "two", 20));
+    }
+
     @Test public void unknownCannotBecomeRetryableButLateSuccessIsRetained() {
         assertTrue(ledger.reserve(first, "one", 10));
         assertTrue(ledger.complete(first, "one", "unknown", 20));

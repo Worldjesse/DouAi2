@@ -45,6 +45,45 @@ public final class LocalAnalyticsTest {
 
     @After public void tearDown() { analytics.close(); }
 
+    @Test public void queuedBurstUsesFourTransactionsWithoutLosingAnyOfItsSixtyFourEvents() throws Exception {
+        analytics.setEnabled(true);
+        CountDownLatch release = blockWriter();
+        long before = analytics.writeTransactionCount();
+        try {
+            for (int i = 0; i < 64; i++) analytics.recordFeature("copy_text", "复制文案");
+        } finally { release.countDown(); }
+        AnalyticsSnapshot snapshot = analytics.snapshot(1);
+        assertEquals(64, snapshot.totalFeatureUses);
+        assertEquals(4, analytics.writeTransactionCount() - before);
+    }
+
+    @Test public void disablingDuringTheFirstMutationCancelsTheRestOfItsAlreadyDrainedBatch() throws Exception {
+        analytics.setEnabled(true);
+        CountDownLatch writerRelease = blockWriter();
+        CountDownLatch firstMutation = new CountDownLatch(1), mutationRelease = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicInteger mutations = new java.util.concurrent.atomic.AtomicInteger();
+        Class<?> mutationType = Class.forName(LocalAnalytics.class.getName() + "$Mutation");
+        java.lang.reflect.Method enqueue = LocalAnalytics.class.getDeclaredMethod("enqueueWrite", long.class, LocalDate.class, mutationType);
+        enqueue.setAccessible(true);
+        long epoch = analytics.generation();
+        LocalDate day = LocalDate.of(2026, 10, 18);
+        for (int i = 0; i < 16; i++) {
+            final boolean first = i == 0;
+            Object mutation = java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{mutationType}, (proxy, method, args) -> {
+                if (first) { firstMutation.countDown(); assertTrue(mutationRelease.await(5, TimeUnit.SECONDS)); }
+                mutations.incrementAndGet(); return null;
+            });
+            assertEquals(Boolean.TRUE, enqueue.invoke(analytics, epoch, day, mutation));
+        }
+        writerRelease.countDown();
+        try {
+            assertTrue(firstMutation.await(5, TimeUnit.SECONDS));
+            analytics.setEnabled(false);
+        } finally { mutationRelease.countDown(); }
+        analytics.snapshot(1);
+        assertEquals("Only the mutation already in progress may finish", 1, mutations.get());
+    }
+
     @Test public void defaultIsOffAndEmptySnapshotDoesNotCreateDatabase() {
         assertFalse(analytics.isEnabled());
         view("a");

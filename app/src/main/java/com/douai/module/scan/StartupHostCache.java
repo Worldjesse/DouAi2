@@ -17,14 +17,21 @@ public final class StartupHostCache {
     public static HostScanReport load(File cacheFile, List<File> archives, HostRuleSet rules,
                                       String installationIdentity) throws IOException {
         if (cacheFile == null || !cacheFile.isFile()) return null;
-        String identity = new HostScanner().hostIdentity(archives, rules, installationIdentity);
-        HostScanReport cached = new HostScanCache(cacheFile).load(identity);
-        if (cached == null || cached.getRuleResults().size() != rules.getRules().size()) return null;
+        return load(cacheFile, new HostScanner().prepare(archives, rules, installationIdentity));
+    }
+
+    public static HostScanReport load(File cacheFile, HostScanner.PreparedScan prepared) throws IOException {
+        if (cacheFile == null || !cacheFile.isFile() || prepared == null || !prepared.isCurrent()) return null;
+        return prepared.loadCached(new HostScanCache(cacheFile));
+    }
+
+    static boolean matchesRules(HostScanReport cached, HostRuleSet rules) {
+        if (cached == null || cached.getRuleResults().size() != rules.getRules().size()) return false;
         Set<String> expected = new HashSet<>();
         for (HostRule rule : rules.getRules()) expected.add(rule.getId());
         for (RuleScanResult result : cached.getRuleResults()) {
-            if (!expected.remove(result.getRuleId())) return null;
+            if (!expected.remove(result.getRuleId())) return false;
         }
-        return expected.isEmpty() ? cached : null;
+        return expected.isEmpty();
     }
 }

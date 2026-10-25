@@ -2,7 +2,12 @@ package com.douai.module.ui.miuix
 
 import android.app.AlertDialog
 import android.app.Dialog
+import android.content.ClipboardManager
+import android.content.Context
 import android.view.View
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -10,6 +15,8 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import com.douai.module.config.CustomViewLocator
+import com.douai.module.ui.ComponentHideSettingsPage
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -65,6 +72,38 @@ class MiuixDialogInteractionTest {
             assertEquals(1, selected)
             assertEquals(1, dialog!!.listView.checkedItemPosition)
             assertTrue(dialog!!.isShowing)
+        }
+    }
+
+    @Test fun customViewDetailsCopyMetadataThroughTheMiuixAction() {
+        var information = ""
+        compose.runOnUiThread {
+            val host = FrameLayout(compose.activity)
+            val target = TextView(compose.activity).apply {
+                id = android.R.id.title
+                text = "private host text"
+                contentDescription = "private host description"
+            }
+            host.addView(target)
+            val locator = CustomViewLocator.capture(host, target)!!
+            dialog = ComponentHideSettingsPage.showCustomViewDetails(compose.activity, locator, true)
+        }
+        compose.runOnIdle {
+            val content = dialog!!.window!!.decorView.findViewWithTag<TextView>("component.custom.details")
+            assertEquals(ViewGroup.LayoutParams.WRAP_CONTENT, dialog!!.window!!.attributes.height)
+            information = content.text.toString()
+            assertTrue(information.contains("当前窗口"))
+            assertTrue(information.contains("唯一资源 ID"))
+            assertTrue(information.contains("android:id/title"))
+            assertTrue(information.contains(TextView::class.java.name))
+            assertFalse(information.contains("private host text"))
+            assertFalse(information.contains("private host description"))
+        }
+        compose.onNodeWithTag("miuix.dialog.button.${Dialog.BUTTON_POSITIVE}").performClick()
+        compose.runOnIdle {
+            val clipboard = compose.activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            assertEquals(information, clipboard.primaryClip!!.getItemAt(0).text.toString())
+            assertFalse(dialog!!.isShowing)
         }
     }
 }

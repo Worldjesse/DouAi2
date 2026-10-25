@@ -62,6 +62,54 @@ public final class ChatImageLoaderTest {
         catch (IllegalArgumentException expected) { assertTrue(expected.getMessage().contains("16 MB")); }
     }
 
+    @Test public void everyExifOrientationPreservesImageBoundsAndCornerColors() throws Exception {
+        Bitmap source = Bitmap.createBitmap(120, 80, Bitmap.Config.ARGB_8888);
+        android.graphics.Canvas canvas = new android.graphics.Canvas(source);
+        android.graphics.Paint paint = new android.graphics.Paint();
+        int[] colors = {Color.RED, Color.GREEN, Color.BLUE, Color.YELLOW};
+        for (int i = 0; i < 4; i++) {
+            paint.setColor(colors[i]);
+            canvas.drawRect((i % 2) * 60, (i / 2) * 40, (i % 2 + 1) * 60, (i / 2 + 1) * 40, paint);
+        }
+        File file = File.createTempFile("douai-all-exif", ".jpg");
+        try {
+            for (int orientation = 1; orientation <= 8; orientation++) {
+                ByteArrayOutputStream encoded = new ByteArrayOutputStream();
+                source.compress(Bitmap.CompressFormat.JPEG, 100, encoded);
+                Files.write(file.toPath(), encoded.toByteArray());
+                ExifInterface exif = new ExifInterface(file.getAbsolutePath());
+                exif.setAttribute(ExifInterface.TAG_ORIENTATION, Integer.toString(orientation)); exif.saveAttributes();
+                byte[] bytes = Files.readAllBytes(file.toPath());
+                Bitmap original = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                android.graphics.Matrix matrix = new android.graphics.Matrix();
+                switch (orientation) {
+                    case 2: matrix.setScale(-1, 1); break;
+                    case 3: matrix.setRotate(180); break;
+                    case 4: matrix.setScale(1, -1); break;
+                    case 5: matrix.setRotate(90); matrix.postScale(-1, 1); break;
+                    case 6: matrix.setRotate(90); break;
+                    case 7: matrix.setRotate(270); matrix.postScale(-1, 1); break;
+                    case 8: matrix.setRotate(270); break;
+                    default: break;
+                }
+                Bitmap expected = Bitmap.createBitmap(original, 0, 0, original.getWidth(), original.getHeight(), matrix, true);
+                Bitmap actual = decode(ChatImageLoader.decode(bytes));
+                try {
+                    assertEquals("width orientation=" + orientation, expected.getWidth(), actual.getWidth());
+                    assertEquals("height orientation=" + orientation, expected.getHeight(), actual.getHeight());
+                    for (int x : new int[]{10, actual.getWidth() - 11}) for (int y : new int[]{10, actual.getHeight() - 11}) {
+                        int wanted = expected.getPixel(x, y), got = actual.getPixel(x, y);
+                        assertTrue(Math.abs(Color.red(wanted) - Color.red(got)) < 15);
+                        assertTrue(Math.abs(Color.green(wanted) - Color.green(got)) < 15);
+                        assertTrue(Math.abs(Color.blue(wanted) - Color.blue(got)) < 15);
+                    }
+                } finally {
+                    actual.recycle(); if (expected != original) expected.recycle(); original.recycle();
+                }
+            }
+        } finally { source.recycle(); Files.deleteIfExists(file.toPath()); }
+    }
+
     private static byte[] image(int width, int height, Bitmap.CompressFormat format) {
         Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
         bitmap.eraseColor(Color.TRANSPARENT);

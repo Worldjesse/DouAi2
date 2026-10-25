@@ -801,7 +801,8 @@ public final class NativeAutoReplyIntegrationTest {
 
     @Test public void installedStreakTickStillRunsWhileReplyImageIsBlocked() throws Throwable {
         BlockingMediaConnection connection = new BlockingMediaConnection(true);
-        try (LimitedReplies fixture = new LimitedReplies("reply_mode", "ai")) {
+        try (LimitedReplies fixture = new LimitedReplies("reply_mode", "ai", "streak_enabled", "true",
+                "automation_enabled", "true", "streak_targets", "200")) {
             try {
                 fixture.startBlockedImage(connection);
                 ScheduledThreadPoolExecutor ticker = (ScheduledThreadPoolExecutor)
@@ -1067,6 +1068,7 @@ public final class NativeAutoReplyIntegrationTest {
             for (int i = 0; i < limits.length; i += 2) values.put(limits[i],
                     "reply_voice".equals(limits[i]) || LocalOptions.REPLY_RECOGNIZE_IMAGES.equals(limits[i])
                             || LocalOptions.REPLY_RECOGNIZE_VIDEO.equals(limits[i])
+                            || "streak_enabled".equals(limits[i]) || "automation_enabled".equals(limits[i])
                             ? Boolean.parseBoolean(limits[i + 1]) : limits[i + 1]);
             LocalOptions options = new LocalOptions(values);
             dispatcher.setOptions(options);

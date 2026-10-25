@@ -3,6 +3,10 @@ package com.douai.module.feature;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.content.BroadcastReceiver;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -25,8 +29,9 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.net.HttpURLConnection;
 import java.net.URI;
-import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.ZonedDateTime;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -37,6 +42,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.FutureTask;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -51,7 +57,7 @@ import java.util.function.Supplier;
 
 /** Observes committed incoming messages and submits opt-in tasks through the native IM SDK. */
 public final class NativeMessagingHooks implements AutoCloseable {
-    private static final ThreadPoolExecutor RESULTS_IO = new ThreadPoolExecutor(1, 1, 30,
+    private static final ThreadPoolExecutor RESULTS_IO = new ThreadPoolExecutor(0, 1, 30,
             TimeUnit.SECONDS, new ArrayBlockingQueue<>(64), action -> {
                 Thread thread = new Thread(action, "DouAi-reply-results");
                 thread.setDaemon(true);
@@ -65,7 +71,26 @@ public final class NativeMessagingHooks implements AutoCloseable {
     private final Consumer<String> log;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ScheduledThreadPoolExecutor worker = new ScheduledThreadPoolExecutor(1);
-    private final ScheduledThreadPoolExecutor streakWorker = new ScheduledThreadPoolExecutor(1);
+    private final ScheduledThreadPoolExecutor streakWorker;
+    private final ExecutorService contactsWorker;
+    private ScheduledFuture<?> streakTimer;
+    private static volatile NativeMessagingHooks active;
+    private static final Object CONTACTS_OWNER_LOCK = new Object();
+    private final Object contactsLock = new Object();
+    private final List<ContactRequest> contactRequests = new ArrayList<>();
+    private List<ContactRequest> activeContactRequests = Collections.emptyList();
+    private final ThreadLocal<Boolean> enumeratingContacts = new ThreadLocal<>();
+    private boolean contactsQueued, membersLoaded;
+    private long contactsRevision, loadedContactsRevision = -1;
+    private volatile long loadedContactsAccountEpoch = -1;
+    Supplier<ZonedDateTime> streakTime = ZonedDateTime::now;
+    private boolean timeReceiverRegistered;
+    private final BroadcastReceiver timeChanges = new BroadcastReceiver() {
+        @Override public void onReceive(Context ignored, Intent intent) {
+            if (!closed && (Intent.ACTION_TIME_CHANGED.equals(intent.getAction())
+                    || Intent.ACTION_TIMEZONE_CHANGED.equals(intent.getAction()))) scheduleStreak(0);
+        }
+    };
     private static final long REPLY_GENERATION_TIMEOUT_MILLIS = 120_000;
     private static final long REPLY_QUEUE_TIMEOUT_MILLIS = 120_000;
     private final ReplyScheduler<ReplyTask> replyQueue = new ReplyScheduler<>(100);
@@ -132,7 +157,22 @@ public final class NativeMessagingHooks implements AutoCloseable {
 
     private NativeMessagingHooks(Context context, LocalOptions options, Consumer<String> log,
                                  AutomationDispatcher dispatcher) {
+        this(context, options, log, dispatcher, new ScheduledThreadPoolExecutor(1));
+    }
+
+    NativeMessagingHooks(Context context, LocalOptions options, Consumer<String> log,
+                         AutomationDispatcher dispatcher, ScheduledThreadPoolExecutor streakWorker) {
+        this(context, options, log, dispatcher, streakWorker, new ThreadPoolExecutor(0, 1, 30,
+                TimeUnit.SECONDS, new ArrayBlockingQueue<>(1), action -> {
+                    Thread thread = new Thread(action, "DouAi-contact-snapshot"); thread.setDaemon(true); return thread;
+                }));
+    }
+
+    NativeMessagingHooks(Context context, LocalOptions options, Consumer<String> log,
+                         AutomationDispatcher dispatcher, ScheduledThreadPoolExecutor streakWorker, ExecutorService contactsWorker) {
         this.context = context.getApplicationContext();
+        this.streakWorker = streakWorker;
+        this.contactsWorker = contactsWorker;
         this.options = options;
         this.log = log == null ? ignored -> { } : log;
         ownsDispatcher = dispatcher == null;
@@ -147,6 +187,12 @@ public final class NativeMessagingHooks implements AutoCloseable {
         receive = new BehaviorHookGroup("native_reply", this.log);
         worker.setRemoveOnCancelPolicy(true);
         streakWorker.setRemoveOnCancelPolicy(true);
+        IntentFilter timeFilter = new IntentFilter();
+        timeFilter.addAction(Intent.ACTION_TIME_CHANGED);
+        timeFilter.addAction(Intent.ACTION_TIMEZONE_CHANGED);
+        if (Build.VERSION.SDK_INT >= 33) this.context.registerReceiver(timeChanges, timeFilter, Context.RECEIVER_NOT_EXPORTED);
+        else this.context.registerReceiver(timeChanges, timeFilter);
+        timeReceiverRegistered = true;
     }
 
     public static NativeMessagingHooks install(XposedInterface framework, HostScanReport report,
@@ -162,8 +208,8 @@ public final class NativeMessagingHooks implements AutoCloseable {
         NativeMessagingHooks hook = new NativeMessagingHooks(context, options, log, dispatcher);
         hook.installRecall(framework, report, loader);
         hook.installReceive(framework, report, loader);
+        synchronized (CONTACTS_OWNER_LOCK) { active = hook; clearContacts(); contactAccount = 0; }
         hook.setOptions(options);
-        hook.streakWorker.scheduleWithFixedDelay(hook::streakTick, 5, 30, TimeUnit.SECONDS);
         return hook;
     }
 
@@ -175,14 +221,117 @@ public final class NativeMessagingHooks implements AutoCloseable {
         return "prevent_message_recall".equals(key) ? recall.installationFailure() : receive.installationFailure();
     }
 
-    public static Map<String, String> availableContacts() { return contacts; }
-    public static Map<String, String> availableGroups() { return groups; }
-    public static Map<String, ProfileListEntry> availableContactProfiles() { return profiles(contacts, contactProfiles); }
-    public static Map<String, ProfileListEntry> availableGroupProfiles() { return profiles(groups, groupProfiles); }
+    public static Map<String, String> availableContacts() { checkContactAccount(); return contacts; }
+    public static Map<String, String> availableGroups() { checkContactAccount(); return groups; }
+    public static Map<String, ProfileListEntry> availableContactProfiles() { checkContactAccount(); return profiles(contacts, contactProfiles); }
+    public static Map<String, ProfileListEntry> availableGroupProfiles() { checkContactAccount(); return profiles(groups, groupProfiles); }
     public static Map<String, ProfileListEntry> availableGroupMembers() {
+        checkContactAccount();
         Map<String, ProfileListEntry> result = new LinkedHashMap<>();
         for (Map<String, ProfileListEntry> members : groupMembers.values()) result.putAll(members);
         return Collections.unmodifiableMap(result);
+    }
+
+    private static void checkContactAccount() {
+        NativeMessagingHooks hook = active;
+        if (hook == null) return;
+        synchronized (hook.contactsLock) {
+            synchronized (CONTACTS_OWNER_LOCK) {
+                if (active == hook && (hook.closed || hook.ownUid() != contactAccount
+                        || !NativeFollowLists.ensureAccount(Long.toString(contactAccount))
+                        || hook.loadedContactsAccountEpoch != FollowListSnapshot.current().accountEpoch)) {
+                    clearContacts();
+                    hook.loadedContactsRevision = -1; hook.membersLoaded = false;
+                }
+            }
+        }
+    }
+
+    /** Loads local SDK snapshots on the independent worker; cancelling only detaches this UI consumer. */
+    public static AutoCloseable loadContacts(boolean includeMembers, Consumer<Boolean> completed) {
+        NativeMessagingHooks hook = active;
+        if (hook == null) { completed.accept(true); return () -> { }; }
+        return hook.requestContacts(includeMembers, completed);
+    }
+
+    private AutoCloseable requestContacts(boolean includeMembers, Consumer<Boolean> completed) {
+        long account = ownUid();
+        long accountEpoch = NativeFollowLists.ensureAccount(Long.toString(account))
+                ? FollowListSnapshot.current().accountEpoch : -1;
+        ContactRequest request = new ContactRequest(account, accountEpoch, includeMembers, completed);
+        synchronized (contactsLock) {
+            if (closed || !receive.isActive() || sdk == null || account <= 0
+                    || accountEpoch < 0 || accountEpoch != FollowListSnapshot.current().accountEpoch) {
+                completed.accept(false);
+                return request;
+            }
+            if (contactAccount == account && loadedContactsAccountEpoch == accountEpoch
+                    && loadedContactsRevision == contactsRevision && (!includeMembers || membersLoaded)) {
+                completed.accept(true);
+                return request;
+            }
+            contactRequests.add(request);
+            queueContacts();
+        }
+        return request;
+    }
+
+    private void queueContacts() {
+        synchronized (contactsLock) {
+            if (closed || contactsQueued) return;
+            contactsQueued = true;
+            try { contactsWorker.execute(this::loadContactSnapshot); }
+            catch (RejectedExecutionException failure) {
+                contactsQueued = false;
+                List<ContactRequest> rejected = new ArrayList<>(contactRequests);
+                contactRequests.clear();
+                for (ContactRequest request : rejected) main.post(() -> {
+                    if (!request.cancelled) request.completed.accept(false);
+                });
+            }
+        }
+    }
+
+    private void loadContactSnapshot() {
+        List<ContactRequest> callbacks;
+        long revision;
+        synchronized (contactsLock) {
+            callbacks = new ArrayList<>(contactRequests);
+            contactRequests.clear();
+            activeContactRequests = callbacks;
+            revision = contactsRevision;
+        }
+        boolean includeMembers = false;
+        boolean wanted = callbacks.isEmpty();
+        long accountEpoch = FollowListSnapshot.current().accountEpoch;
+        for (ContactRequest request : callbacks) if (!request.cancelled && request.account == ownUid()
+                && request.accountEpoch == accountEpoch) {
+            wanted = true;
+            if (request.includeMembers) includeMembers = true;
+        }
+        boolean success = wanted && discoverContacts(includeMembers, revision, accountEpoch, callbacks);
+        for (ContactRequest request : callbacks) main.post(() -> {
+            if (!request.cancelled) request.completed.accept(success && !closed && ownUid() == request.account
+                    && NativeFollowLists.ensureAccount(Long.toString(request.account))
+                    && FollowListSnapshot.current().accountEpoch == request.accountEpoch);
+        });
+        synchronized (contactsLock) {
+            activeContactRequests = Collections.emptyList();
+            contactsQueued = false;
+            if (!contactRequests.isEmpty()) queueContacts();
+        }
+    }
+
+    private static final class ContactRequest implements AutoCloseable {
+        final long account;
+        final long accountEpoch;
+        final boolean includeMembers;
+        final Consumer<Boolean> completed;
+        volatile boolean cancelled;
+        ContactRequest(long account, long accountEpoch, boolean includeMembers, Consumer<Boolean> completed) {
+            this.account = account; this.accountEpoch = accountEpoch; this.includeMembers = includeMembers; this.completed = completed;
+        }
+        @Override public void close() { cancelled = true; }
     }
 
     /** Number of streak sends whose outcome is unknown, including unmigrated legacy pending entries. */
@@ -233,6 +382,49 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 }
             }
         }
+        scheduleStreak(0);
+    }
+
+    private synchronized void scheduleStreak(long minimumDelay) {
+        if (streakTimer != null) streakTimer.cancel(false);
+        streakTimer = null;
+        LocalOptions current = options;
+        if (!automatic("streak_enabled", current) || ReplyPolicy.targets(current.text("streak_targets", "")).isEmpty()) return;
+        long windowDelay = nextStreakWindowDelay(current, streakTime.get());
+        if (windowDelay < 0) return;
+        long delay = Math.max(minimumDelay, windowDelay);
+        try {
+            streakTimer = streakWorker.schedule(() -> {
+                synchronized (NativeMessagingHooks.this) { streakTimer = null; }
+                try { streakTick(); }
+                finally { scheduleStreak(nextStreakDelay()); }
+            }, delay, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException ignored) { }
+    }
+
+    static long nextStreakWindowDelay(LocalOptions options, ZonedDateTime now) {
+        String start = options.text("streak_start", "").trim();
+        String end = options.text("streak_end", "").trim();
+        if (ReplyPolicy.inWindow(start, end, now.toLocalTime())) return 0;
+        try {
+            LocalTime first = LocalTime.parse(start);
+            LocalTime.parse(end);
+            ZonedDateTime next = now.toLocalDate().atTime(first).atZone(now.getZone());
+            if (!next.isAfter(now)) next = next.plusDays(1);
+            return Math.max(0, Duration.between(now, next).toMillis());
+        } catch (RuntimeException invalid) { return -1; }
+    }
+
+    private long nextStreakDelay() {
+        long account = ownUid();
+        if (account <= 0) return 30_000;
+        ZonedDateTime now = streakTime.get();
+        String day = now.toLocalDate().toString();
+        for (String target : ReplyPolicy.targets(options.text("streak_targets", ""))) {
+            String key = "streak." + account + "." + day + "." + target;
+            if (pendingStreak.contains(key) || streakLedger.canBegin(key)) return 30_000;
+        }
+        return Math.max(1, Duration.between(now, now.toLocalDate().plusDays(1).atStartOfDay(now.getZone())).toMillis());
     }
 
     private static boolean automationOptionsChanged(LocalOptions previous, LocalOptions next) {
@@ -366,14 +558,18 @@ public final class NativeMessagingHooks implements AutoCloseable {
                         ? new ContentValues((ContentValues) chain.getArg(2)) : null;
                 Object result = chain.proceed();
                 try {
-                    if (incoming != null && result instanceof Number && ((Number) result).longValue() >= 0) onIncoming(incoming, "database");
+                    if (incoming != null && result instanceof Number && ((Number) result).longValue() >= 0) {
+                        markContactsDirty();
+                        onIncoming(incoming, "database");
+                    }
                 } catch (Throwable failure) { receive.fail(failure); }
                 return result;
             });
             Method contextReady = HostTargets.method(report, "adv_im_conversations", loader);
             receive.add(framework, contextReady, chain -> {
-                sdk = chain.getThisObject();
-                return chain.proceed();
+                Object result = chain.proceed();
+                if (!Boolean.TRUE.equals(enumeratingContacts.get())) observeSdk(chain.getThisObject());
+                return result;
             });
             Method globalReceived = HostTargets.method(report, "adv_im_global_received", loader);
             receive.add(framework, globalReceived, chain -> {
@@ -382,6 +578,7 @@ public final class NativeMessagingHooks implements AutoCloseable {
                 List<?> messages = raw instanceof List<?> ? new ArrayList<>((List<?>) raw) : Collections.emptyList();
                 Object result = chain.proceed();
                 captureSdk(chain.getThisObject());
+                if (!messages.isEmpty()) markContactsDirty();
                 for (Object message : messages) {
                     try {
                         ContentValues values = incomingSnapshot.copy(message);
@@ -402,8 +599,37 @@ public final class NativeMessagingHooks implements AutoCloseable {
     }
 
     private void captureSdk(Object receiver) {
+        if (closed) return;
         Object value = HostTargets.read(receiver, "imSdkContext");
-        if (value != null && sdkUid != null && sdkUid.getDeclaringClass().isInstance(value)) sdk = value;
+        if (value != null && sdkUid != null && sdkUid.getDeclaringClass().isInstance(value)) observeSdk(value);
+    }
+
+    private void markContactsDirty() {
+        synchronized (contactsLock) { contactsRevision++; membersLoaded = false; }
+    }
+
+    private void observeSdk(Object value) {
+        if (closed) return;
+        boolean changed;
+        long account;
+        synchronized (contactsLock) {
+            synchronized (CONTACTS_OWNER_LOCK) {
+                if (closed || active != null && active != this) return;
+                Object previous = sdk;
+                sdk = value;
+                account = ownUid();
+                changed = previous != value || contactAccount != account;
+                if (changed) {
+                    clearContacts(); contactAccount = account;
+                    loadedContactsRevision = -1; membersLoaded = false;
+                }
+                contactsRevision++;
+            }
+        }
+        if (changed) {
+            if (account > 0 && receive.isActive()) queueContacts();
+            scheduleStreak(0);
+        }
     }
 
     private long ownUid() {
@@ -430,7 +656,12 @@ public final class NativeMessagingHooks implements AutoCloseable {
             safeLog("Automatic reply receipt skipped source=" + source + " reason=account_unavailable");
             return;
         }
-        if (contactAccount != account) { clearContacts(); contactAccount = account; }
+        synchronized (contactsLock) {
+            synchronized (CONTACTS_OWNER_LOCK) {
+                if (closed || active != this) return;
+                if (contactAccount != account) { clearContacts(); contactAccount = account; }
+            }
+        }
         String currentConversation = values.getAsString("conversation_id");
         Map<String, ProfileListEntry> members = groupMembers.get(currentConversation);
         Long senderUid;
@@ -1128,74 +1359,34 @@ public final class NativeMessagingHooks implements AutoCloseable {
 
     private void streakTick() {
         LocalOptions current = options;
-        if (closed || !receive.isActive() || sdk == null || ownUid() <= 0) { DouAiLog.event("streak", "eligibility", "native_im_or_account_unavailable", "closed=" + closed + ";sdk_present=" + (sdk != null)); return; }
+        ZonedDateTime now = streakTime.get();
+        Set<String> targets = ReplyPolicy.targets(current.text("streak_targets", ""));
+        if (!automatic("streak_enabled", current) || targets.isEmpty()
+                || !ReplyPolicy.inWindow(current.text("streak_start", ""), current.text("streak_end", ""), now.toLocalTime())) return;
+        if (sdk == null || ownUid() <= 0) return;
+        String day = now.toLocalDate().toString();
+        long self = ownUid();
+        boolean eligible = false;
+        for (String target : targets) {
+            String key = "streak." + self + "." + day + "." + target;
+            if (!pendingStreak.contains(key) && streakLedger.canBegin(key)) { eligible = true; break; }
+        }
+        if (!eligible) return;
         try {
-            Object model = sdkConversations.invoke(sdk);
-            Object raw = allConversations.invoke(model);
+            Object raw = nativeConversations();
             if (!(raw instanceof List<?>)) return;
-            Set<String> targets = ReplyPolicy.targets(current.text("streak_targets", ""));
-            Map<String, String> discovered = new LinkedHashMap<>();
-            Map<String, String> discoveredGroups = new LinkedHashMap<>();
-            Map<String, ProfileListEntry> discoveredProfiles = new LinkedHashMap<>();
-            Map<String, ProfileListEntry> discoveredGroupProfiles = new LinkedHashMap<>();
-            Map<String, Map<String, ProfileListEntry>> discoveredGroupMembers = new LinkedHashMap<>();
-            Map<String, ProfileListEntry> knownProfiles = new LinkedHashMap<>(NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWING));
-            knownProfiles.putAll(NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWERS));
-            String day = LocalDate.now().toString();
-            long self = ownUid();
             long epoch = generation.get();
             for (Object conversation : (List<?>) raw) {
-                if (!Boolean.TRUE.equals(isSingle.invoke(conversation))) {
-                    Object id = conversationId.invoke(conversation);
-                    Object core = conversationCore.invoke(conversation);
-                    Object name = core == null ? null : conversationName.invoke(core);
-                    if (id instanceof String && !((String) id).isEmpty()) {
-                        String groupName = name instanceof String && !((String) name).isEmpty() ? (String) name : (String) id;
-                        discoveredGroups.put((String) id, groupName);
-                        Object icon = HostTargets.invoke(core, "getIcon");
-                        discoveredGroupProfiles.put((String) id, new ProfileListEntry((String) id, groupName,
-                                icon instanceof String ? (String) icon : ""));
-                        Map<String, ProfileListEntry> knownMembers = new LinkedHashMap<>();
-                        Object rawMembers = HostTargets.invoke(conversation, "getMembers");
-                        if (rawMembers instanceof Iterable<?>) for (Object member : (Iterable<?>) rawMembers) {
-                            Object uid = HostTargets.invoke(member, "getUid");
-                            if (!(uid instanceof Number)) uid = HostTargets.read(member, "uid");
-                            if (!(uid instanceof Number) || ((Number) uid).longValue() <= 0) continue;
-                            String memberUid = uid.toString();
-                            ProfileListEntry profile = knownProfiles.get(memberUid);
-                            if (profile == null) {
-                                profile = memberProfile(memberUid, new ProfileListEntry(memberUid, "", ""));
-                                knownProfiles.put(memberUid, profile);
-                            }
-                            Object alias = HostTargets.invoke(member, "getAlias");
-                            if (!(alias instanceof String)) alias = HostTargets.read(member, "alias");
-                            knownMembers.put(memberUid, new ProfileListEntry(memberUid,
-                                    !profile.name.isEmpty() ? profile.name
-                                            : alias instanceof String ? (String) alias : "",
-                                    profile.avatarUrl));
-                        }
-                        discoveredGroupMembers.put((String) id, Collections.unmodifiableMap(knownMembers));
-                    }
-                    continue;
-                }
+                if (!Boolean.TRUE.equals(isSingle.invoke(conversation))) continue;
                 Object members = conversationMembers.invoke(conversation);
                 if (!(members instanceof List<?>)) continue;
                 String target = null;
                 for (Object member : (List<?>) members) {
-                    if (member instanceof Number && ((Number) member).longValue() != self) {
-                        String value = member.toString();
-                        Object core = conversationCore.invoke(conversation);
-                        Object name = core == null ? null : conversationName.invoke(core);
-                        discovered.put(value, name instanceof String && !((String) name).isEmpty() ? (String) name : value);
-                        Object icon = HostTargets.invoke(core, "getIcon");
-                        discoveredProfiles.put(value, new ProfileListEntry(value, discovered.get(value),
-                                icon instanceof String ? (String) icon : memberProfile(value).avatarUrl));
-                        if (targets.contains(value)) target = value;
+                    if (member instanceof Number && ((Number) member).longValue() != self && targets.contains(member.toString())) {
+                        target = member.toString();
                     }
                 }
-                String streakRejected = target == null ? "target_not_selected" : !automatic("streak_enabled", current) ? "disabled_or_not_ready"
-                        : !ReplyPolicy.inWindow(current.text("streak_start", ""), current.text("streak_end", ""), LocalTime.now()) ? "outside_configured_window" : "";
-                if (!streakRejected.isEmpty()) { DouAiLog.event("streak", "eligibility", streakRejected, "eligible=false"); continue; }
+                if (target == null) continue;
                 String key = "streak." + self + "." + day + "." + target;
                 if (!streakLedger.canBegin(key) || !pendingStreak.add(key)) { DouAiLog.event("streak", "eligibility", "ledger_blocked_or_already_pending", "target_ref=" + DouAiLog.reference(target)); continue; }
                 String id = (String) conversationId.invoke(conversation);
@@ -1226,7 +1417,9 @@ public final class NativeMessagingHooks implements AutoCloseable {
                             safeLog("Could not persist streak send result; outcome remains unknown");
                         }
                     }, () -> {
-                        if (!automatic("streak_enabled", options)) return false;
+                        ZonedDateTime sendingTime = streakTime.get();
+                        if (!automatic("streak_enabled", options) || !sendingTime.toLocalDate().toString().equals(day)
+                                || !ReplyPolicy.inWindow(options.text("streak_start", ""), options.text("streak_end", ""), sendingTime.toLocalTime())) return false;
                         reachedPersistence[0] = true;
                         attempt[0] = streakLedger.begin(key, System.currentTimeMillis());
                         if (attempt[0] == null) return false;
@@ -1256,15 +1449,115 @@ public final class NativeMessagingHooks implements AutoCloseable {
                     safeLog("Streak task failed: " + failure.getClass().getSimpleName());
                 }
             }
-            if (ownUid() == self) {
-                contacts = Collections.unmodifiableMap(discovered);
-                groups = Collections.unmodifiableMap(discoveredGroups);
-                contactProfiles = Collections.unmodifiableMap(discoveredProfiles);
-                groupProfiles = Collections.unmodifiableMap(discoveredGroupProfiles);
-                groupMembers = Collections.unmodifiableMap(discoveredGroupMembers);
-                contactAccount = self;
+        } catch (Exception failure) { safeLog("Streak conversation lookup failed: " + failure.getClass().getSimpleName()); }
+    }
+
+    private Object nativeConversations() throws Exception {
+        enumeratingContacts.set(true);
+        try { return allConversations.invoke(sdkConversations.invoke(sdk)); }
+        finally { enumeratingContacts.remove(); }
+    }
+
+    private boolean discoverContacts(boolean includeMembers, long revision, long accountEpoch, List<ContactRequest> requests) {
+        Object source = sdk;
+        long self = ownUid();
+        if (closed || source == null || self <= 0 || !receive.isActive()
+                || accountEpoch != FollowListSnapshot.current().accountEpoch) return false;
+        try {
+            Object raw = nativeConversations();
+            if (!(raw instanceof List<?>)) return false;
+            Map<String, String> discovered = new LinkedHashMap<>();
+            Map<String, String> discoveredGroups = new LinkedHashMap<>();
+            Map<String, ProfileListEntry> discoveredProfiles = new LinkedHashMap<>();
+            Map<String, ProfileListEntry> discoveredGroupProfiles = new LinkedHashMap<>();
+            Map<String, Map<String, ProfileListEntry>> discoveredGroupMembers = new LinkedHashMap<>();
+            Map<String, ProfileListEntry> knownProfiles = new LinkedHashMap<>();
+            if (includeMembers) {
+                knownProfiles.putAll(NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWING));
+                knownProfiles.putAll(NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWERS));
             }
-        } catch (Exception failure) { safeLog("Could not enumerate native single chats: " + failure.getClass().getSimpleName()); }
+            for (Object conversation : (List<?>) raw) {
+                if (!contactsStillWanted(requests, self, accountEpoch) || closed || sdk != source || ownUid() != self
+                        || FollowListSnapshot.current().accountEpoch != accountEpoch
+                        || contactsRevisionChanged(revision)) return false;
+                Object core = conversationCore.invoke(conversation);
+                Object name = core == null ? null : conversationName.invoke(core);
+                Object icon = HostTargets.invoke(core, "getIcon");
+                if (!Boolean.TRUE.equals(isSingle.invoke(conversation))) {
+                    Object id = conversationId.invoke(conversation);
+                    if (!(id instanceof String) || ((String) id).isEmpty()) continue;
+                    String groupName = name instanceof String && !((String) name).isEmpty() ? (String) name : (String) id;
+                    discoveredGroups.put((String) id, groupName);
+                    discoveredGroupProfiles.put((String) id, new ProfileListEntry((String) id, groupName,
+                            icon instanceof String ? (String) icon : ""));
+                    if (!includeMembers) continue;
+                    Map<String, ProfileListEntry> members = new LinkedHashMap<>();
+                    Object rawMembers = HostTargets.invoke(conversation, "getMembers");
+                    if (rawMembers instanceof Iterable<?>) for (Object member : (Iterable<?>) rawMembers) {
+                        if (!contactsStillWanted(requests, self, accountEpoch) || closed || sdk != source || ownUid() != self
+                                || FollowListSnapshot.current().accountEpoch != accountEpoch
+                                || contactsRevisionChanged(revision)) return false;
+                        Object uid = HostTargets.invoke(member, "getUid");
+                        if (!(uid instanceof Number)) uid = HostTargets.read(member, "uid");
+                        if (!(uid instanceof Number) || ((Number) uid).longValue() <= 0) continue;
+                        String memberUid = uid.toString();
+                        ProfileListEntry profile = knownProfiles.get(memberUid);
+                        if (profile == null) {
+                            profile = memberProfile(memberUid, new ProfileListEntry(memberUid, "", ""));
+                            knownProfiles.put(memberUid, profile);
+                        }
+                        Object alias = HostTargets.invoke(member, "getAlias");
+                        if (!(alias instanceof String)) alias = HostTargets.read(member, "alias");
+                        members.put(memberUid, new ProfileListEntry(memberUid, !profile.name.isEmpty() ? profile.name
+                                : alias instanceof String ? (String) alias : "", profile.avatarUrl));
+                    }
+                    discoveredGroupMembers.put((String) id, Collections.unmodifiableMap(members));
+                    continue;
+                }
+                Object rawMembers = conversationMembers.invoke(conversation);
+                if (!(rawMembers instanceof List<?>)) continue;
+                for (Object member : (List<?>) rawMembers) {
+                    if (!(member instanceof Number) || ((Number) member).longValue() == self) continue;
+                    String uid = member.toString();
+                    String label = name instanceof String && !((String) name).isEmpty() ? (String) name : uid;
+                    discovered.put(uid, label);
+                    discoveredProfiles.put(uid, new ProfileListEntry(uid, label,
+                            icon instanceof String ? (String) icon : memberProfile(uid).avatarUrl));
+                }
+            }
+            synchronized (contactsLock) {
+                synchronized (CONTACTS_OWNER_LOCK) {
+                    if (closed || sdk != source || ownUid() != self || contactsRevision != revision
+                            || active != this
+                            || !NativeFollowLists.ensureAccount(Long.toString(self))
+                            || FollowListSnapshot.current().accountEpoch != accountEpoch) return false;
+                    contacts = Collections.unmodifiableMap(discovered);
+                    groups = Collections.unmodifiableMap(discoveredGroups);
+                    contactProfiles = Collections.unmodifiableMap(discoveredProfiles);
+                    groupProfiles = Collections.unmodifiableMap(discoveredGroupProfiles);
+                    groupMembers = Collections.unmodifiableMap(discoveredGroupMembers);
+                    contactAccount = self;
+                    loadedContactsRevision = revision;
+                    loadedContactsAccountEpoch = accountEpoch;
+                    membersLoaded = includeMembers;
+                }
+            }
+            return true;
+        } catch (Exception failure) {
+            safeLog("Could not enumerate native contacts: " + failure.getClass().getSimpleName());
+            return false;
+        }
+    }
+
+    private static boolean contactsStillWanted(List<ContactRequest> requests, long account, long accountEpoch) {
+        if (requests.isEmpty()) return true;
+        for (ContactRequest request : requests) if (!request.cancelled && request.account == account
+                && request.accountEpoch == accountEpoch) return true;
+        return false;
+    }
+
+    private boolean contactsRevisionChanged(long revision) {
+        synchronized (contactsLock) { return contactsRevision != revision; }
     }
 
     private static String streakContent(LocalOptions options) throws Exception {
@@ -1294,17 +1587,32 @@ public final class NativeMessagingHooks implements AutoCloseable {
             closed = true;
             generation.incrementAndGet();
         }
+        if (timeReceiverRegistered) {
+            timeReceiverRegistered = false;
+            try { context.unregisterReceiver(timeChanges); } catch (IllegalArgumentException ignored) { }
+        }
         cancelReplies();
         worker.shutdownNow();
         streakWorker.shutdownNow();
+        synchronized (contactsLock) {
+            for (ContactRequest request : contactRequests) request.close();
+            for (ContactRequest request : activeContactRequests) request.close();
+            contactRequests.clear();
+            contactsRevision++;
+        }
+        contactsWorker.shutdownNow();
         dispatcher.cancelKind(AutomationHistoryStore.REPLY);
         if (ownsDispatcher) dispatcher.close();
         receive.close();
         recall.close();
         if (audioSender != null) audioSender.close();
         sdk = null;
-        clearContacts();
-        contactAccount = 0;
+        synchronized (CONTACTS_OWNER_LOCK) {
+            if (active == this) {
+                active = null;
+                clearContacts(); contactAccount = 0;
+            }
+        }
     }
 
     private static void clearContacts() {

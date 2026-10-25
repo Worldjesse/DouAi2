@@ -9,6 +9,7 @@ import java.lang.reflect.Method;
 
 /** Resolves only scan-proven targets; reflection never substitutes a first candidate. */
 public final class HostTargets {
+    private static final HostReflectionCache ACCESSORS = new HostReflectionCache();
     private HostTargets() { }
 
     public static HostCandidate candidate(HostScanReport report, String id) {
@@ -28,38 +29,33 @@ public final class HostTargets {
 
     public static Method method(HostScanReport report, String id, ClassLoader loader) throws Exception {
         HostCandidate value = candidate(report, id);
-        Method match = null;
-        for (Method method : type(report, id, loader).getDeclaredMethods()) {
-            if (!method.getName().equals(value.getMethodName())
-                    || !descriptor(method).equals(value.getMethodDescriptor())) continue;
-            if (match != null) throw new IllegalStateException("Ambiguous reflected method: " + id);
-            match = method;
-        }
+        Method match = ACCESSORS.declaredMethod(type(report, id, loader), value.getMethodName(),
+                value.getMethodDescriptor());
         if (match == null) throw new NoSuchMethodException(id);
-        match.setAccessible(true);
         return match;
     }
 
     public static Field field(Class<?> owner, String name) throws NoSuchFieldException {
-        for (Class<?> current = owner; current != null; current = current.getSuperclass()) {
-            try {
-                Field field = current.getDeclaredField(name);
-                field.setAccessible(true);
-                return field;
-            } catch (NoSuchFieldException ignored) { }
-        }
+        Field field = ACCESSORS.field(owner, name);
+        if (field != null) return field;
         throw new NoSuchFieldException(owner.getName() + "." + name);
     }
 
     public static Object invoke(Object owner, String name) {
         if (owner == null) return null;
-        try { return owner.getClass().getMethod(name).invoke(owner); }
+        try {
+            Method method = ACCESSORS.publicNoArgMethod(owner.getClass(), name);
+            return method == null ? null : method.invoke(owner);
+        }
         catch (ReflectiveOperationException | RuntimeException ignored) { return null; }
     }
 
     public static Object read(Object owner, String name) {
         if (owner == null) return null;
-        try { return field(owner.getClass(), name).get(owner); }
+        try {
+            Field field = ACCESSORS.field(owner.getClass(), name);
+            return field == null ? null : field.get(owner);
+        }
         catch (ReflectiveOperationException | RuntimeException ignored) { return null; }
     }
 

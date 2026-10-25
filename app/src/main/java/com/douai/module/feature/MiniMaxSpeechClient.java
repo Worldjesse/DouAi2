@@ -21,6 +21,11 @@ public final class MiniMaxSpeechClient {
 
     public static SpeechHttpClient.Resource synthesize(SpeechHttpClient.Request request, String text,
                                                        SpeechSettings settings) throws IOException {
+        return synthesize(request, text, settings, null);
+    }
+
+    static SpeechHttpClient.Resource synthesize(SpeechHttpClient.Request request, String text,
+                                                SpeechSettings settings, java.io.File destination) throws IOException {
         request.ensureActive();
         if (text == null || text.trim().isEmpty()) throw new IllegalArgumentException("MiniMax 语音内容为空");
         if (text.codePointCount(0, text.length()) >= 10_000) {
@@ -54,7 +59,7 @@ public final class MiniMaxSpeechClient {
             SpeechHttpClient.Resource resource;
             if (audio.startsWith("https://") || audio.startsWith("http://")) {
                 // Signed media links work without API credentials, including on the API's own origin.
-                resource = request.fetchResource(audio, "{}");
+                resource = destination == null ? request.fetchResource(audio, "{}") : request.fetchResource(audio, "{}", destination);
             } else {
                 resource = new SpeechHttpClient.Resource(decodeHex(audio, request), "");
             }

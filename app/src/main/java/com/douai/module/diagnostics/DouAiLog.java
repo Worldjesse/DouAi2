@@ -53,6 +53,7 @@ public final class DouAiLog {
     private static final ThreadPoolExecutor SNAPSHOTS = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(4), action -> { Thread thread = new Thread(action, "DouAi-LogSnapshot"); thread.setDaemon(true); return thread; });
     static {
+        SNAPSHOTS.allowCoreThreadTimeOut(true);
         WORKER = new Thread(DouAiLog::drain, "DouAi-Evidence");
         WORKER.setDaemon(true);
         WORKER.start();
@@ -63,6 +64,7 @@ public final class DouAiLog {
     /** A completed mode change also fences already-in-flight delivery to either output. */
     static void modeChangeBarrier(boolean detailed) {
         synchronized (DELIVERY_LOCK) {
+            DebugLog.flushStructuredBatch();
             if (!detailed) LogErrorSnapshot.retryUndeliveredContexts();
         }
     }
@@ -418,15 +420,18 @@ public final class DouAiLog {
         long epoch; synchronized (LOCK) { epoch = clearGeneration; }
         try {
             Map<String, Object> fields = new LinkedHashMap<>();
-            fields.put("schema_version", "2"); fields.put("event_id", UUID.randomUUID().toString());
-            fields.put("session_id", SESSION); fields.put("seq", Long.toString(SEQUENCE.incrementAndGet()));
+            String sequence = Long.toString(SEQUENCE.incrementAndGet());
+            fields.put("schema_version", "2"); fields.put("event_id", SESSION + ":" + sequence);
+            fields.put("session_id", SESSION); fields.put("seq", sequence);
             long when = System.currentTimeMillis();
-            fields.put("monotonic_ns", Long.toString(System.nanoTime()));
-            fields.put("module_version", moduleVersion); fields.put("build_id", buildId); fields.put("host_version", hostVersion);
+            if (detailed) fields.put("monotonic_ns", Long.toString(System.nanoTime()));
+            fields.put("module_version", moduleVersion); if (detailed) fields.put("build_id", buildId); fields.put("host_version", hostVersion);
             fields.put("process_name", processName); fields.put("pid", Integer.toString(pid));
             fields.put("config_revision", operation == null ? revision : operation.configRevision);
-            fields.put("config_revision_source", operation == null ? "process_state_observation" : operation.configOrigin);
-            fields.put("process_config_revision", revision);
+            if (detailed) {
+                fields.put("config_revision_source", operation == null ? "process_state_observation" : operation.configOrigin);
+                fields.put("process_config_revision", revision);
+            }
             fields.put("level", priority >= 6 ? "ERROR" : priority == 5 ? "WARN" : priority == 3 ? "DEBUG" : priority <= 2 ? "TRACE" : "INFO");
             fields.put("feature_id", safe(feature)); fields.put("event", safe(event)); fields.put("reason_code", safe(reason));
             fields.put("evidence", safe(evidence)); fields.put("truncated", Boolean.toString(evidence != null && evidence.length() > FIELD_LIMIT));
@@ -434,30 +439,42 @@ public final class DouAiLog {
                 LogErrorSnapshot snapshot = LogErrorSnapshot.capture(error, detailed);
                 if (operation != null) { operation.rememberError(snapshot.id); operation.rootOwner.rememberError(snapshot.id); }
                 fields.put("error_id", snapshot.id); fields.put("exception_class", snapshot.type);
-                fields.put("exception_message_ref", snapshot.messageRef); fields.put("exception_message", snapshot.message);
-                fields.put("exception_message_policy", "static_summary_or_exact_local_allowlist_raw_message_not_logged");
-                fields.put("error_context_truncated", Boolean.toString(snapshot.truncated));
-                fields.put("stack_frame_limit_per_cause", "8"); fields.put("cause_depth_limit", "3");
+                fields.put("exception_message", snapshot.message);
+                if (detailed) {
+                    fields.put("exception_message_ref", snapshot.messageRef);
+                    fields.put("exception_message_policy", "static_summary_or_exact_local_allowlist_raw_message_not_logged");
+                    fields.put("error_context_truncated", Boolean.toString(snapshot.truncated));
+                    fields.put("stack_frame_limit_per_cause", "8"); fields.put("cause_depth_limit", "3");
+                    fields.put("error_context_first", Boolean.toString(snapshot.first));
+                }
                 if (snapshot.truncated) fields.put("truncated", "true");
-                fields.put("error_context_first", Boolean.toString(snapshot.first));
                 if (snapshot.first) { fields.put("cause_chain", snapshot.causes); fields.put("stack", snapshot.stack); }
             }
             if (operation != null) {
                 OperationView view = operation.view;
-                fields.put("trace_id", operation.trace); fields.put("span_id", view.span); fields.put("operation_span_id", operation.rootSpan);
+                fields.put("trace_id", operation.trace);
                 fields.put("root_operation", operation.rootOperation);
                 fields.put("linked_trace_id", operation.linkedTrace);
-                fields.put("parent_span_id", view.span.equals(operation.rootSpan) ? operation.parent : operation.rootSpan);
-                fields.put("stage", view.stage); fields.put("attempt", Integer.toString(view.attempt));
+                if (detailed) {
+                    fields.put("span_id", view.span); fields.put("operation_span_id", operation.rootSpan);
+                    fields.put("parent_span_id", view.span.equals(operation.rootSpan) ? operation.parent : operation.rootSpan);
+                    fields.put("stage", view.stage); fields.put("attempt", Integer.toString(view.attempt));
+                }
                 fields.put("duration_ms", Long.toString((System.nanoTime() - operation.started) / 1_000_000L));
                 fields.put("outcome", view.terminal); fields.put("last_stage", view.stage);
-                fields.put("error_ids", new ArrayList<>(operation.errors));
-                if (detailed && view.terminal != null) fields.put("configuration_selections", new ArrayList<>(operation.selections));
-                fields.put("stage_timings_truncated", Boolean.toString(operation.durations.size() >= 24));
-                synchronized (LOCK) { fields.put("local_lost_before_enqueue", Long.toString(dropped - operation.lossAtStart)); }
-                fields.put("integrity", "verify_export_manifest_and_storage_integrity");
+                fields.put("error_ids", java.util.Collections.unmodifiableList(new ArrayList<>(operation.errors)));
+                if (detailed) {
+                    if (view.terminal != null) fields.put("configuration_selections", java.util.Collections.unmodifiableList(new ArrayList<>(operation.selections)));
+                    fields.put("stage_timings_truncated", Boolean.toString(operation.durations.size() >= 24));
+                    synchronized (LOCK) { fields.put("local_lost_before_enqueue", Long.toString(dropped - operation.lossAtStart)); }
+                    fields.put("integrity", "verify_export_manifest_and_storage_integrity");
+                }
             } else fields.put("context_missing", "true");
-            fields.putAll(extra);
+            if (detailed) fields.putAll(extra);
+            else {
+                if (extra.containsKey("hook_id")) fields.put("hook_id", extra.get("hook_id"));
+                if (extra.containsKey("phase")) fields.put("phase", extra.get("phase"));
+            }
             enqueue(new Record(priority, safe(feature), fields, when, epoch));
         } catch (RuntimeException | LinkageError ignored) {
             synchronized (LOCK) { sinkFailures++; dropped++; }
@@ -485,7 +502,7 @@ public final class DouAiLog {
     }
     private static void drain() {
         while (true) {
-            Record record;
+            ArrayList<Record> batch = new ArrayList<>(16);
             synchronized (LOCK) {
                 while (QUEUE.isEmpty()) {
                     writing = false; LOCK.notifyAll();
@@ -496,12 +513,21 @@ public final class DouAiLog {
                         else LOCK.wait();
                     } catch (InterruptedException ignored) { }
                 }
-                writing = true; record = QUEUE.pollFirst();
+                writing = true;
+                while (!QUEUE.isEmpty() && batch.size() < 16) batch.add(QUEUE.removeFirst());
             }
-            if (record == null) { writeJournal(); continue; }
-            try {
-                synchronized (DELIVERY_LOCK) {
-                    synchronized (LOCK) { if (record.generation != clearGeneration) { record.contextNotDelivered(); continue; } }
+            if (batch.isEmpty()) { writeJournal(); continue; }
+            synchronized (DELIVERY_LOCK) {
+                DebugLog.beginStructuredBatch();
+                try {
+                    for (Record record : batch) try {
+                    synchronized (LOCK) {
+                        if (record.generation != clearGeneration) {
+                            record.contextNotDelivered(); clearedRecords++;
+                            LOSS_DETAIL.record("actively_cleared", SESSION, record.seq, record.feature, record.event, record.trace);
+                            continue;
+                        }
+                    }
                     boolean detailed = DebugLog.isEnabled();
                     if (!detailed) record.contextNotDelivered();
                     if (!detailed && record.priority < 5 && LogModePolicy.detailOnly(record.event, record.rootOperation())) {
@@ -514,11 +540,12 @@ public final class DouAiLog {
                     Sink sink = framework; if (sink != null) sink.write(record.priority, json);
                     if (detailed && "true".equals(record.fields.get("error_context_first")))
                         LogErrorSnapshot.contextDelivered((String)record.fields.get("error_id"));
-                }
-            } catch (RuntimeException | LinkageError ignored) {
-                record.contextNotDelivered();
-                synchronized (LOCK) { sinkFailures++; }
-                LOSS_DETAIL.record("serialization_or_sink_failure", SESSION, record.seq, record.feature, record.event, record.trace);
+                    } catch (RuntimeException | LinkageError ignored) {
+                        record.contextNotDelivered();
+                        synchronized (LOCK) { sinkFailures++; }
+                        LOSS_DETAIL.record("serialization_or_sink_failure", SESSION, record.seq, record.feature, record.event, record.trace);
+                    }
+                } finally { DebugLog.endStructuredBatch(); }
             }
             boolean idle; synchronized (LOCK) { idle = QUEUE.isEmpty(); }
             if (idle || System.nanoTime() - journalWrittenAt > 1_000_000_000L) writeJournal();
@@ -527,6 +554,7 @@ public final class DouAiLog {
 
     public static void clearPending() {
         synchronized (DELIVERY_LOCK) {
+            DebugLog.flushStructuredBatch();
             synchronized (LOCK) {
                 for (Record record : QUEUE) {
                     record.contextNotDelivered();
@@ -713,7 +741,15 @@ public final class DouAiLog {
     }
     private static String safe(String value) {
         if (value == null) return "";
-        return DebugLogRedactor.text(value.substring(0, Math.min(value.length(), FIELD_LIMIT)));
+        String bounded = value.length() <= FIELD_LIMIT ? value : value.substring(0, FIELD_LIMIT);
+        boolean identifier = true;
+        for (int i = 0; i < bounded.length(); i++) {
+            char c = bounded.charAt(i);
+            if (!(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+                    || c == '_' || c == '-' || c == '.')) { identifier = false; break; }
+        }
+        // These characters cannot match any text-redaction delimiter or JSON/URL grammar.
+        return identifier ? bounded : DebugLogRedactor.text(bounded);
     }
     private static void putState(LinkedHashMap<String, Map<String, Object>> target, String key, Map<String, Object> value, int limit) {
         if (target.size() >= limit && !target.containsKey(key)) target.remove(target.keySet().iterator().next());

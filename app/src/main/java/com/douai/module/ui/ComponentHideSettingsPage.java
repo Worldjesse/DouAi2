@@ -1,7 +1,10 @@
 package com.douai.module.ui;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.Dialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.graphics.Color;
@@ -21,6 +24,7 @@ import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.Switch;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import com.douai.module.config.ComponentHideSettings;
 import com.douai.module.config.ComponentHideSettings.Component;
@@ -41,6 +45,7 @@ public final class ComponentHideSettingsPage {
     private final Context context;
     private final SettingsStore store;
     private Dialog dialog;
+    private Dialog customDetails;
     private LinearLayout content;
     private LinearLayout customSection;
     private Switch uniformToggle;
@@ -58,6 +63,7 @@ public final class ComponentHideSettingsPage {
         next.setOwnerActivity(activity);
         next.setCanceledOnTouchOutside(true);
         next.setOnDismissListener(ignored -> {
+            dismissCustomDetails();
             if (dialog == next) dialog = null;
         });
         next.setContentView(createView());
@@ -91,6 +97,7 @@ public final class ComponentHideSettingsPage {
     }
 
     public void dismiss() {
+        dismissCustomDetails();
         Dialog current = dialog;
         dialog = null;
         if (current != null) current.dismiss();
@@ -146,9 +153,18 @@ public final class ComponentHideSettingsPage {
         if (customSection == null) return;
         customSection.removeAllViews();
         addDividerTo(customSection);
+        LinearLayout heading = new LinearLayout(context);
+        heading.setGravity(Gravity.CENTER_VERTICAL);
+        heading.setBaselineAligned(false);
+        heading.setPadding(dp(12), dp(14), dp(12), dp(12));
         TextView header = text("自定义视图", 15, TEXT, true);
-        header.setPadding(dp(12), dp(14), dp(12), dp(12));
-        customSection.addView(header, matchWrap());
+        heading.addView(header, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        TextView count = text(locators.size() + " 个", 13, MUTED, false);
+        count.setTag("component.custom.count");
+        heading.addView(count, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        customSection.addView(heading, matchWrap());
         if (locators.isEmpty()) {
             TextView empty = text("暂无自定义视图", 13, MUTED, false);
             empty.setPadding(dp(12), dp(4), dp(12), dp(16));
@@ -164,9 +180,16 @@ public final class ComponentHideSettingsPage {
         row.setPadding(dp(12), dp(8), dp(8), dp(8));
         row.setMinimumHeight(dp(58));
         row.setTag("component.custom." + locator.identityKey());
+        row.setFocusable(true);
+        row.setOnClickListener(ignored -> {
+            dismissCustomDetails();
+            customDetails = showCustomViewDetails(context, locator, false);
+        });
         LinearLayout labels = new LinearLayout(context);
         labels.setOrientation(LinearLayout.VERTICAL);
         labels.addView(text(locator.label, 14, TEXT, true), matchWrap());
+        labels.addView(text(locator.scopeDescription() + " · " + locator.matchingDescription(),
+                12, MUTED, false), matchWrap());
         labels.addView(text(locator.viewClassName, 11, MUTED, false), matchWrap());
         row.addView(labels, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -180,6 +203,60 @@ public final class ComponentHideSettingsPage {
         row.addView(remove, new LinearLayout.LayoutParams(dp(48), dp(48)));
         customSection.addView(row, matchWrap());
         addDividerTo(customSection);
+    }
+
+    /** Shared by the native and Miuix component lists; this reads locator metadata only. */
+    public static AlertDialog showCustomViewDetails(Context source, CustomViewLocator locator,
+                                                   boolean useMiuix) {
+        Context themed = ModuleTheme.themedContext(source);
+        Activity activity = ownerActivity(themed);
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return null;
+        String information = "作用域：" + locator.scopeDescription()
+                + "\n定位方式：" + locator.matchingDescription()
+                + "\n完整类名：" + locator.viewClassName
+                + "\n资源 ID：" + (locator.resourceName.isEmpty() ? "无资源 ID" : locator.resourceName)
+                + "\n根类名：" + locator.rootClassName
+                + "\n定位路径：\n" + locator.pathDescription();
+        TextView detail = new TextView(themed);
+        detail.setText(information);
+        detail.setTextSize(13);
+        detail.setTextIsSelectable(true);
+        detail.setTag("component.custom.details");
+        int padding = Math.round(16 * themed.getResources().getDisplayMetrics().density);
+        detail.setPadding(padding, padding, padding, padding);
+        ScrollView scroll = new ScrollView(themed);
+        scroll.addView(detail);
+        ModuleTheme.bind(scroll);
+        AlertDialog next = new MiuixDialogBuilder(themed, useMiuix)
+                .setTitle("自定义视图详情").setView(scroll)
+                .setNegativeButton("关闭", null)
+                .setPositiveButton("复制规则信息", (dialog, which) -> {
+                    try {
+                        ClipboardManager clipboard = (ClipboardManager) themed.getSystemService(
+                                Context.CLIPBOARD_SERVICE);
+                        if (clipboard == null) throw new IllegalStateException("Clipboard unavailable");
+                        clipboard.setPrimaryClip(ClipData.newPlainText("DouAi 自定义视图", information));
+                        Toast.makeText(themed, "已复制规则信息", Toast.LENGTH_SHORT).show();
+                    } catch (RuntimeException unavailable) {
+                        Toast.makeText(themed, "复制失败", Toast.LENGTH_SHORT).show();
+                    }
+                }).create();
+        next.setOwnerActivity(activity);
+        // MiuixDialogBuilder owns its inset listener and Compose height limit.
+        if (!useMiuix) next.setOnShowListener(ignored -> HostDialogBounds.install(activity, next, false));
+        try {
+            next.show();
+            return next;
+        } catch (RuntimeException unavailable) {
+            next.dismiss();
+            return null;
+        }
+    }
+
+    private void dismissCustomDetails() {
+        Dialog current = customDetails;
+        customDetails = null;
+        if (current != null) current.dismiss();
     }
 
     private void confirmDelete(CustomViewLocator locator) {

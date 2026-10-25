@@ -2,6 +2,7 @@ package com.douai.module.config;
 
 import android.content.SharedPreferences;
 import com.douai.module.DouAiModule;
+import com.douai.module.scan.HostWorkQueue;
 import io.github.libxposed.api.XposedInterface;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -135,7 +136,7 @@ public final class ConfigurationSnapshotTest {
         listener.get().onSharedPreferenceChanged(preferences, "auto_play");
         listener.get().onSharedPreferenceChanged(preferences, null);
         assertEquals(0, reads.get());
-        ShadowLooper.idleMainLooper();
+        flushHostWork(module);
         assertEquals(1, reads.get());
     }
 
@@ -181,7 +182,7 @@ public final class ConfigurationSnapshotTest {
             assertTrue(committedToMemory.await(2, java.util.concurrent.TimeUnit.SECONDS));
             assertTrue("The failed disk write has already changed live preferences memory",
                     actual.getBoolean("automation_enabled", false));
-            ShadowLooper.idleMainLooper();
+            flushHostWork(module);
             assertFalse("A failed import must never enable live automation, even before rollback",
                     ((FeatureSettings) field(module, "currentSettings")).automationEnabled);
             assertFalse(ConfigurationSnapshot.readFrom(blocked).options.enabled("native_auto_reply"));
@@ -189,7 +190,7 @@ public final class ConfigurationSnapshotTest {
             returnFailure.countDown();
             importer.join(2000);
             assertFalse("Import must finish its rollback", importer.isAlive());
-            ShadowLooper.idleMainLooper();
+            flushHostWork(module);
         }
         assertTrue(failure.get() instanceof IllegalStateException);
         assertEquals(before, actual.getAll());
@@ -216,12 +217,12 @@ public final class ConfigurationSnapshotTest {
         try {
             captures.set(0);
             actual.edit().putBoolean("automation_enabled", true).putBoolean("native_auto_reply", true).commit();
-            ShadowLooper.idleMainLooper();
+            flushHostWork(module);
             assertEquals("Queued and new reloads must wait instead of reading imported memory", 0, captures.get());
             assertFalse(((FeatureSettings) field(module, "currentSettings")).automationEnabled);
             assertFalse(ConfigurationSnapshot.readFrom(counted).features.automationEnabled);
         } finally { transaction.close(); }
-        ShadowLooper.idleMainLooper();
+        flushHostWork(module);
         assertEquals("All notifications and the queued reload settle into one final publication", 1, captures.get());
         assertTrue(((FeatureSettings) field(module, "currentSettings")).automationEnabled);
         assertTrue(((LocalOptions) field(module, "localOptions")).enabled("native_auto_reply"));
@@ -243,7 +244,7 @@ public final class ConfigurationSnapshotTest {
 
         String backup = ConfigTransfer.export(new SettingsRepository(empty), false);
         ConfigTransfer.apply(target, ConfigTransfer.inspect(target, backup, ConfigTransfer.Mode.REPLACE));
-        ShadowLooper.idleMainLooper();
+        flushHostWork(module);
 
         assertTrue("An empty replacement must not introduce a notification preference", actual.getAll().isEmpty());
         assertFalse("Android 9 must stop old automation even though clear sends no preference notification",
@@ -276,7 +277,7 @@ public final class ConfigurationSnapshotTest {
             previous.edit().clear().commit();
         } finally { transaction.close(); }
         previous.edit().putString("keyword", "old preference notification").commit();
-        ShadowLooper.idleMainLooper();
+        flushHostWork(module);
         assertEquals("Old imports and preference events must not reload a rebound module", 0, captures.get());
         assertFalse(((FeatureSettings) field(module, "currentSettings")).automationEnabled);
 
@@ -284,7 +285,7 @@ public final class ConfigurationSnapshotTest {
             captures.set(0);
             actual.edit().clear().commit();
         }
-        ShadowLooper.idleMainLooper();
+        flushHostWork(module);
         assertEquals("The new registration must still publish clear-only imports", 1, captures.get());
     }
 
@@ -319,6 +320,13 @@ public final class ConfigurationSnapshotTest {
                 (proxy, method, arguments) -> null);
         module.attachFramework(framework, () -> { });
         return module;
+    }
+
+    private static void flushHostWork(DouAiModule module) throws Exception {
+        ShadowLooper.idleMainLooper();
+        ((HostWorkQueue) field(module, "hostWorkQueue")).submit(() -> { })
+                .get(5, java.util.concurrent.TimeUnit.SECONDS);
+        ShadowLooper.idleMainLooper();
     }
 
     private static void invoke(DouAiModule module, String methodName, SharedPreferences preferences) throws Exception {

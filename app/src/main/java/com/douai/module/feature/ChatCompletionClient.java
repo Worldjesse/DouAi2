@@ -19,6 +19,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
@@ -44,6 +45,8 @@ public final class ChatCompletionClient {
     private static final int MAX_HISTORY_IMAGE_BYTES = 12 * 1024 * 1024;
     private final Map<String, ArrayDeque<HistoryTurn>> history = new LinkedHashMap<>();
     private final ArrayDeque<HistoryTurn> historyOrder = new ArrayDeque<>();
+    private final Map<HistoryTurn, HistoryImageBudget.Ticket> historyImageTickets = new IdentityHashMap<>();
+    private final HistoryImageBudget historyImageBudget;
     private long historyImageBytes;
     private final Object requestLock = new Object();
     private ActiveRequest activeRequest;
@@ -71,8 +74,13 @@ public final class ChatCompletionClient {
     public ChatCompletionClient() { this(null, null); }
 
     public ChatCompletionClient(TestChatMemory memory, Consumer<String> diagnostics) {
+        this(memory, diagnostics, HistoryImageBudget.SHARED);
+    }
+
+    ChatCompletionClient(TestChatMemory memory, Consumer<String> diagnostics, HistoryImageBudget historyImageBudget) {
         this.memory = memory;
         this.diagnostics = diagnostics == null ? ignored -> { } : diagnostics;
+        this.historyImageBudget = java.util.Objects.requireNonNull(historyImageBudget);
     }
 
     private static ThreadPoolExecutor ioWorkers() {
@@ -249,9 +257,13 @@ public final class ChatCompletionClient {
     public void clearHistory() {
         synchronized (requestLock) {
             historyEpoch++;
-            history.clear();
-            historyOrder.clear();
-            historyImageBytes = 0;
+            synchronized (historyImageBudget) {
+                for (HistoryImageBudget.Ticket ticket : historyImageTickets.values()) historyImageBudget.release(ticket);
+                historyImageTickets.clear();
+                history.clear();
+                historyOrder.clear();
+                historyImageBytes = 0;
+            }
             if (memory != null) memory.clear();
         }
     }
@@ -357,7 +369,7 @@ public final class ChatCompletionClient {
         if (prompt.length() > 4000) throw new IllegalArgumentException("消息最多 4000 个字符");
         if (document.length() > 32768) throw new IllegalArgumentException("附件文本最多 32768 个字符");
         String url = requestEndpoint(config, config.modelName);
-        List<HistoryTurn> prior = new ArrayList<>();
+        List<HistoryTurn> prior;
         String historyKey = historyKey(conversation, config);
         int rounds = config.contextRounds;
         long epoch;
@@ -366,14 +378,20 @@ public final class ChatCompletionClient {
             ensureActive(request);
             epoch = historyEpoch;
             if (memory != null) {
+                List<HistoryTurn> saved = new ArrayList<>();
                 for (TestChatMemory.Turn turn : memory.read()) {
-                    prior.add(new HistoryTurn(historyKey, turn.prompt, turn.document, turn.images, turn.answer));
+                    saved.add(new HistoryTurn(historyKey, turn.prompt, turn.document, turn.images, turn.answer));
                 }
+                prior = Collections.unmodifiableList(saved);
             } else {
-                ArrayDeque<HistoryTurn> previous = history.get(historyKey);
-                if (previous != null) {
-                    while (previous.size() > rounds) discardTurn(previous.peekFirst());
-                    prior.addAll(previous);
+                synchronized (historyImageBudget) {
+                    ArrayDeque<HistoryTurn> previous = history.get(historyKey);
+                    if (previous != null) {
+                        while (previous.size() > rounds) discardTurn(previous.peekFirst());
+                    }
+                    // HistoryTurn payloads are immutable; eviction never mutates an admitted request.
+                    prior = previous == null ? Collections.emptyList()
+                            : Collections.unmodifiableList(new ArrayList<>(previous));
                 }
             }
             activeRequest = request;
@@ -399,11 +417,13 @@ public final class ChatCompletionClient {
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
             if (config.streaming()) connection.setRequestProperty("Accept", "text/event-stream");
             setAuthentication(connection, config, url);
-            byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
-            connection.setFixedLengthStreamingMode(bytes.length);
+            long bodyBytes = JsonRequestBody.byteLength(body, () -> ensureActive(request));
+            connection.setFixedLengthStreamingMode(bodyBytes);
             ensureActive(request);
-            try (java.io.OutputStream output = connection.getOutputStream()) { output.write(bytes); }
-            request.trace.stage("model_transport_sent", "body_bytes=" + bytes.length + ";business_success=false");
+            try (java.io.OutputStream output = connection.getOutputStream()) {
+                JsonRequestBody.write(body, output, () -> ensureActive(request));
+            }
+            request.trace.stage("model_transport_sent", "body_bytes=" + bodyBytes + ";business_success=false");
             try { request.trace.wrap(() -> requestSent.accept(images.size())).run(); }
             catch (RuntimeException ignored) { }
             diagnostic(config, secondaryPrompt, prior.size(), "sent", 0);
@@ -590,33 +610,49 @@ public final class ChatCompletionClient {
     }
 
     private void rememberTurn(HistoryTurn turn, int rounds) {
-        ArrayDeque<HistoryTurn> previous = history.computeIfAbsent(turn.historyKey, ignored -> new ArrayDeque<>());
-        previous.addLast(turn);
-        historyOrder.addLast(turn);
-        historyImageBytes += turn.imageBytes;
-        while (previous.size() > rounds) discardTurn(previous.peekFirst());
-        while (history.size() > 100) {
-            ArrayDeque<HistoryTurn> oldest = history.values().iterator().next();
-            while (!oldest.isEmpty()) discardTurn(oldest.peekFirst());
-        }
-        // Evict image-bearing turns together with their answers, preserving text-only context.
-        while (historyImageBytes > MAX_HISTORY_IMAGE_BYTES) {
-            HistoryTurn oldestImage = null;
-            for (HistoryTurn candidate : historyOrder) {
-                if (candidate.imageBytes > 0) { oldestImage = candidate; break; }
+        synchronized (historyImageBudget) {
+            ArrayDeque<HistoryTurn> previous = history.computeIfAbsent(turn.historyKey, ignored -> new ArrayDeque<>());
+            previous.addLast(turn);
+            historyOrder.addLast(turn);
+            historyImageBytes += turn.imageBytes;
+            while (previous.size() > rounds) discardTurn(previous.peekFirst());
+            while (history.size() > 100) {
+                ArrayDeque<HistoryTurn> oldest = history.values().iterator().next();
+                while (!oldest.isEmpty()) discardTurn(oldest.peekFirst());
             }
-            discardTurn(oldestImage);
+            // Enforce the original per-client raw-byte limit before requesting shared retention.
+            while (historyImageBytes > MAX_HISTORY_IMAGE_BYTES) {
+                HistoryTurn oldestImage = null;
+                for (HistoryTurn candidate : historyOrder) {
+                    if (candidate.imageBytes > 0) { oldestImage = candidate; break; }
+                }
+                discardTurn(oldestImage);
+            }
+            if (turn.imageBytes > 0 && historyOrder.contains(turn)) {
+                long retainedBytes = 0;
+                for (ChatImage image : turn.images) retainedBytes += (long) image.base64Data.length() * 2;
+                HistoryImageBudget.Ticket ticket = historyImageBudget.retain(this, turn, retainedBytes);
+                if (ticket != null) historyImageTickets.put(turn, ticket);
+            }
         }
     }
 
     private void discardTurn(HistoryTurn turn) {
+        if (turn == null || !historyOrder.remove(turn)) return;
         ArrayDeque<HistoryTurn> previous = history.get(turn.historyKey);
         if (previous != null) {
             previous.remove(turn);
             if (previous.isEmpty()) history.remove(turn.historyKey);
         }
-        historyOrder.remove(turn);
         historyImageBytes -= turn.imageBytes;
+        historyImageBudget.release(historyImageTickets.remove(turn));
+    }
+
+    /** The shared budget owns the history monitor, not another client's transport/request lock. */
+    void discardBudgetedTurn(Object turn) {
+        synchronized (historyImageBudget) {
+            if (turn instanceof HistoryTurn) discardTurn((HistoryTurn) turn);
+        }
     }
 
     private static final class HistoryTurn {
@@ -634,7 +670,7 @@ public final class ChatCompletionClient {
         HistoryTurn(String historyKey, String prompt, String document, List<ChatImage> images, String answer) {
             this.historyKey = historyKey;
             this.prompt = prompt;
-            this.images = images;
+            this.images = Collections.unmodifiableList(new ArrayList<>(images));
             this.answer = answer;
             this.document = document;
             int bytes = 0;

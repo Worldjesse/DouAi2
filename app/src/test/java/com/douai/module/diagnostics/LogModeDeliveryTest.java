@@ -37,6 +37,107 @@ public final class LogModeDeliveryTest {
     private CountDownLatch inFlightCompleted;
     private Thread modeToggle;
 
+    @Test public void aSinkCanDisableDetailInsideABatchWithoutLeakingLaterDetailedEvents() throws Exception {
+        DebugLog.setEnabled(true);
+        blockFrameworkDelivery();
+        DouAiLog.Operation queued = DouAiLog.begin("test_reentrant_mode", "user_request");
+        queued.stage("before_toggle_stage", "detail_must_be_suppressed=true");
+        queued.error("brief_error", new IllegalStateException("PRIVATE REENTRANT BODY"));
+        queued.finish(DouAiLog.Outcome.FAILED, "local_failure", "observed=true");
+        AtomicReference<String> confirmedDisk = new AtomicReference<>();
+        DouAiLog.setFrameworkSink((priority, line) -> {
+            framework.add(line);
+            if (line.contains("\"event\":\"operation_started\"") && line.contains(queued.traceId())) {
+                DebugLog.setEnabled(false);
+                try { confirmedDisk.set(readFileDirect()); }
+                catch (Exception error) { throw new IllegalStateException(error); }
+            }
+        });
+        release.countDown();
+        List<JSONObject> events = matchingBothChannels(queued.traceId());
+        assertNotNull(confirmedDisk.get());
+        assertTrue("The reentrant mode barrier must synchronously persist its earlier detailed send",
+                confirmedDisk.get().contains(queued.traceId()));
+        assertEquals(3, events.size());
+        assertEquals("detail", event(events, "operation_started").getString("log_mode"));
+        assertEquals("simple", event(events, "exception").getString("log_mode"));
+        assertEquals("simple", event(events, "operation_finished").getString("log_mode"));
+        assertFalse(readDisk().contains("detail_must_be_suppressed"));
+    }
+
+    @Test public void aSinkExceptionDoesNotDiscardItsLocallyBufferedBusinessEvidence() throws Exception {
+        DebugLog.setEnabled(true);
+        long before = new JSONObject(DouAiLog.manifest()).getLong("sink_failures");
+        DouAiLog.setFrameworkSink((priority, line) -> {
+            framework.add(line);
+            if (line.contains("\"event\":\"stage\"")) throw new IllegalStateException("framework unavailable");
+        });
+        DouAiLog.Operation root = DouAiLog.begin("test_sink_exception_batch", "user_request");
+        root.stage("apply", "target_present=true");
+        root.finish(DouAiLog.Outcome.SUCCESS, "verified", "property_readback=true");
+        List<JSONObject> delivered = matchingBothChannels(root.traceId());
+        assertEquals(3, delivered.size());
+        assertTrue(new JSONObject(DouAiLog.manifest()).getLong("sink_failures") > before);
+        assertEquals(0, new JSONObject(store.integrity()).getLong("io_failures"));
+    }
+
+    @Test public void aSinkCanClearQueuedBatchRecordsAndKeepNewGenerationEvidence() throws Exception {
+        DebugLog.setEnabled(true);
+        blockFrameworkDelivery();
+        DouAiLog.Operation queued = DouAiLog.begin("test_reentrant_clear", "user_request");
+        queued.stage("must_not_reappear", "old_generation_detail=true");
+        queued.finish(DouAiLog.Outcome.SUCCESS, "old_terminal", "old_generation_terminal=true");
+        DouAiLog.setFrameworkSink((priority, line) -> {
+            framework.add(line);
+            if (line.contains("\"event\":\"operation_started\"") && line.contains(queued.traceId())) {
+                DouAiLog.clearPending();
+                DouAiLog.event("test_reentrant_clear", "after_reentrant_clear", "new_generation", "new_evidence=true");
+            }
+        });
+        release.countDown();
+        assertTrue(DouAiLog.awaitIdle(5000));
+        String saved = readDisk();
+        assertTrue(saved.contains("after_reentrant_clear"));
+        assertFalse(saved.contains("old_generation_detail"));
+        assertFalse(saved.contains("old_generation_terminal"));
+        assertTrue(DouAiLog.manifest().contains("actively_cleared"));
+    }
+
+    @Test public void simpleRecordsCaptureOnlySafeFieldsAndUseSessionScopedUniqueEventIds() throws Exception {
+        DebugLog.setEnabled(false);
+        blockFrameworkDelivery();
+        DouAiLog.Operation queued = DouAiLog.begin("test_simple_capture", "user_request");
+        queued.error("brief_error", new IllegalArgumentException("PRIVATE SIMPLE CAPTURE"));
+        queued.finish(DouAiLog.Outcome.FAILED, "confirmed", "result_observed=true");
+        Field queueField = DouAiLog.class.getDeclaredField("QUEUE"); queueField.setAccessible(true);
+        Field lockField = DouAiLog.class.getDeclaredField("LOCK"); lockField.setAccessible(true);
+        int captured = 0;
+        synchronized (lockField.get(null)) {
+            for (Object record : (Iterable<?>) queueField.get(null)) {
+                Field fieldsField = record.getClass().getDeclaredField("fields"); fieldsField.setAccessible(true);
+                Map<?, ?> fields = (Map<?, ?>) fieldsField.get(record);
+                if (!queued.traceId().equals(fields.get("trace_id"))) continue;
+                captured++;
+                for (String discarded : Arrays.asList("monotonic_ns", "build_id", "span_id", "attempt",
+                        "process_config_revision", "integrity", "configuration_selections")) assertFalse(discarded, fields.containsKey(discarded));
+                assertEquals(fields.get("session_id") + ":" + fields.get("seq"), fields.get("event_id"));
+            }
+        }
+        assertEquals(3, captured);
+        release.countDown();
+        List<JSONObject> events = matchingBothChannels(queued.traceId());
+        assertEquals(3, events.size());
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        for (JSONObject event : events) assertTrue(ids.add(event.getString("event_id")));
+        assertFalse(readDisk().contains("PRIVATE SIMPLE CAPTURE"));
+    }
+
+    private String readFileDirect() throws Exception {
+        Field directoryField = DebugLogStore.class.getDeclaredField("directory"); directoryField.setAccessible(true);
+        java.io.File file = new java.io.File((java.io.File) directoryField.get(store), "debug.log");
+        return file.isFile() ? java.nio.file.Files.readString(file.toPath()) : "";
+    }
+
     @Before public void connectBothRealDeliveryChannels() throws Exception {
         assertTrue(DouAiLog.awaitIdle(5000));
         previousMode = DebugLog.isEnabled();

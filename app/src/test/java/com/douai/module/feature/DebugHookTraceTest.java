@@ -272,6 +272,19 @@ public final class DebugHookTraceTest {
         assertEquals(12, logs.size()); assertTrue(logs.get(10).contains("dropped=140 total=140"));
     }
 
+    @Test public void unsampledHotCallsOnlyReadTheQuotaClockAndNeverInspectArguments() throws Throwable {
+        Fixture f = new Fixture(); AtomicInteger clocks = new AtomicInteger(), inputs = new AtomicInteger();
+        f.onGetArgs = inputs::incrementAndGet;
+        XposedInterface wrapped = DebugHookTrace.wrap(f.framework, () -> true, ignored -> { },
+                () -> { clocks.incrementAndGet(); return 0; });
+        wrapped.hook(target()).setId("clock-budget").intercept(XposedInterface.Chain::proceed);
+        for (int i = 0; i < 1000; i++) f.hooker.intercept(f.chain());
+        assertEquals(1000, f.proceeded);
+        assertEquals(8, inputs.get());
+        assertEquals("1000 quota reads plus two timing reads for eight samples", 1016, clocks.get());
+        assertEquals(992, DebugHookTrace.droppedCount(wrapped));
+    }
+
     @Test public void globalBudgetAlsoBoundsManyDifferentHookIds() throws Throwable {
         Fixture f = new Fixture(); List<String> logs = new ArrayList<>();
         XposedInterface wrapped = DebugHookTrace.wrap(f.framework, () -> true, logs::add, () -> 0);

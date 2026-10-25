@@ -19,6 +19,93 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class DebugLogStoreTest {
+    @Test public void aDeliveryBatchUsesOneOutputStreamAndNoSecondaryQueue() throws Exception {
+        File directory = Files.createTempDirectory("douai-structured-batch").toFile();
+        try (DebugLogStore store = new DebugLogStore(directory)) {
+            store.beginStructuredBatch();
+            try {
+                for (int seq = 1; seq <= 16; seq++) store.recordStructured(4, event(seq, "stage", "batch-trace"));
+            } finally { store.endStructuredBatch(); }
+            JSONObject integrity = new JSONObject(store.integrity());
+            System.out.println("Structured log 16-record batch: records=" + integrity.getLong("structured_records")
+                    + ", batches=" + integrity.getLong("structured_batches")
+                    + ", outputOpens=" + integrity.getLong("structured_output_opens"));
+            assertEquals(16, integrity.getLong("structured_records"));
+            assertEquals(1, integrity.getLong("structured_batches"));
+            assertEquals(1, integrity.getLong("structured_output_opens"));
+            assertEquals(0, integrity.getLong("io_failures"));
+            String saved = read(store, true);
+            for (int seq = 1; seq <= 16; seq++) assertTrue(saved.contains(event(seq, "stage", "batch-trace")));
+        }
+    }
+
+    @Test public void aFailedBatchAccountsEveryAffectedRecordIndividually() throws Exception {
+        File unavailable = Files.createTempFile("douai-structured-batch-failure", ".not-directory").toFile();
+        try (DebugLogStore store = new DebugLogStore(unavailable)) {
+            store.beginStructuredBatch();
+            try {
+                for (int seq = 1; seq <= 4; seq++) store.recordStructured(4, event(seq, "stage", "batch-io-trace"));
+            } finally { store.endStructuredBatch(); }
+            JSONObject integrity = new JSONObject(store.integrity());
+            assertEquals(4, integrity.getLong("io_failures"));
+            assertEquals(4, integrity.getLong("lost_count"));
+            assertTrue(integrity.getJSONObject("affected_records").toString().contains("batch-io-trace"));
+            for (int seq = 1; seq <= 4; seq++) assertTrue(store.memoryTail(DebugLogStore.TAIL_BYTES)
+                    .contains(event(seq, "stage", "batch-io-trace")));
+        }
+    }
+
+    @Test public void clearingAnOpenBatchCannotReintroduceItsOlderGeneration() throws Exception {
+        File directory = Files.createTempDirectory("douai-structured-batch-clear").toFile();
+        try (DebugLogStore store = new DebugLogStore(directory)) {
+            store.beginStructuredBatch();
+            store.recordStructured(4, event(1, "stage", "old-buffered-trace"));
+            CountDownLatch cleared = new CountDownLatch(1);
+            store.clear(ok -> { assertTrue(ok); cleared.countDown(); });
+            assertTrue(cleared.await(5, TimeUnit.SECONDS));
+            store.endStructuredBatch();
+            store.recordStructured(4, event(2, "operation_finished", "new-after-clear-trace"));
+            String saved = read(store, true);
+            assertFalse(saved.contains("old-buffered-trace"));
+            assertTrue(saved.contains("new-after-clear-trace"));
+            assertTrue(store.integrity().contains("clear_or_close_generation"));
+            assertEquals(0, new JSONObject(store.integrity()).getLong("io_failures"));
+        }
+    }
+
+    @Test public void twoStoresKeepTheirBatchesSeparateAndCrossRotationsUnderTheSharedLock() throws Exception {
+        File directory = Files.createTempDirectory("douai-structured-two-batches").toFile();
+        try (DebugLogStore first = new DebugLogStore(directory); DebugLogStore second = new DebugLogStore(directory)) {
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            Thread one = new Thread(() -> appendBatchFixture(first, "batch-one", failure));
+            Thread two = new Thread(() -> appendBatchFixture(second, "batch-two", failure));
+            one.start(); two.start(); one.join(10000); two.join(10000);
+            assertFalse(one.isAlive()); assertFalse(two.isAlive()); assertNull(failure.get());
+            assertEquals(0, new JSONObject(first.integrity()).getLong("io_failures"));
+            assertEquals(0, new JSONObject(second.integrity()).getLong("io_failures"));
+            String saved = read(first, true);
+            assertTrue(saved.contains("batch-one")); assertTrue(saved.contains("batch-two"));
+            assertTrue(new File(directory, "debug.log").length() <= DebugLogStore.FILE_BYTES);
+            assertTrue(new File(directory, "debug.1.log").length() <= DebugLogStore.FILE_BYTES);
+            for (String line : saved.split("\n")) {
+                int marker = line.indexOf("/DouAi.Event [basic] ");
+                if (marker >= 0) new JSONObject(line.substring(marker + "/DouAi.Event [basic] ".length()));
+            }
+        }
+    }
+
+    private static void appendBatchFixture(DebugLogStore store, String trace, AtomicReference<Throwable> failure) {
+        try {
+            store.beginStructuredBatch();
+            try {
+                for (int seq = 1; seq <= 40; seq++) {
+                    String json = event(seq, "operation_finished", trace);
+                    store.recordStructured(4, json.substring(0, json.length() - 1) + ",\"evidence\":\"" + "x".repeat(15000) + "\"}");
+                }
+            } finally { store.endStructuredBatch(); }
+        } catch (Throwable error) { failure.compareAndSet(null, error); }
+    }
+
     @Test public void structuredFloodBypassesTheSaturatedLegacyQueueAndKeepsAllBusinessStages() throws Exception {
         File directory = Files.createTempDirectory("douai-structured-flood").toFile();
         try (DebugLogStore store = new DebugLogStore(directory)) {

@@ -45,6 +45,9 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     private static final int MAX_TREE_DEPTH = 64;
     // Layout changes request enough bounded drawing callbacks to finish one captured-tree sweep.
     private static final int MAX_STRUCTURE_CHECKS_PER_FRAME = 256;
+    // Keep tiny trees responsive while a stable large tree completes a rolling sweep in 16 draws.
+    private static final int MIN_STABLE_STRUCTURE_CHECKS = 64;
+    private static final int STABLE_STRUCTURE_SWEEP_FRAMES = 16;
     private static final int MAX_CUSTOM_RETRIES = 8;
     private static final String VIEW_FINDER_TAG = "douai.view_finder";
     private static final Map<Component, int[]> COMPONENT_IDS = componentIds();
@@ -538,17 +541,21 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
     private int reapplyCachedTargets(View root) {
         if (root == null) return 0;
         int changed = 0;
+        View windowRoot = root.getRootView();
+        Set<View> custom = customTargets.get(windowRoot);
+        boolean windowOwnsCustom = windowMonitors.containsKey(windowRoot);
         Map<View, TargetStyle> fixed = fixedTargets.get(root);
         if (fixed != null) {
             for (Map.Entry<View, TargetStyle> target : fixed.entrySet()) {
                 if (target.getKey() == null || isFinderView(target.getKey())) continue;
+                if (windowOwnsCustom && custom != null && custom.contains(target.getKey())) continue;
                 TargetStyle style = target.getValue();
                 changed += style.component ? applyComponentTarget(target.getKey(), style.alpha, style.trackHostAlpha)
                         : applyTarget(target.getKey(), style.alpha);
             }
         }
-        Set<View> custom = customTargets.get(root.getRootView());
-        if (custom != null) {
+        // The window observer already owns these properties, including feed-scoped custom rules.
+        if (!windowOwnsCustom && custom != null) {
             for (View view : custom) {
                 if (view != null && !isFinderView(view)) changed += applyComponentTarget(view, -2);
             }
@@ -1221,6 +1228,7 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
                 }
                 Map<View, TargetStyle> progress = windowProgressTargets.get(root);
                 if (progress != null) for (Map.Entry<View, TargetStyle> entry : progress.entrySet()) {
+                    if (targets != null && targets.contains(entry.getKey())) continue;
                     changed += applyComponentTarget(entry.getKey(), entry.getValue().alpha, true);
                 }
                 hiddenViews.addAndGet(changed);
@@ -1423,8 +1431,10 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
         boolean matches(AtomicLong checks) {
             if (nodes.isEmpty()) return false;
             int checked = 0;
-            int budget = Math.min(nodes.size(), MAX_STRUCTURE_CHECKS_PER_FRAME);
-            if (pendingSweepChecks > 0) budget = Math.min(budget, pendingSweepChecks);
+            int stableBudget = Math.max(MIN_STABLE_STRUCTURE_CHECKS,
+                    (nodes.size() + STABLE_STRUCTURE_SWEEP_FRAMES - 1) / STABLE_STRUCTURE_SWEEP_FRAMES);
+            int budget = Math.min(nodes.size(), Math.min(MAX_STRUCTURE_CHECKS_PER_FRAME,
+                    pendingSweepChecks > 0 ? pendingSweepChecks : stableBudget));
             try {
                 while (checked < budget) {
                     Node node = nodes.get(nextCheck);
@@ -1498,8 +1508,12 @@ public final class FeedUiHideHook implements Application.ActivityLifecycleCallba
 
         boolean matches(View view) {
             return view != null && view.isAttachedToWindow() && id == view.getId()
-                    && parent.get() == view.getParent() && description.equals(value(view.getContentDescription()))
-                    && text.equals(view instanceof TextView ? value(((TextView) view).getText()) : "");
+                    && parent.get() == view.getParent() && same(description, view.getContentDescription())
+                    && same(text, view instanceof TextView ? ((TextView) view).getText() : "");
+        }
+
+        private static boolean same(String expected, CharSequence value) {
+            return expected.contentEquals(value == null ? "" : value);
         }
 
         private static String value(CharSequence value) { return value == null ? "" : value.toString(); }

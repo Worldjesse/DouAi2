@@ -23,6 +23,7 @@ public final class DebugLog {
     private static volatile boolean enabled;
     private static volatile String ownerPackage;
     private static volatile Runnable clearListener;
+    private static final ThreadLocal<DebugLogStore> STRUCTURED_BATCH = new ThreadLocal<>();
     private static final ArrayDeque<String[]> startup = new ArrayDeque<>();
     private static final LogLossLedger startupLosses = new LogLossLedger();
     private static int startupBytes;
@@ -63,6 +64,22 @@ public final class DebugLog {
             if (store != null) { store.recordStructured(priority, json); return; }
             bufferStartup(priority, "DouAi.Event", json, true);
         }
+    }
+
+    static void beginStructuredBatch() {
+        DebugLogStore current = store;
+        if (current != null) { current.beginStructuredBatch(); STRUCTURED_BATCH.set(current); }
+    }
+
+    static void flushStructuredBatch() {
+        DebugLogStore current = STRUCTURED_BATCH.get();
+        if (current != null) current.flushStructuredBatch();
+    }
+
+    static void endStructuredBatch() {
+        DebugLogStore current = STRUCTURED_BATCH.get();
+        STRUCTURED_BATCH.remove();
+        if (current != null) current.endStructuredBatch();
     }
     private static String hostVersion(Context context) {
         try { return context.getPackageManager().getPackageInfo(ScanDiagnosticsChannel.HOST_PACKAGE, 0).versionName; }

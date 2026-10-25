@@ -29,7 +29,7 @@ import com.douai.module.scan.HostScanCache;
 import com.douai.module.scan.HostScanReport;
 import com.douai.module.scan.HostScanner;
 import com.douai.module.scan.StartupHostCache;
-import com.douai.module.scan.HostInstallation;
+import com.douai.module.scan.HostWorkQueue;
 import com.douai.module.config.FeatureSettings;
 import com.douai.module.config.ConfigurationChanges;
 import com.douai.module.config.ConfigurationCatalog.Feature;
@@ -95,6 +95,12 @@ public final class DouAiModule extends XposedModule {
     private volatile Bundle hostVersionEvidence = new Bundle();
     private volatile HostAdaptation.Profile hostProfile;
     private volatile String hostRulesFingerprint;
+    private final Object hostScanStateLock = new Object();
+    private HostRuleSet packagedHostRules;
+    private HostAdaptation.Profile packagedRulesProfile;
+    private HostScanner.PreparedScan preparedHostScan;
+    private final HostWorkQueue hostWorkQueue = new HostWorkQueue();
+    private final Object hostWorkStateLock = new Object();
     private volatile SharedPreferences hostPreferences;
     private volatile Context targetContext;
     private volatile ApplicationInfo targetApplicationInfo;
@@ -240,11 +246,13 @@ public final class DouAiModule extends XposedModule {
     private synchronized void installEarlyCachedHooks() {
         ApplicationInfo info = targetApplicationInfo;
         if (info == null || info.dataDir == null || hostBehaviorHooks != null) return;
+        android.os.Trace.beginSection("DouAi.startupCacheAndGates");
         try {
             File cache = new File(info.dataDir, "no_backup/douai/host-scan-v2.cache");
+            if (!cache.isFile()) return;
             List<File> archives = getApkArchives(info);
-            HostScanReport report = StartupHostCache.load(cache, archives, loadRulesFromModuleApk(),
-                    installationIdentity(archives));
+            HostRuleSet rules = loadRulesFromModuleApk();
+            HostScanReport report = StartupHostCache.load(cache, prepareHostScan(archives, rules));
             if (report == null) return;
             hostScanReport = report;
             hostBehaviorHooks = HostBehaviorHooks.install(hookFramework(), report, hostClassLoader, null,
@@ -252,11 +260,12 @@ public final class DouAiModule extends XposedModule {
             moduleLog(3, TAG, "Validated startup cache; basic host gates registered before Application.onCreate");
         } catch (Exception failure) {
             moduleLog(5, TAG, "Startup cache unavailable; asynchronous scan retained: " + failure.getClass().getSimpleName());
-        }
+        } finally { android.os.Trace.endSection(); }
     }
 
     private void scanHost(List<File> archives) {
         DouAiLog.Operation operation = DouAiLog.begin("host_scan", "package_loaded");
+        android.os.Trace.beginSection("DouAi.hostStartup");
         try {
             operation.stage("await_context", "archive_count=" + archives.size());
             Context hostContext = awaitHostContext();
@@ -296,8 +305,8 @@ public final class DouAiModule extends XposedModule {
                     ? ExtendedSettings.readSystemBars(preferences) : extendedSettings);
             long scanStarted = android.os.SystemClock.elapsedRealtime();
             operation.stage("scan", "cache_checked=true;rules=" + rules.getRules().size());
-            HostScanReport report = new HostScanner().scanCached(
-                    archives, rules, new HostScanCache(cacheFile), new HostScanner.ProgressListener() {
+            HostScanReport report = resolveHostScan(
+                    prepareHostScan(archives, rules), new HostScanCache(cacheFile), new HostScanner.ProgressListener() {
                         @Override
                         public void onCacheHit(int dexCount) {
                             HostUiController controller = hostUiController;
@@ -321,7 +330,7 @@ public final class DouAiModule extends XposedModule {
                             HostUiController controller = hostUiController;
                             if (controller != null) controller.onDexScanned(completed, total, dexName);
                         }
-                    }, installationIdentity(archives));
+                    });
             hostScanMillis = Math.max(0, android.os.SystemClock.elapsedRealtime() - scanStarted);
             Runtime runtime = Runtime.getRuntime();
             hostHeapUsedBytes = runtime.totalMemory() - runtime.freeMemory();
@@ -329,7 +338,8 @@ public final class DouAiModule extends XposedModule {
             operation.stage("install_features", "cache_hit=" + report.isCacheHit()
                     + ";scan_duration_ms=" + hostScanMillis + ";rule_count=" + report.getRuleResults().size());
             moduleLog(3, TAG, "Host scan complete: " + report.summary());
-            installFeatureHooksIfReady();
+            // Only the scanner thread waits. Scan completion keeps its existing installation ordering.
+            installFeatureHooksIfReady().get();
             publishDiagnostics(report, null);
             HostUiController completedUi = hostUiController;
             if (completedUi != null) completedUi.complete(report.isCacheHit(), report.summary(),
@@ -351,7 +361,7 @@ public final class DouAiModule extends XposedModule {
             publishDiagnostics(null, exception.getMessage());
             HostUiController ui = hostUiController;
             if (ui != null) ui.fail(exception.getMessage());
-        }
+        } finally { android.os.Trace.endSection(); }
     }
 
     private synchronized void installHostApplicationHook() {
@@ -431,7 +441,7 @@ public final class DouAiModule extends XposedModule {
         }
     }
 
-    private synchronized HostUiController ensureHostUiController(Context context) {
+    private HostUiController ensureHostUiController(Context context) {
         if (hostUiController != null) return hostUiController;
         Context appContext = context == null ? null : context.getApplicationContext();
         if (!(appContext instanceof Application)
@@ -439,11 +449,15 @@ public final class DouAiModule extends XposedModule {
         return ensureHostUiController((Application) appContext);
     }
 
-    private synchronized HostUiController ensureHostUiController(Application application) {
+    private HostUiController ensureHostUiController(Application application) {
         if (hostUiController != null) return hostUiController;
         if (application == null || !TARGET_PACKAGE.equals(application.getPackageName())) return null;
-        hostUiController = new HostUiController(application, message -> moduleLog(3, TAG, message));
-        return hostUiController;
+        synchronized (this) {
+            if (hostUiController == null) {
+                hostUiController = new HostUiController(application, message -> moduleLog(3, TAG, message));
+            }
+            return hostUiController;
+        }
     }
 
     private synchronized void ensureImmersiveModeController(Context context, ExtendedSettings settings) {
@@ -479,6 +493,20 @@ public final class DouAiModule extends XposedModule {
     }
 
     private HostRuleSet loadRulesFromModuleApk() throws IOException {
+        android.os.Trace.beginSection("DouAi.hostRules");
+        try {
+            synchronized (hostScanStateLock) {
+                HostAdaptation.Profile profile = hostProfile;
+                if (packagedHostRules != null && packagedRulesProfile == profile) return packagedHostRules;
+                HostRuleSet rules = readRulesFromModuleApk();
+                packagedRulesProfile = profile;
+                packagedHostRules = rules;
+                return rules;
+            }
+        } finally { android.os.Trace.endSection(); }
+    }
+
+    private HostRuleSet readRulesFromModuleApk() throws IOException {
         HostAdaptation.Profile profile = hostProfile;
         if (profile == null) throw new IOException("The installed host version has no verified profile");
         ApplicationInfo moduleInfo = getModuleApplicationInfo();
@@ -499,10 +527,23 @@ public final class DouAiModule extends XposedModule {
         }
     }
 
-    private String installationIdentity(List<File> archives) throws IOException {
-        ApplicationInfo module = getModuleApplicationInfo();
-        return HostInstallation.identity(BuildConfig.VERSION_NAME + ":" + BuildConfig.VERSION_CODE,
-                module == null || module.sourceDir == null ? null : new File(module.sourceDir), archives);
+    private HostScanner.PreparedScan prepareHostScan(List<File> archives, HostRuleSet rules) throws IOException {
+        android.os.Trace.beginSection("DouAi.prepareHostInventory");
+        try {
+            synchronized (hostScanStateLock) {
+                if (preparedHostScan == null || !preparedHostScan.matches(archives, rules)) {
+                    preparedHostScan = new HostScanner().prepare(archives, rules);
+                }
+                return preparedHostScan;
+            }
+        } finally { android.os.Trace.endSection(); }
+    }
+
+    private HostScanReport resolveHostScan(HostScanner.PreparedScan prepared, HostScanCache cache,
+                                          HostScanner.ProgressListener listener) throws IOException {
+        android.os.Trace.beginSection("DouAi.resolveHostScan");
+        try { return new HostScanner().scanCached(prepared, cache, listener); }
+        finally { android.os.Trace.endSection(); }
     }
 
     private void publishDiagnostics(HostScanReport report, String failure) {
@@ -569,20 +610,32 @@ public final class DouAiModule extends XposedModule {
         }
     }
 
-    private synchronized void scheduleConfigurationUpdate() {
+    private void scheduleConfigurationUpdate() {
         if (hostPreferences != null && ConfigImportTransaction.deferUntilSettled(
                 hostPreferences, this, this::scheduleConfigurationUpdate)) return;
-        if (configurationUpdatePending) return;
-        configurationUpdatePending = true;
+        synchronized (hostWorkStateLock) {
+            if (configurationUpdatePending) return;
+            configurationUpdatePending = true;
+        }
         new Handler(Looper.getMainLooper()).post(() -> {
-            synchronized (DouAiModule.this) {
-                configurationUpdatePending = false;
+            hostWorkQueue.submit(() -> {
+                synchronized (hostWorkStateLock) { configurationUpdatePending = false; }
                 if (hostPreferences != null) updateConfiguration(hostPreferences);
-            }
+            }).whenComplete((ignored, failure) -> {
+                if (failure == null) return;
+                synchronized (hostWorkStateLock) { configurationUpdatePending = false; }
+                DouAiLog.failure("configuration", "scheduled_publication", failure);
+            });
         });
     }
 
     private synchronized void updateConfiguration(SharedPreferences preferences) {
+        android.os.Trace.beginSection("DouAi.publishConfiguration");
+        try { updateConfigurationNow(preferences); }
+        finally { android.os.Trace.endSection(); }
+    }
+
+    private void updateConfigurationNow(SharedPreferences preferences) {
         DouAiLog.Operation configurationOperation = null;
         try {
             ConfigurationSnapshot snapshot = ConfigurationSnapshot.readForPublication(
@@ -714,7 +767,24 @@ public final class DouAiModule extends XposedModule {
         }
     }
 
-    private synchronized void installFeatureHooksIfReady() {
+    private java.util.concurrent.CompletableFuture<Void> installFeatureHooksIfReady() {
+        // Package-ready and scan-ready can overlap. Keep both readiness checks in queue order;
+        // coalescing a still-running "dependencies pending" check would lose the later ready event.
+        java.util.concurrent.CompletableFuture<Void> installation =
+                hostWorkQueue.submit(this::installFeatureHooksIfReadyOnWorker);
+        installation.whenComplete((ignored, failure) -> {
+            if (failure != null) DouAiLog.failure("module_startup", "scheduled_installation", failure);
+        });
+        return installation;
+    }
+
+    private void installFeatureHooksIfReadyOnWorker() {
+        android.os.Trace.beginSection("DouAi.installFeatureHooks");
+        try { installFeatureHooksIfReadyNow(); }
+        finally { android.os.Trace.endSection(); }
+    }
+
+    private void installFeatureHooksIfReadyNow() {
         if (hostScanReport == null || hostClassLoader == null || targetContext == null || !configurationReady) {
             DouAiLog.event("module_startup", "feature_install_gate", "dependencies_pending",
                     "scan=" + (hostScanReport != null) + ";classloader=" + (hostClassLoader != null)
@@ -986,13 +1056,16 @@ public final class DouAiModule extends XposedModule {
 
     private void installAdditionalHooks() {
         if (downloadActionHook != null) downloadActionHook.setOptions(localOptions);
-        if (hostBehaviorHooks == null) {
-            try {
-                hostBehaviorHooks = HostBehaviorHooks.install(hookFramework(), hostScanReport, hostClassLoader,
-                        targetContext, localOptions, message -> moduleLog(3, TAG, message));
-            } catch (Throwable failure) {
-                DouAiLog.failure("host_behavior", "installation", failure);
-                moduleLog(6, TAG, "Host behavior hooks failed", failure);
+        // Startup gates can also be installed synchronously before Application.onCreate.
+        synchronized (this) {
+            if (hostBehaviorHooks == null) {
+                try {
+                    hostBehaviorHooks = HostBehaviorHooks.install(hookFramework(), hostScanReport, hostClassLoader,
+                            targetContext, localOptions, message -> moduleLog(3, TAG, message));
+                } catch (Throwable failure) {
+                    DouAiLog.failure("host_behavior", "installation", failure);
+                    moduleLog(6, TAG, "Host behavior hooks failed", failure);
+                }
             }
         }
         if (playbackBehaviorHooks == null) {

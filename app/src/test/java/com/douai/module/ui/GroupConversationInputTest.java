@@ -43,6 +43,8 @@ public final class GroupConversationInputTest {
     private Field profilesField;
     private Object previousGroups;
     private Object previousProfiles;
+    private NativeMessagingHooks deferredContactHook;
+    private Object contactTimer;
 
     @Before public void setUp() throws Exception {
         groupsField = NativeMessagingHooks.class.getDeclaredField("groups");
@@ -63,6 +65,7 @@ public final class GroupConversationInputTest {
 
     @After public void tearDown() throws Exception {
         if (screen != null) screen.dismissChildPages();
+        if (deferredContactHook != null) deferredContactHook.close();
         groupsField.set(null, previousGroups);
         profilesField.set(null, previousProfiles);
         if (activity != null) activity.finish();
@@ -153,6 +156,70 @@ public final class GroupConversationInputTest {
         enabled.setChecked(true);
         assertTrue(store.getBoolean("native_auto_comment", false));
         assertFalse(containsVisibleText(comment, "已暂停"));
+    }
+
+    @Test public void initialContactLoadShowsProgressUntilTheBackgroundSnapshotCompletes() throws Exception {
+        deferredContactLoader();
+        AlertDialog progress = openGroupSelection();
+        assertTrue(containsVisibleText(progress.getWindow().getDecorView(), "正在读取会话"));
+        View manual = progress.getButton(AlertDialog.BUTTON_NEUTRAL);
+        assertTrue("Loading must not temporarily claim the group list is empty", manual == null || manual.getVisibility() != View.VISIBLE);
+        finishContactLoad();
+        AlertDialog choices = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertNotSame(progress, choices);
+        assertTrue(choices.isShowing());
+        assertManualButton(choices);
+    }
+
+    @Test public void cancellingOrClosingThePageDetachesThePendingContactConsumer() throws Exception {
+        for (boolean closePage : new boolean[]{false, true}) {
+            deferredContactLoader();
+            AlertDialog progress = openGroupSelection();
+            if (closePage) screen.dismissChildPages();
+            else progress.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            ShadowLooper.idleMainLooper();
+            finishContactLoad();
+            assertFalse("A cancelled consumer must not open a delayed selection or error dialog",
+                    ShadowDialog.getLatestDialog().isShowing());
+            screen.dismissChildPages();
+            ShadowLooper.idleMainLooper();
+            deferredContactHook.close();
+            deferredContactHook = null;
+        }
+        assertEquals(0, store.groupWrites);
+    }
+
+    @Test public void switchingAccountsWhileLoadingShowsAControlledErrorInsteadOfAnEmptyList() throws Exception {
+        deferredContactLoader();
+        openGroupSelection();
+        Field sdkField = NativeMessagingHooks.class.getDeclaredField("sdk"); sdkField.setAccessible(true);
+        Object sdk = sdkField.get(deferredContactHook);
+        sdk.getClass().getField("uid").setLong(sdk, 101);
+        finishContactLoad();
+        AlertDialog error = (AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(error.isShowing());
+        assertTrue(containsVisibleText(error.getWindow().getDecorView(), "账号已变化"));
+        assertFalse(containsVisibleText(error.getWindow().getDecorView(), "暂无可用群会话"));
+        assertEquals(0, store.groupWrites);
+    }
+
+    private void deferredContactLoader() throws Exception {
+        Class<?> timerType = Class.forName("com.douai.module.feature.NativeFollowListsTest$ManualTimer");
+        java.lang.reflect.Constructor<?> timerConstructor = timerType.getDeclaredConstructor();
+        timerConstructor.setAccessible(true);
+        contactTimer = timerConstructor.newInstance();
+        java.lang.reflect.Method factory = com.douai.module.feature.NativeMessagingHooksTest.class.getDeclaredMethod(
+                "enumerationHook", com.douai.module.config.LocalOptions.class, java.util.concurrent.ScheduledThreadPoolExecutor.class);
+        factory.setAccessible(true);
+        deferredContactHook = (NativeMessagingHooks) factory.invoke(null,
+                new com.douai.module.config.LocalOptions(Collections.emptyMap()), contactTimer);
+    }
+
+    private void finishContactLoad() throws Exception {
+        java.lang.reflect.Method advance = contactTimer.getClass().getDeclaredMethod("advance", long.class);
+        advance.setAccessible(true);
+        advance.invoke(contactTimer, 0L);
+        ShadowLooper.idleMainLooper();
     }
 
     private static boolean containsVisibleText(View view, String expected) {

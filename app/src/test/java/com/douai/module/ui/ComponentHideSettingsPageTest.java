@@ -3,6 +3,8 @@ package com.douai.module.ui;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
@@ -321,6 +323,7 @@ public final class ComponentHideSettingsPageTest {
         ComponentHideSettingsPage page = new ComponentHideSettingsPage(activity, store);
         View root = page.createView();
         assertEquals(1, countText(root, locator.label));
+        assertEquals("1 个", ((TextView) root.findViewWithTag("component.custom.count")).getText().toString());
         assertEquals(locator.identityKey(), ComponentHideSettings.readFrom(store)
                 .customViews.get(0).identityKey());
         ImageButton remove = (ImageButton) root.findViewWithTag(
@@ -334,6 +337,56 @@ public final class ComponentHideSettingsPageTest {
 
         assertEquals(0, ComponentHideSettings.readFrom(store).customViews.size());
         assertEquals(1, countText(root, "暂无自定义视图"));
+        assertEquals("0 个", ((TextView) root.findViewWithTag("component.custom.count")).getText().toString());
+        activity.finish();
+    }
+
+    @Test
+    public void customViewDetailsShowScopeAndPathAndCopyWithoutEditingSettings() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout host = new FrameLayout(activity);
+        TextView target = new TextView(activity);
+        target.setId(android.R.id.title);
+        target.setText("private dynamic host text");
+        target.setContentDescription("private dynamic description");
+        host.addView(target);
+        activity.setContentView(host);
+        CustomViewLocator locator = CustomViewLocator.capture(
+                activity.getWindow().getDecorView(), host, target);
+        MemoryStore store = new MemoryStore();
+        store.putBoolean(ComponentHideSettings.ENABLED, true);
+        store.putString(CustomViewLocator.SETTINGS_KEY,
+                CustomViewLocator.serialize(java.util.Collections.singletonList(locator)));
+        Map<String, Object> saved = new HashMap<>(store.values);
+
+        ComponentHideSettingsPage page = new ComponentHideSettingsPage(activity, store);
+        View root = page.createView();
+        assertEquals(1, countText(root, locator.scopeDescription() + " · " + locator.matchingDescription()));
+        View row = root.findViewWithTag("component.custom." + locator.identityKey());
+        row.performClick();
+        AlertDialog detail = (AlertDialog) ShadowDialog.getLatestDialog();
+        TextView information = detail.getWindow().getDecorView().findViewWithTag("component.custom.details");
+        assertNotNull(information);
+        String displayed = information.getText().toString();
+        assertTrue(displayed.contains(locator.scopeDescription()));
+        assertTrue(displayed.contains(locator.matchingDescription()));
+        assertTrue(displayed.contains(locator.viewClassName));
+        assertTrue(displayed.contains(locator.pathDescription()));
+        assertFalse(displayed.contains("private dynamic host text"));
+        assertFalse(displayed.contains("private dynamic description"));
+        assertEquals(saved, store.values);
+
+        detail.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        ShadowLooper.idleMainLooper();
+        ClipboardManager clipboard = (ClipboardManager) activity.getSystemService(Context.CLIPBOARD_SERVICE);
+        assertNotNull(clipboard.getPrimaryClip());
+        assertEquals(displayed, clipboard.getPrimaryClip().getItemAt(0).getText().toString());
+        assertEquals(saved, store.values);
+        row.performClick();
+        Dialog reopened = ShadowDialog.getLatestDialog();
+        assertTrue(reopened.isShowing());
+        page.dismiss();
+        assertFalse(reopened.isShowing());
         activity.finish();
     }
 

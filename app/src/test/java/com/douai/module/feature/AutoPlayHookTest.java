@@ -137,6 +137,32 @@ public final class AutoPlayHookTest {
     }
 
     @Test
+    public void closingWhileAFrameFadesStillReleasesItsBitmapAndSharedReservation() throws Throwable {
+        try (Fixture f = new Fixture(Collections.emptyMap())) {
+            android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(32, 64,
+                    android.graphics.Bitmap.Config.ARGB_8888);
+            MediaMemoryBudget.Reservation memory = MediaMemoryBudget.tryAcquire(32L * 64 * 4);
+            assertNotNull(memory);
+            PlaybackTransitionFrame.Overlay frame = new PlaybackTransitionFrame.Overlay(
+                    (FrameLayout) f.activity.getWindow().getDecorView(), bitmap,
+                    new android.graphics.Rect(0, 0, 32, 64), memory);
+            java.lang.reflect.Field owned = AutoPlayHook.class.getDeclaredField("transitionFrame");
+            owned.setAccessible(true);
+            owned.set(f.hook, frame);
+            Method dismiss = AutoPlayHook.class.getDeclaredMethod("dismissTransitionFrame", boolean.class);
+            dismiss.setAccessible(true);
+            dismiss.invoke(f.hook, true);
+            assertFalse("The effect retains memory until the fade actually finishes", bitmap.isRecycled());
+            f.hook.close();
+            idle();
+            assertTrue("Owner close must also close its detached fading frame", bitmap.isRecycled());
+            MediaMemoryBudget.Reservation all = MediaMemoryBudget.tryAcquire(MediaMemoryBudget.CAPACITY_BYTES);
+            assertNotNull(all);
+            all.close();
+        }
+    }
+
+    @Test
     public void defaultDirectionFollowsManualSwipe() throws Throwable {
         try (Fixture f = new Fixture(Collections.emptyMap())) {
             f.swipe(100, 600);

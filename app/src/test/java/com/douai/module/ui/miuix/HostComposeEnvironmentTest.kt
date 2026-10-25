@@ -15,6 +15,12 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.findViewTreeLifecycleOwner
 import androidx.lifecycle.findViewTreeViewModelStoreOwner
+import androidx.navigationevent.NavigationEventDispatcher
+import androidx.navigationevent.NavigationEventDispatcherOwner
+import androidx.navigationevent.NavigationEventHandler
+import androidx.navigationevent.NavigationEventInfo
+import androidx.navigationevent.findViewTreeNavigationEventDispatcherOwner
+import androidx.navigationevent.setViewTreeNavigationEventDispatcherOwner
 import androidx.savedstate.findViewTreeSavedStateRegistryOwner
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -110,6 +116,8 @@ class HostComposeEnvironmentTest {
         assertSame(session, view.findViewTreeSavedStateRegistryOwner())
         assertSame(session, view.findViewTreeViewModelStoreOwner())
         assertSame(session, view.findViewTreeOnBackPressedDispatcherOwner())
+        assertSame(session, view.findViewTreeNavigationEventDispatcherOwner())
+        assertNull(activity.window.decorView.findViewTreeNavigationEventDispatcherOwner())
         assertEquals(Lifecycle.State.RESUMED, session.lifecycle.currentState)
         session.onActivityPaused(other.get())
         assertEquals(Lifecycle.State.RESUMED, session.lifecycle.currentState)
@@ -125,6 +133,8 @@ class HostComposeEnvironmentTest {
         dialog.dismiss()
         assertEquals(Lifecycle.State.DESTROYED, session.lifecycle.currentState)
         assertNull(view.findViewTreeLifecycleOwner())
+        assertNull(view.findViewTreeNavigationEventDispatcherOwner())
+        assertNull(activity.window.decorView.findViewTreeNavigationEventDispatcherOwner())
         session.close()
         other.pause().stop().destroy()
         controller.pause().stop().destroy()
@@ -144,6 +154,7 @@ class HostComposeEnvironmentTest {
         assertEquals(Lifecycle.State.DESTROYED, session.lifecycle.currentState)
         assertTrue(model.cleared)
         assertNull(view.findViewTreeSavedStateRegistryOwner())
+        assertNull(view.findViewTreeNavigationEventDispatcherOwner())
         session.close()
         controller.pause().stop().destroy()
     }
@@ -174,6 +185,103 @@ class HostComposeEnvironmentTest {
         session.onBackPressedDispatcher.onBackPressed()
         assertEquals(1, closeCalls)
         controller.pause().stop().destroy()
+    }
+
+    @Test
+    fun moduleNavigationOwnerDoesNotReplaceOrDisposeTheHostDecorOwner() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val activity = controller.get()
+        assertFalse("The host may be a plain framework Activity", activity is NavigationEventDispatcherOwner)
+        val decor = activity.window.decorView
+        val hostOwner = object : NavigationEventDispatcherOwner {
+            override val navigationEventDispatcher = NavigationEventDispatcher()
+        }
+        decor.setViewTreeNavigationEventDispatcherOwner(hostOwner)
+        val session = HostComposeEnvironment(activity, Runnable {})
+        val view = ComposeView(session.context()).also(session::attach)
+        activity.setContentView(view)
+        try {
+            assertSame(session, view.findViewTreeNavigationEventDispatcherOwner())
+            assertSame(hostOwner, decor.findViewTreeNavigationEventDispatcherOwner())
+            assertNotSame(hostOwner.navigationEventDispatcher, session.navigationEventDispatcher)
+
+            session.close()
+            // With the module tag cleared, the still-attached view inherits the host's owner.
+            assertSame(hostOwner, view.findViewTreeNavigationEventDispatcherOwner())
+            assertSame(hostOwner, decor.findViewTreeNavigationEventDispatcherOwner())
+            activity.setContentView(View(activity))
+            assertNull(view.findViewTreeNavigationEventDispatcherOwner())
+
+            val hostEvents = mutableListOf<String>()
+            val hostHandler = object : NavigationEventHandler<NavigationEventInfo>(NavigationEventInfo.None, true) {
+                override fun onBackCompleted() { hostEvents += "host" }
+            }
+            hostOwner.navigationEventDispatcher.addHandler(hostHandler)
+            val hostInput = TestNavigationInput()
+            hostOwner.navigationEventDispatcher.addInput(hostInput)
+            hostInput.completeBack()
+            assertEquals("Closing module UI must leave the host dispatcher usable", listOf("host"), hostEvents)
+        } finally {
+            session.close()
+            decor.setViewTreeNavigationEventDispatcherOwner(null)
+            hostOwner.navigationEventDispatcher.dispose()
+            controller.pause().stop().destroy()
+        }
+    }
+
+    @Test
+    fun navigationHandlersBridgeOldBackBeforeLegacyCallbacksAndCloseBecomesSilent() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val events = mutableListOf<String>()
+        val session = HostComposeEnvironment(controller.get(), Runnable { events += "close" })
+        val view = ComposeView(session.context()).also(session::attach)
+        controller.get().setContentView(view)
+        val first = object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() { events += "first" }
+        }
+        val second = object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() { events += "second" }
+        }
+        session.onBackPressedDispatcher.addCallback(session, first)
+        session.onBackPressedDispatcher.addCallback(session, second)
+        try {
+            session.onBackPressedDispatcher.onBackPressed()
+            assertEquals(listOf("second"), events)
+            val navigation = object : NavigationEventHandler<NavigationEventInfo>(NavigationEventInfo.None, true) {
+                override fun onBackCompleted() { events += "navigation" }
+            }
+            session.navigationEventDispatcher.addHandler(navigation)
+            session.onBackPressedDispatcher.onBackPressed()
+            assertEquals("A newly opened NavigationBackHandler must precede the page's old callbacks",
+                listOf("second", "navigation"), events)
+
+            navigation.isBackEnabled = false
+            session.onBackPressedDispatcher.onBackPressed()
+            second.isEnabled = false
+            session.onBackPressedDispatcher.onBackPressed()
+            first.isEnabled = false
+            session.onBackPressedDispatcher.onBackPressed()
+            assertEquals("Disabling navigation must preserve legacy callback order and final fallback",
+                listOf("second", "navigation", "second", "first", "close"), events)
+
+            navigation.isBackEnabled = true
+            session.onBackPressedDispatcher.onBackPressed()
+            assertEquals("navigation", events.last())
+            val completed = events.toList()
+            session.close()
+            assertFalse(session.onBackPressedDispatcher.hasEnabledCallbacks())
+            assertNull(view.findViewTreeNavigationEventDispatcherOwner())
+            session.onBackPressedDispatcher.onBackPressed()
+            assertEquals("Closing must remove the bridge and lifecycle callbacks without another fallback", completed, events)
+        } finally {
+            session.close()
+            controller.pause().stop().destroy()
+        }
+    }
+
+    /** Exercise the public input API rather than inspecting the dispatcher's internal flags. */
+    private class TestNavigationInput : androidx.navigationevent.NavigationEventInput() {
+        fun completeBack() = dispatchOnBackCompleted()
     }
 
     private class ClearingModel : ViewModel() {

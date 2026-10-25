@@ -49,6 +49,12 @@ public final class CustomViewLocatorTest {
         assertEquals(1, restored.size());
         assertFalse(serialized.contains("dynamic selected text"));
         assertFalse(serialized.contains("dynamic content description"));
+        assertEquals("当前窗口", captured.scopeDescription());
+        assertEquals("唯一资源 ID", captured.matchingDescription());
+        String description = captured.pathDescription();
+        assertEquals("DecorView → … → TextView #android:id/button1", description);
+        assertEquals(description, restored.get(0).pathDescription());
+        assertEquals(serialized, encode(captured));
 
         parent.removeView(target);
         FrameLayout replacementParent = new FrameLayout(activity);
@@ -58,6 +64,7 @@ public final class CustomViewLocatorTest {
         assertSame(target, restored.get(0).resolve(decor));
         assertEquals(captured.identityKey(), restored.get(0).identityKey());
         assertEquals(captured.identityKey(), CustomViewLocator.capture(decor, target).identityKey());
+        assertEquals(description, CustomViewLocator.capture(decor, target).pathDescription());
         activity.finish();
     }
 
@@ -111,6 +118,7 @@ public final class CustomViewLocatorTest {
         window.addView(previousCard);
         CustomViewLocator locator = roundTrip(CustomViewLocator.capture(window, previousCard, previousTarget));
         assertEquals(CustomViewLocator.Scope.FEED, locator.scope);
+        assertEquals("当前信息流卡片", locator.scopeDescription());
 
         LinearLayout currentCard = new LinearLayout(activity);
         currentCard.addView(new Button(activity));
@@ -169,6 +177,9 @@ public final class CustomViewLocatorTest {
         window.addView(otherBranch);
         window.addView(selectedBranch);
         CustomViewLocator locator = roundTrip(CustomViewLocator.capture(window, target));
+        assertEquals("命名祖先 + 结构路径", locator.matchingDescription());
+        assertEquals("FrameLayout → … → LinearLayout #android:id/list → TextView #android:id/title",
+                locator.pathDescription());
 
         selectedBranch.addView(new Button(activity), 0);
         window.removeView(selectedBranch);
@@ -194,6 +205,9 @@ public final class CustomViewLocatorTest {
         root.addView(first);
         root.addView(target);
         CustomViewLocator locator = roundTrip(CustomViewLocator.capture(root, target));
+        assertEquals("严格结构路径", locator.matchingDescription());
+        assertEquals("LinearLayout → TextView #android:id/title [子节点 2，同类同 ID 2/2]",
+                locator.pathDescription());
         assertSame(target, locator.resolve(root));
         root.addView(new Button(activity), 0);
         assertSame(first, root.getChildAt(1));
@@ -228,6 +242,9 @@ public final class CustomViewLocatorTest {
         firstParent.addView(firstTarget);
         firstRoot.addView(firstParent);
         CustomViewLocator locator = roundTrip(CustomViewLocator.capture(firstRoot, firstTarget));
+        assertEquals("严格结构路径", locator.matchingDescription());
+        assertEquals("FrameLayout → LinearLayout [子节点 1，同类同 ID 1/1]"
+                + " → TextView [子节点 1，同类同 ID 1/1]", locator.pathDescription());
         FrameLayout rebuiltRoot = new FrameLayout(activity);
         LinearLayout rebuiltParent = new LinearLayout(activity);
         TextView rebuiltTarget = new TextView(activity);
@@ -235,6 +252,33 @@ public final class CustomViewLocatorTest {
         rebuiltParent.addView(rebuiltTarget);
         rebuiltRoot.addView(rebuiltParent);
         assertSame(rebuiltTarget, locator.resolve(rebuiltRoot));
+        activity.finish();
+    }
+
+    @Test
+    public void anonymousPathRejectsScanRootsInsideFinderOverlay() {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout window = new FrameLayout(activity);
+        FrameLayout feed = new FrameLayout(activity);
+        TextView target = new TextView(activity);
+        feed.addView(target);
+        window.addView(feed);
+        CustomViewLocator locator = roundTrip(CustomViewLocator.capture(window, feed, target));
+        assertSame(target, locator.resolve(window, feed));
+
+        feed.setTag("douai.view_finder");
+        assertNull(locator.resolve(window, feed));
+        feed.setTag(null);
+        FrameLayout overlay = new FrameLayout(activity);
+        overlay.setTag("douai.view_finder.selection_panel");
+        window.removeView(feed);
+        overlay.addView(feed);
+        window.addView(overlay);
+        assertNull(locator.resolve(window, feed));
+
+        CustomViewLocator windowLocator = roundTrip(CustomViewLocator.capture(feed, target));
+        feed.setTag("douai.view_finder");
+        assertNull(windowLocator.resolve(feed));
         activity.finish();
     }
 

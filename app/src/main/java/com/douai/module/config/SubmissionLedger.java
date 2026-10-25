@@ -80,6 +80,11 @@ public final class SubmissionLedger {
                 for (Map.Entry<String, ?> stored : all.entrySet()) {
                     if (!stored.getKey().startsWith(PREFIX)) continue;
                     count++;
+                }
+                if (count > capacity) return ReserveResult.FULL;
+                // Decoding all reservations is only needed when a full ledger needs eviction.
+                if (count == capacity) for (Map.Entry<String, ?> stored : all.entrySet()) {
+                    if (!stored.getKey().startsWith(PREFIX)) continue;
                     Record record = decode(stored.getValue());
                     // A corrupt or uncertain record might represent a successful host send.
                     if (record != null && "sent".equals(record.status) && record.timestamp < oldestTime) {
@@ -180,7 +185,7 @@ public final class SubmissionLedger {
         synchronized (LOCK) {
             if (failed()) return false;
             try {
-                Object raw = preferences.getAll().get(PREFIX + expected.identity);
+                Object raw = storedValue(PREFIX + expected.identity);
                 if (!expected.encoded.equals(raw)) return false;
                 Record record = decode(raw);
                 if (record == null || !recoverable(record, now)) return false;
@@ -224,7 +229,7 @@ public final class SubmissionLedger {
     private Record current(String identity, String attempt) {
         if (failed() || !validIdentity(identity) || !validAttempt(attempt)) return null;
         try {
-            Record record = decode(preferences.getAll().get(PREFIX + identity));
+            Record record = decode(storedValue(PREFIX + identity));
             return record != null && attempt.equals(record.attempt) ? record : null;
         } catch (RuntimeException failure) { fail(); return null; }
     }
@@ -236,6 +241,11 @@ public final class SubmissionLedger {
         // Failed commits may still mutate SharedPreferences in memory. All instances must stop sending.
         fail();
         return false;
+    }
+
+    private String storedValue(String key) {
+        try { return preferences.getString(key, null); }
+        catch (ClassCastException malformed) { return null; }
     }
 
     private boolean failed() { return FAILED.containsKey(preferences); }

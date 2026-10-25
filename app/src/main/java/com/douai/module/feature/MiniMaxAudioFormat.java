@@ -14,7 +14,9 @@ final class MiniMaxAudioFormat {
         if (!mime.isEmpty() && !mime.startsWith("audio/") && !mime.equals("application/octet-stream")) {
             throw invalid();
         }
-        byte[] source = resource.bytes;
+        byte[] source;
+        try { source = resource.readBytes(); }
+        catch (java.io.IOException failure) { throw invalid(); }
         if (source.length < 12 || !ascii(source, 0, "RIFF") || !ascii(source, 8, "WAVE")
                 || uint32(source, 4) != source.length - 8L) throw invalid();
         int dataLength = -1;

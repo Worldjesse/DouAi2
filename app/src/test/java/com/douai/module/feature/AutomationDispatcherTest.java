@@ -436,6 +436,91 @@ public final class AutomationDispatcherTest {
         assertEquals(0, cancelled.get());
     }
 
+    @Test public void commentReplyPreparationIsVisibleBeforeContentAndReusesTheReadyPreview() {
+        Map<String, Object> values = base(true, true);
+        values.put(LocalOptions.COMMENT_REPLY_ENABLED, true);
+        dispatcher.setOptions(new LocalOptions(values));
+        AutomationHistoryStore.Entry entry = commentReplyPreparation("comment-early");
+        dispatcher.trackReply(entry, "generating", () -> true, () -> { });
+        CommentRingView preparing = replyRing();
+        assertNotNull(preparing);
+        assertEquals("generating", preparing.getPhase());
+        worker.runAll();
+        assertTrue("Unfinished reply content is not persisted as a ready preview", history.read("comment_reply").isEmpty());
+        dispatcher.prepare(entry, () -> true, result -> {
+            sends.incrementAndGet(); result.accept("sent");
+        }, ignored -> { });
+        assertSame(preparing, replyRing()); assertEquals("preview", replyRing().getPhase());
+        advance(2); worker.runAll(); assertEquals(0, sends.get());
+        advance(1); worker.runAll(); assertEquals(1, sends.get()); assertNull(replyRing());
+    }
+
+    @Test public void commentPreparationDoesNotTakeAReadySlotAndFullPreviewStillDefersItsClaim() {
+        Map<String, Object> values = base(true, false);
+        values.put(LocalOptions.COMMENT_REPLY_ENABLED, true);
+        dispatcher.setOptions(new LocalOptions(values));
+        AutomationHistoryStore.Entry early = commentReplyPreparation("comment-capacity");
+        dispatcher.trackReply(early, "generating", () -> true, () -> { });
+        for (int i = 0; i < 16; i++) {
+            dispatcher.prepare(replyPreparation("ready-capacity-" + i), () -> true,
+                    result -> sends.incrementAndGet(), ignored -> { });
+        }
+        java.util.concurrent.atomic.AtomicReference<String> outcome = new java.util.concurrent.atomic.AtomicReference<>();
+        dispatcher.prepare(early, () -> true, result -> sends.addAndGet(100), outcome::set);
+        assertEquals("deferred", outcome.get());
+        assertEquals(16, replyRing().getQueueCount()); assertEquals(0, sends.get());
+    }
+
+    @Test public void commentPreparationCleanupDoesNotRemoveAPrivatePreparationWithTheSameId() {
+        Map<String, Object> values = base(true, false);
+        values.put(LocalOptions.COMMENT_REPLY_ENABLED, true);
+        dispatcher.setOptions(new LocalOptions(values));
+        dispatcher.trackReply(replyPreparation("shared-id"), "speech", () -> true, () -> { });
+        dispatcher.trackReply(commentReplyPreparation("shared-id"), "generating", () -> true, () -> { });
+        assertEquals(2, replyRing().getQueueCount());
+        dispatcher.discardReplyPreparation("comment_reply", "shared-id");
+        assertNotNull(replyRing()); assertEquals(1, replyRing().getQueueCount());
+        assertEquals("speech", replyRing().getPhase());
+    }
+
+    @Test public void simpleLogsRetainSafeCommentOverlayDecisionsWithoutMessageOrTargetData() throws Exception {
+        assertTrue(com.douai.module.diagnostics.DouAiLog.awaitIdle(5000));
+        boolean previous = com.douai.module.diagnostics.DebugLog.isEnabled();
+        List<String> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+        com.douai.module.diagnostics.DebugLog.setEnabled(false);
+        com.douai.module.diagnostics.DouAiLog.setFrameworkSink((priority, line) -> events.add(line));
+        try {
+            Map<String, Object> values = base(true, false); values.put(LocalOptions.COMMENT_REPLY_ENABLED, true);
+            dispatcher.setOptions(new LocalOptions(values));
+            dispatcher.trackReply(commentReplyPreparation("private-overlay-task"), "media", () -> true, () -> { });
+            for (int i = 0; i < 10; i++) dispatcher.trackReply(commentReplyPreparation("private-overlay-task"), "media", () -> true, () -> { });
+            dispatcher.onActivityPaused(activity);
+            assertTrue(com.douai.module.diagnostics.DouAiLog.awaitIdle(5000));
+            List<org.json.JSONObject> visibility = new ArrayList<>();
+            for (String line : events) {
+                org.json.JSONObject event = new org.json.JSONObject(line);
+                if ("reply_overlay_state".equals(event.optString("event"))) visibility.add(event);
+            }
+            assertTrue(visibility.stream().anyMatch(event -> "show_requested".equals(event.optString("reason_code"))
+                    && event.optString("evidence").contains("kind=comment_reply;phase=media")
+                    && "simple".equals(event.optString("log_mode"))));
+            assertTrue(visibility.stream().anyMatch(event -> "no_activity".equals(event.optString("reason_code"))));
+            assertEquals(1, visibility.stream().filter(event -> "show_requested".equals(event.optString("reason_code"))).count());
+            String joined = String.join("\n", events);
+            for (String secret : List.of("private-overlay-task", "private-target", "private-input", "private-name")) assertFalse(joined.contains(secret));
+        } finally {
+            com.douai.module.diagnostics.DouAiLog.awaitIdle(5000);
+            com.douai.module.diagnostics.DouAiLog.setFrameworkSink(null);
+            com.douai.module.diagnostics.DebugLog.setEnabled(previous);
+        }
+    }
+
+    private static AutomationHistoryStore.Entry commentReplyPreparation(String id) {
+        long now = System.currentTimeMillis();
+        return new AutomationHistoryStore.Entry(id, AutomationHistoryStore.COMMENT_REPLY, "private-target", "private-name",
+                "private-input", "", "", "pending", now, now, AutomationHistoryStore.DELIVERY_TEXT);
+    }
+
     @Test public void cancellingPreparationCancelsGenerationAndRejectsALateReadyCallback() {
         dispatcher.setOptions(options(true, false));
         AtomicInteger cancelled = new AtomicInteger();

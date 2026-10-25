@@ -25,11 +25,11 @@ import java.util.function.Supplier;
 public final class DownloadTasks {
     interface Work { String run(DownloadTransfer transfer) throws Exception; }
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
-    private static final ThreadPoolExecutor WORKERS = new ThreadPoolExecutor(2, 2, 0,
-            TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(16));
+    private static final ThreadPoolExecutor WORKERS = new ThreadPoolExecutor(2, 2, 30,
+            TimeUnit.SECONDS, new ArrayBlockingQueue<>(16));
     private static final BoundedMediaQueue QUEUE = new BoundedMediaQueue(WORKERS);
-    private static final ThreadPoolExecutor CANCELLATIONS = new ThreadPoolExecutor(2, 2, 0,
-            TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(16), task -> {
+    private static final ThreadPoolExecutor CANCELLATIONS = new ThreadPoolExecutor(2, 2, 30,
+            TimeUnit.SECONDS, new ArrayBlockingQueue<>(16), task -> {
         Thread thread = new Thread(task, "DouAi-download-cancel"); thread.setDaemon(true); return thread;
     });
     private static final ScheduledThreadPoolExecutor CLOCK = new ScheduledThreadPoolExecutor(1, task -> {
@@ -39,7 +39,11 @@ public final class DownloadTasks {
     private static final CopyOnWriteArrayList<Runnable> LISTENERS = new CopyOnWriteArrayList<>();
     private static final AtomicBoolean NOTIFY_PENDING = new AtomicBoolean();
     static Supplier<DownloadTransfer> transfers = DownloadTransfer::new;
-    static { CLOCK.setRemoveOnCancelPolicy(true); }
+    static {
+        CLOCK.setRemoveOnCancelPolicy(true);
+        WORKERS.allowCoreThreadTimeOut(true);
+        CANCELLATIONS.allowCoreThreadTimeOut(true);
+    }
     private DownloadTasks() { }
 
     public static final class Snapshot {

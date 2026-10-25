@@ -299,6 +299,10 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
     }
 
     private void showGroupSelection(OptionRow preview) {
+        withNativeContacts(false, () -> showGroupSelectionLoaded(preview));
+    }
+
+    private void showGroupSelectionLoaded(OptionRow preview) {
         java.util.Map<String, String> groups = NativeMessagingHooks.availableGroups();
         java.util.Set<String> selected = GroupReplyPolicy.entries(repository.getString("reply_group_targets", ""));
         if (groups.isEmpty() && selected.isEmpty()) {
@@ -327,6 +331,10 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
     }
 
     private void showGroupMemberSelection() {
+        withNativeContacts(true, () -> showGroupMemberSelectionLoaded());
+    }
+
+    private void showGroupMemberSelectionLoaded() {
         java.util.Map<String, ProfileListEntry> members = NativeMessagingHooks.availableGroupMembers();
         java.util.Set<String> selected = new java.util.LinkedHashSet<>(GroupReplyPolicy.entries(
                 repository.getString("reply_group_members", "")));
@@ -440,6 +448,10 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
     }
 
     private void showCommentAuthorSelection() {
+        withNativeContacts(false, () -> showCommentAuthorSelectionLoaded());
+    }
+
+    private void showCommentAuthorSelectionLoaded() {
         java.util.Map<String, ProfileListEntry> authors = new java.util.LinkedHashMap<>(NativeMessagingHooks.availableContactProfiles());
         authors.putAll(NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWING));
         authors.putAll(NativeFollowLists.memberDetails(FollowListSnapshot.Kind.FOLLOWERS));
@@ -659,7 +671,34 @@ final class AutomationMessageSettingsPage implements AutoCloseable {
         return result.isEmpty() ? "未选择" : String.join("、", result);
     }
 
+    private void withNativeContacts(boolean includeMembers, Runnable showSelection) {
+        if (closed) return;
+        java.util.concurrent.atomic.AtomicBoolean waiting = new java.util.concurrent.atomic.AtomicBoolean(true);
+        AutoCloseable[] request = new AutoCloseable[1];
+        AlertDialog progress = new MiuixDialogBuilder(context, useMiuix).setTitle("读取会话名单")
+                .setMessage(includeMembers ? "正在读取群成员，请稍候…" : "正在读取会话，请稍候…")
+                .setNegativeButton("取消", null).create();
+        showOptionDialog(progress, () -> {
+            if (waiting.getAndSet(false) && request[0] != null) {
+                try { request[0].close(); } catch (Exception ignored) { }
+            }
+        });
+        request[0] = NativeMessagingHooks.loadContacts(includeMembers, success -> {
+            if (!waiting.getAndSet(false) || closed) return;
+            progress.dismiss();
+            if (success) showSelection.run();
+            else showOptionDialog(new MiuixDialogBuilder(context, useMiuix).setTitle("会话名单暂不可用")
+                    .setMessage("读取失败或登录账号已变化，请稍后重新打开。也可以继续填写目标 ID。")
+                    .setPositiveButton("继续选择", (dialog, which) -> { if (!closed) showSelection.run(); })
+                    .setNegativeButton("返回", null).create());
+        });
+    }
+
     private void showTargetSelection(String title, String key) {
+        withNativeContacts(false, () -> showTargetSelectionLoaded(title, key));
+    }
+
+    private void showTargetSelectionLoaded(String title, String key) {
         java.util.Map<String, String> contacts = NativeMessagingHooks.availableContacts();
         if (contacts.isEmpty()) {
             showTargetIds(title, key);

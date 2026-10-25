@@ -65,6 +65,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
     private volatile String diagnostic = "等待当前视频播放完成";
     private String lastSkip;
     private PlaybackTransitionFrame.Overlay transitionFrame;
+    private PlaybackTransitionFrame.Overlay fadingTransitionFrame;
     private String transitionSourceAid;
     private String transitionPlayingAid;
     private Runnable transitionTimeout;
@@ -263,6 +264,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
             Object panel = params == null ? null : feedContextField.get(params);
             if (panel == null || currentHolder.invoke(panel) != holder) return;
             if (selectedHolder.get() != holder || !aid.equals(selectedAid)) {
+                PlaybackTransitionFrame.invalidateSurfaceCache(selectedRoot.get());
                 generation++;
                 attempted = false;
                 pendingAdvance = false;
@@ -310,7 +312,9 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
             invokeManualSelection(pager, target, root, sourceAid, token, operation, null);
         });
         main.postDelayed(fallback, 120L);
-        PlaybackTransitionFrame.capture(root, main, operation.wrapConsumer(frame -> {
+        PlaybackTransitionFrame.capture(root, main,
+                () -> !claimed.get() && !closed && generation == token && sourceAid.equals(selectedAid)
+                        && activeRoot() == root, operation.wrapConsumer(frame -> {
             if (!claimed.compareAndSet(false, true)) {
                 if (frame != null) frame.close();
                 return;
@@ -497,7 +501,9 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
                 advance(aid, token, root, panel, pagerContext, targetDirection, operation, null);
             });
             main.postDelayed(fallback, 120L);
-            PlaybackTransitionFrame.capture(root, main, operation.wrapConsumer(frame -> {
+            PlaybackTransitionFrame.capture(root, main,
+                    () -> !claimed.get() && !closed && generation == token && aid.equals(selectedAid)
+                            && activeRoot() == root, operation.wrapConsumer(frame -> {
                 if (!claimed.compareAndSet(false, true)) {
                     if (frame != null) frame.close();
                     return;
@@ -548,6 +554,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
                 }
             }
             if (frame != null) {
+                dismissTransitionFrame(false);
                 transitionFrame = frame;
                 transitionSourceAid = aid;
                 transitionPlayingAid = null;
@@ -609,6 +616,8 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
     }
 
     private void dismissTransitionFrame(boolean fade) {
+        if (fadingTransitionFrame != null) fadingTransitionFrame.close();
+        fadingTransitionFrame = null;
         if (transitionTimeout != null) main.removeCallbacks(transitionTimeout);
         if (transitionRelease != null) main.removeCallbacks(transitionRelease);
         transitionTimeout = null;
@@ -618,7 +627,10 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
         PlaybackTransitionFrame.Overlay frame = transitionFrame;
         transitionFrame = null;
         if (frame == null) return;
-        if (fade) frame.fadeAndClose(180L);
+        if (fade) {
+            fadingTransitionFrame = frame;
+            frame.fadeAndClose(180L);
+        }
         else frame.close();
     }
 
@@ -657,6 +669,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
         generation++;
         pendingAdvance = false;
         dismissTransitionFrame(false);
+        PlaybackTransitionFrame.invalidateSurfaceCache(selectedRoot.get());
         selectedHolder.clear();
         selectedRoot.clear();
         selectedAid = null;
@@ -705,6 +718,7 @@ public final class AutoPlayHook implements Application.ActivityLifecycleCallback
         if (resumed.get() == activity) {
             resumed.clear(); generation++; pendingAdvance = false; touching = false; touchPager.clear();
             dismissTransitionFrame(false);
+            PlaybackTransitionFrame.invalidateSurfaceCache(selectedRoot.get());
         }
     }
     @Override public void onActivityDestroyed(Activity activity) {

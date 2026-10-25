@@ -23,7 +23,6 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -93,6 +92,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
     private MediaLoader mediaLoader = AutomationReplyMedia::comment;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Object stateLock = new Object();
+    private Task activeGeneratingTask;
     private final AtomicLong generation = new AtomicLong();
     private final AtomicBoolean scanQueued = new AtomicBoolean();
     private final Map<String, Task> tasks = new ConcurrentHashMap<>();
@@ -105,7 +105,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
     private final Runnable scanSignal = this::requestScan;
     private final Runnable poll = new Runnable() {
         @Override public void run() {
-            if (closed || !foregroundSession) return;
+            if (!enabled() || !foregroundSession) return;
             requestScan();
             main.postDelayed(this, account() > 0 ? POLL_MILLIS : 5_000);
         }
@@ -122,11 +122,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                      Source source, Sender sender, Generator generator, LongSupplier ownAccount,
                      ExecutorService scanner, ExecutorService worker, Consumer<String> log) {
         this(context, options, dispatcher, source, sender, generator, ownAccount, scanner, worker,
-                new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, new ArrayBlockingQueue<>(64), action -> {
-                    Thread thread = new Thread(action, "DouAi-comment-reply-ledger");
-                    thread.setDaemon(true);
-                    return thread;
-                }), log);
+                newWorker("DouAi-comment-reply-ledger"), log);
     }
 
     CommentReplyHook(Context context, LocalOptions options, AutomationDispatcher dispatcher,
@@ -191,7 +187,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                 } catch (ReflectiveOperationException | RuntimeException failure) { return 0; }
             };
             installed[0] = new CommentReplyHook(context, options, dispatcher, source, sender, new SharedReplyGenerator(log),
-                    account, Executors.newSingleThreadExecutor(), Executors.newSingleThreadExecutor(), log);
+                    account, newWorker("DouAi-comment-reply-scan"), newWorker("DouAi-comment-reply-generate"), log);
             return installed[0];
         } catch (Exception failure) {
             if (inbox != null) inbox.close();
@@ -202,6 +198,14 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
 
     public boolean ownsPublish(Object model) { return sender.owns(model); }
     public String diagnostic() { return diagnostic; }
+
+    static ThreadPoolExecutor newWorker(String name) {
+        return new ThreadPoolExecutor(0, 1, 30, TimeUnit.SECONDS, new ArrayBlockingQueue<>(64), action -> {
+            Thread thread = new Thread(action, name);
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
 
     public void setOptions(LocalOptions next) {
         boolean changed;
@@ -215,7 +219,16 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
             options = next;
             if (changed) invalidate();
         }
-        if (changed) main.post(() -> { if (enabled()) signal(); else diagnostic = "未启用"; });
+        if (changed) main.post(() -> {
+            main.removeCallbacks(poll);
+            main.removeCallbacks(scanSignal);
+            if (enabled()) {
+                if (foregroundSession) {
+                    main.postDelayed(poll, POLL_MILLIS);
+                    signal();
+                }
+            } else diagnostic = "未启用";
+        });
     }
 
     private boolean enabled() {
@@ -233,7 +246,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
     }
 
     void signal() {
-        if (closed) return;
+        if (!enabled() || !foreground) return;
         main.removeCallbacks(scanSignal);
         main.postDelayed(scanSignal, 1_000);
     }
@@ -308,6 +321,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
                             continue;
                         }
                         tasks.put(identity, task);
+                        preparation(task, "waiting");
                         admitted++;
                         deferred = true;
                         long delay = Math.max(2, Math.min(3600, options.integer("reply_delay_seconds", 2))) * 1000L;
@@ -360,7 +374,26 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
     }
 
     private void generate(Task task) {
-        task.trace.wrap(() -> generateTraced(task)).run();
+        synchronized (stateLock) {
+            if (!valid(task)) { complete(task, "cancelled"); return; }
+            activeGeneratingTask = task;
+        }
+        try { task.trace.wrap(() -> generateTraced(task)).run(); }
+        finally {
+            synchronized (stateLock) { if (activeGeneratingTask == task) activeGeneratingTask = null; }
+        }
+    }
+
+    private void preparation(Task task, String phase) {
+        dispatcher.trackReply(entry(task, "pending"), phase, () -> valid(task), () -> cancelPreparation(task));
+    }
+
+    private void cancelPreparation(Task task) {
+        synchronized (stateLock) {
+            if (task.finished.get() || task.submitted) return;
+            if (activeGeneratingTask == task) generator.cancel();
+            complete(task, "cancelled");
+        }
     }
 
     private void generateTraced(Task task) {
@@ -371,7 +404,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
             synchronized (stateLock) {
                 if (task.finished.get() || task.submitted) return;
                 task.media.cancel();
-                generator.cancel();
+                if (activeGeneratingTask == task) generator.cancel();
                 task.timedOut = true;
                 task.trace.stage("generation_timeout", "deadline_ms=120000;remote_model_outcome=unknown");
                 fail(task, "生成超时");
@@ -386,6 +419,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
             }
             if ("ai".equals(task.settings.text("reply_mode", "fixed"))) {
                 task.stage = "media";
+                preparation(task, "media");
             task.trace.stage("media", "submitted=" + task.submitted + ";generated_chars=" + task.generatedChars);
                 task.images = java.util.Collections.unmodifiableList(new java.util.ArrayList<>(
                         mediaLoader.load(application, task.event, task.settings, task.media)));
@@ -396,6 +430,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
             task.trace.stage("input", "submitted=" + task.submitted + ";generated_chars=" + task.generatedChars);
             task.input = input(task.event, task.images.isEmpty() ? "" : AutomationReplyMedia.commentSourceLabel(task.event, task.settings));
             task.stage = "model";
+            preparation(task, "generating");
             task.trace.stage("model", "submitted=" + task.submitted + ";generated_chars=" + task.generatedChars);
             Generated generated = generator.generate(task.account, task.event, task.settings, task.images, task.input, count -> {
                 task.requestImageCount = count;
@@ -418,6 +453,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
             safeLog("Comment reply generated: chars=" + task.generatedChars);
             if (task.settings.enabled(LocalOptions.REPLY_VOICE)) {
                 task.stage = "speech";
+                preparation(task, "speech");
             task.trace.stage("speech", "submitted=" + task.submitted + ";generated_chars=" + task.generatedChars);
                 SpeechPreparation.Audio audio = speechPreparer.prepare(application, task.text, task.settings, Long.MAX_VALUE, () -> valid(task));
                 task.audio = audio;
@@ -525,7 +561,8 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
     }
 
     private boolean shouldDeferCancellation(Task task) {
-        return task.boundaryFailed || !valid(task.account, task.epoch) || !dispatcher.isForeground(resumed.get());
+        return task.boundaryFailed || !dispatcher.isEnabled(KIND) || !valid(task.account, task.epoch)
+                || !dispatcher.isForeground(resumed.get());
     }
 
     private void fail(Task task, String reason) {
@@ -589,6 +626,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
             task.media.cancel();
             AutomationTrace.outcome(task.trace, status, task.timedOut ? "generation_timeout" : "comment_reply_" + status, "stage=" + task.stage + ";model_request_sent=" + task.modelRequestSent + ";generated=" + task.generated + ";submitted=" + task.submitted + ";durable_submission=" + task.persistedSubmission + ";acknowledged=" + "sent".equals(status));
         }
+        dispatcher.discardReplyPreparation(KIND, task.id);
         submitLedger(() -> {
             // Keep this identity queued until its final durable transition; old callbacks carry its token.
             persistCompletion(task, status);
@@ -636,7 +674,7 @@ public final class CommentReplyHook implements Application.ActivityLifecycleCall
         if (!foregroundSession) {
             foregroundSession = true;
             main.removeCallbacks(poll);
-            main.post(poll);
+            if (enabled()) main.post(poll);
         }
     }
     @Override public void onActivityPaused(Activity activity) {

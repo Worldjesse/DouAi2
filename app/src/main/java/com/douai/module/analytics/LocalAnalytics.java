@@ -70,6 +70,8 @@ public final class LocalAnalytics implements AutoCloseable {
     private SQLiteDatabase database;
     private LocalDate lastPrunedDay;
     private final AtomicLong queueDropped = new AtomicLong();
+    private final AtomicLong writeTransactions = new AtomicLong();
+    private boolean trimVisitsPending, trimActionsPending;
     private Visit currentVisit;
 
     private static final class Visit {
@@ -126,12 +128,13 @@ public final class LocalAnalytics implements AutoCloseable {
         this.enabledFile = new AtomicFile(new File(directory, "enabled"));
         this.clock = clock;
         this.zone = zone;
-        this.writer = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+        this.writer = new ThreadPoolExecutor(1, 1, 30L, TimeUnit.SECONDS,
                 new ArrayBlockingQueue<>(QUEUE_CAPACITY), runnable -> {
                     Thread thread = new Thread(runnable, "douai-local-analytics");
                     thread.setDaemon(true);
                     return thread;
                 }, new ThreadPoolExecutor.AbortPolicy());
+        this.writer.allowCoreThreadTimeOut(true);
         try {
             enabled = "1".equals(new String(enabledFile.readFully(), StandardCharsets.UTF_8));
         } catch (Exception ignored) { enabled = false; }
@@ -229,12 +232,12 @@ public final class LocalAnalytics implements AutoCloseable {
                 }
                 boolean countView = !workHash.equals(lastWorkHash) || !local.toLocalDate().equals(lastWorkDay);
                 String visitToken = source == null ? null : UUID.randomUUID().toString();
-                boolean queued = enqueue(() -> write(token, local.toLocalDate(), db -> {
+                boolean queued = enqueueWrite(token, local.toLocalDate(), db -> {
                     if (visitToken != null) {
                         db.execSQL("INSERT INTO visits(token,work_hash,type,day,hour,source,started,visible_ms,ended,end_reason) VALUES (?,?,?,?,?,?,?,0,0,'')",
                                 new Object[]{visitToken, workHash, typeKey, local.toLocalDate().toString(), local.getHour(), source, timestamp});
                         for (String topic : uniqueTopics) db.execSQL("INSERT OR IGNORE INTO visit_topics(token,topic) VALUES (?,?)", new Object[]{visitToken, topic});
-                        trimVisits(db);
+                        trimVisitsPending = true;
                     }
                     if (!countView) return;
                     addDaily(db, local.toLocalDate(), 1, 0, advertisement ? 1 : 0,
@@ -250,7 +253,7 @@ public final class LocalAnalytics implements AutoCloseable {
                     addRank(db, day, "author", authorKey, finalAuthorLabel);
                     for (String topic : uniqueTopics) addRank(db, day, "topic", topic, topic);
                     addRecent(db, timestamp, typeLabel(typeKey) + " · " + finalAuthorLabel, "view");
-                }));
+                });
                 if (queued) {
                     lastWorkHash = workHash;
                     lastWorkDay = local.toLocalDate();
@@ -277,9 +280,9 @@ public final class LocalAnalytics implements AutoCloseable {
             visit.visibleMillis = Math.max(visit.visibleMillis, observed);
             if (endReason == null && visit.visibleMillis - visit.persistedMillis < 3_000) return;
             long total = visit.visibleMillis;
-            boolean queued = enqueue(() -> write(visit.generation, today(), db -> db.execSQL(
+            boolean queued = enqueueWrite(visit.generation, today(), db -> db.execSQL(
                     "UPDATE visits SET visible_ms=MAX(visible_ms,?),ended=?,end_reason=? WHERE token=?",
-                    new Object[]{total, endReason == null ? 0 : 1, endReason == null ? "" : endReason, token})));
+                    new Object[]{total, endReason == null ? 0 : 1, endReason == null ? "" : endReason, token}));
             if (queued) visit.persistedMillis = total;
             if (endReason != null) currentVisit = null;
         }
@@ -311,12 +314,12 @@ public final class LocalAnalytics implements AutoCloseable {
             final String visitToken = expectedVisit != null && expectedVisit.equals(linked) ? linked : null;
             long timestamp = clock.millis();
             LocalDate day = Instant.ofEpochMilli(timestamp).atZone(zone.get()).toLocalDate();
-            enqueue(() -> write(expectedGeneration, day, db -> {
+            enqueueWrite(expectedGeneration, day, db -> {
                 addFeature(db, day, timestamp, featureKey, featureLabel, actionSource);
                 db.execSQL("INSERT INTO actions(day,token,feature,source,stage,ts) VALUES (?,?,?,?,?,?)",
                         new Object[]{day.toString(), visitToken, featureKey, actionSource, actionStage, timestamp});
-                db.execSQL("DELETE FROM actions WHERE id NOT IN (SELECT id FROM actions ORDER BY id DESC LIMIT 30000)");
-            }));
+                trimActionsPending = true;
+            });
         }
     }
 
@@ -330,9 +333,9 @@ public final class LocalAnalytics implements AutoCloseable {
             long token = generation;
             long timestamp = clock.millis();
             LocalDate day = Instant.ofEpochMilli(timestamp).atZone(zone.get()).toLocalDate();
-            enqueue(() -> write(token, day, db -> {
+            enqueueWrite(token, day, db -> {
                 addFeature(db, day, timestamp, featureKey, featureLabel, featureSource(featureKey));
-            }));
+            });
         }
     }
 
@@ -520,7 +523,7 @@ public final class LocalAnalytics implements AutoCloseable {
 
     private boolean enqueue(Runnable runnable) {
         DouAiLog.Operation parent = DouAiLog.current();
-        try { writer.execute(parent == null ? runnable : parent.wrap(runnable)); return true; }
+        try { writer.execute(runnable instanceof WriteTask || parent == null ? runnable : parent.wrap(runnable)); return true; }
         catch (RejectedExecutionException ignored) {
             if (!closed) queueDropped.incrementAndGet();
             DouAiLog.event("local_analytics", "write_dropped", closed ? "store_closed" : "queue_full",
@@ -531,29 +534,75 @@ public final class LocalAnalytics implements AutoCloseable {
 
     private interface Mutation { void run(SQLiteDatabase db); }
 
-    private void write(long token, LocalDate eventDay, Mutation mutation) {
-        DouAiLog.Operation operation = DouAiLog.begin("local_analytics_write", "queued_mutation");
-        synchronized (databaseLock) {
-            if (closed || !enabled || generation != token) {
-                operation.finish(DouAiLog.Outcome.SKIPPED, closed ? "store_closed" : !enabled ? "collection_disabled" : "stale_generation",
-                        "transaction_started=false"); return;
+    private boolean enqueueWrite(long token, LocalDate day, Mutation mutation) {
+        return enqueue(new WriteTask(token, day, mutation, DouAiLog.current()));
+    }
+
+    long writeTransactionCount() { return writeTransactions.get(); }
+
+    private final class WriteTask implements Runnable {
+        final long token;
+        final LocalDate day;
+        final Mutation mutation;
+        final DouAiLog.Operation parent;
+        DouAiLog.Operation operation;
+        boolean skipped;
+        WriteTask(long token, LocalDate day, Mutation mutation, DouAiLog.Operation parent) {
+            this.token = token; this.day = day; this.mutation = mutation; this.parent = parent;
+        }
+        void inContext(Runnable action) {
+            if (parent == null) action.run(); else parent.wrap(action).run();
+        }
+        @Override public void run() {
+            List<WriteTask> batch = new ArrayList<>(); batch.add(this);
+            while (batch.size() < 16 && writer.getQueue().peek() instanceof WriteTask) {
+                batch.add((WriteTask) writer.getQueue().poll());
             }
+            writeBatch(batch);
+        }
+    }
+
+    /** Only adjacent writes are drained; queued reads and backup tasks remain ordering barriers. */
+    private void writeBatch(List<WriteTask> batch) {
+        synchronized (databaseLock) {
+            List<WriteTask> accepted = new ArrayList<>();
+            LocalDate today = today();
+            for (WriteTask task : batch) {
+                task.inContext(() -> task.operation = DouAiLog.begin("local_analytics_write", "queued_mutation"));
+                if (closed || !enabled || generation != task.token || task.day.isBefore(today.minusDays(RETENTION_DAYS - 1L))) {
+                    task.operation.finish(DouAiLog.Outcome.SKIPPED, closed ? "store_closed" : !enabled ? "collection_disabled"
+                            : generation != task.token ? "stale_generation" : "outside_retention", "transaction_started=false");
+                } else accepted.add(task);
+            }
+            if (accepted.isEmpty()) return;
             try {
-                LocalDate today = today();
-                if (eventDay.isBefore(today.minusDays(RETENTION_DAYS - 1L))) {
-                    operation.finish(DouAiLog.Outcome.SKIPPED, "outside_retention", "transaction_started=false"); return;
-                }
                 SQLiteDatabase db = openDatabase();
                 db.beginTransaction();
+                trimVisitsPending = false; trimActionsPending = false;
                 try {
                     prune(db, today);
-                    mutation.run(db);
+                    for (WriteTask task : accepted) {
+                        if (closed || !enabled || generation != task.token) {
+                            task.skipped = true;
+                            task.operation.finish(DouAiLog.Outcome.SKIPPED, closed ? "store_closed"
+                                    : !enabled ? "collection_disabled" : "stale_generation", "mutation_started=false");
+                            continue;
+                        }
+                        task.inContext(() -> task.mutation.run(db));
+                    }
+                    if (trimVisitsPending) trimVisits(db);
+                    if (trimActionsPending) db.execSQL("DELETE FROM actions WHERE id < COALESCE((SELECT id FROM actions ORDER BY id DESC LIMIT 1 OFFSET 29999),-1)");
                     db.setTransactionSuccessful();
-                } finally { db.endTransaction(); }
-                operation.finish(DouAiLog.Outcome.SUCCESS, "sqlite_transaction_committed", "transaction_ended=true; read_back_verified=false");
-            } catch (Exception ignored) {
-                operation.error("sqlite_write", ignored);
-                operation.finish(DouAiLog.Outcome.FAILED, "storage_failed_collection_disabled", "read_back_verified=false");
+                } finally { db.endTransaction(); trimVisitsPending = false; trimActionsPending = false; }
+                writeTransactions.incrementAndGet();
+                for (WriteTask task : accepted) if (!task.skipped) task.operation.finish(DouAiLog.Outcome.SUCCESS,
+                        "sqlite_transaction_committed", "transaction_ended=true; read_back_verified=false;batch_size=" + accepted.size());
+            } catch (Exception failure) {
+                for (WriteTask task : accepted) {
+                    if (task.skipped) continue;
+                    task.operation.error("sqlite_write", failure);
+                    task.operation.finish(DouAiLog.Outcome.FAILED, "storage_failed_collection_disabled", "read_back_verified=false");
+                }
                 lastPrunedDay = null; failClosed();
             }
         }
@@ -584,6 +633,7 @@ public final class LocalAnalytics implements AutoCloseable {
             opened.execSQL("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL)");
             opened.execSQL("CREATE TABLE IF NOT EXISTS visits(token TEXT PRIMARY KEY,work_hash TEXT NOT NULL,type TEXT NOT NULL,day TEXT NOT NULL,hour INTEGER NOT NULL,source TEXT NOT NULL,started INTEGER NOT NULL,visible_ms INTEGER NOT NULL,ended INTEGER NOT NULL,end_reason TEXT NOT NULL)");
             opened.execSQL("CREATE INDEX IF NOT EXISTS visit_day ON visits(day)");
+            opened.execSQL("CREATE INDEX IF NOT EXISTS visit_started ON visits(started DESC)");
             opened.execSQL("CREATE TABLE IF NOT EXISTS visit_topics(token TEXT NOT NULL,topic TEXT NOT NULL,PRIMARY KEY(token,topic))");
             opened.execSQL("CREATE TABLE IF NOT EXISTS actions(id INTEGER PRIMARY KEY AUTOINCREMENT,day TEXT NOT NULL,token TEXT,feature TEXT NOT NULL,source TEXT NOT NULL,stage TEXT NOT NULL,ts INTEGER NOT NULL)");
             opened.execSQL("CREATE INDEX IF NOT EXISTS action_day ON actions(day)");

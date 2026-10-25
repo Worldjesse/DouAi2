@@ -10,6 +10,8 @@ import android.os.Bundle
 import android.os.Looper
 import android.view.KeyEvent
 import android.view.View
+import androidx.activity.BackEventCompat
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.OnBackPressedDispatcher
 import androidx.activity.OnBackPressedDispatcherOwner
 import androidx.activity.setViewTreeOnBackPressedDispatcherOwner
@@ -22,6 +24,11 @@ import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.navigationevent.NavigationEvent
+import androidx.navigationevent.NavigationEventDispatcher
+import androidx.navigationevent.NavigationEventDispatcherOwner
+import androidx.navigationevent.NavigationEventInput
+import androidx.navigationevent.setViewTreeNavigationEventDispatcherOwner
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
@@ -32,7 +39,8 @@ class HostComposeEnvironment(
     private val activity: Activity,
     onBack: Runnable,
 ) : AutoCloseable, LifecycleOwner, SavedStateRegistryOwner, ViewModelStoreOwner,
-    OnBackPressedDispatcherOwner, Application.ActivityLifecycleCallbacks, ComponentCallbacks {
+    OnBackPressedDispatcherOwner, NavigationEventDispatcherOwner,
+    Application.ActivityLifecycleCallbacks, ComponentCallbacks {
 
     init {
         checkMainThread()
@@ -50,6 +58,40 @@ class HostComposeEnvironment(
     override val onBackPressedDispatcher = OnBackPressedDispatcher {
         if (!closed) onBack.run()
     }
+
+    private var navigationBridgeAttached = false
+    private val navigationBridge: OnBackPressedCallback = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            if (!closed) navigationInput.backCompleted()
+        }
+
+        override fun handleOnBackStarted(backEvent: BackEventCompat) {
+            if (!closed) navigationInput.backStarted(backEvent.toNavigationEvent())
+        }
+
+        override fun handleOnBackProgressed(backEvent: BackEventCompat) {
+            if (!closed) navigationInput.backProgressed(backEvent.toNavigationEvent())
+        }
+
+        override fun handleOnBackCancelled() {
+            if (!closed) navigationInput.backCancelled()
+        }
+    }
+    private val navigationInput: ModuleNavigationInput = ModuleNavigationInput { hasEnabledHandlers ->
+        if (!closed) {
+            navigationBridge.isEnabled = hasEnabledHandlers
+            if (hasEnabledHandlers && navigationBridgeAttached) {
+                // A newly opened Miuix overlay receives back before the underlying page.
+                // Re-registering only our bridge preserves ordering among existing callbacks.
+                navigationBridge.remove()
+                onBackPressedDispatcher.addCallback(this, navigationBridge)
+            }
+        }
+    }
+    override val navigationEventDispatcher: NavigationEventDispatcher = NavigationEventDispatcher {
+        // The fallback must not re-enter OnBackPressedDispatcher and its active bridge.
+        if (!closed) onBack.run()
+    }.also { it.addInput(navigationInput) }
 
     private val viewContext = HostComposeContext.create(activity)
     private var ownedView: ComposeView? = null
@@ -86,6 +128,9 @@ class HostComposeEnvironment(
         view.setViewTreeSavedStateRegistryOwner(this)
         view.setViewTreeViewModelStoreOwner(this)
         view.setViewTreeOnBackPressedDispatcherOwner(this)
+        view.setViewTreeNavigationEventDispatcherOwner(this)
+        onBackPressedDispatcher.addCallback(this, navigationBridge)
+        navigationBridgeAttached = true
         view.setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
         view.addOnAttachStateChangeListener(attachmentListener)
         activity.application.registerActivityLifecycleCallbacks(this)
@@ -121,16 +166,28 @@ class HostComposeEnvironment(
         activity.application.unregisterComponentCallbacks(this)
         val view = ownedView
         ownedView = null
+        navigationBridgeAttached = false
+        navigationBridge.remove()
         view?.removeOnAttachStateChangeListener(attachmentListener)
-        lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
+        view?.setViewTreeNavigationEventDispatcherOwner(null)
         try {
-            view?.disposeComposition()
+            lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
         } finally {
-            viewModelStore.clear()
-            view?.setViewTreeLifecycleOwner(null)
-            view?.setViewTreeSavedStateRegistryOwner(null)
-            view?.setViewTreeViewModelStoreOwner(null)
-            view?.setTag(androidx.activity.R.id.view_tree_on_back_pressed_dispatcher_owner, null)
+            try {
+                // NavigationEventHandler DisposableEffects remove their handlers here; keep the
+                // dispatcher alive until this view's composition has finished disposing.
+                view?.disposeComposition()
+            } finally {
+                try {
+                    navigationEventDispatcher.dispose()
+                } finally {
+                    viewModelStore.clear()
+                    view?.setViewTreeLifecycleOwner(null)
+                    view?.setViewTreeSavedStateRegistryOwner(null)
+                    view?.setViewTreeViewModelStoreOwner(null)
+                    view?.setTag(androidx.activity.R.id.view_tree_on_back_pressed_dispatcher_owner, null)
+                }
+            }
         }
     }
 
@@ -166,5 +223,17 @@ class HostComposeEnvironment(
 
     private fun checkMainThread() {
         check(Looper.myLooper() == Looper.getMainLooper()) { "Host Compose UI must run on the main thread" }
+    }
+
+    /** Public 1.1.2 input API bridges the existing Android back dispatcher without host casts. */
+    private class ModuleNavigationInput(private val enabledChanged: (Boolean) -> Unit) : NavigationEventInput() {
+        override fun onHasEnabledHandlersChanged(hasEnabledHandlers: Boolean) {
+            enabledChanged(hasEnabledHandlers)
+        }
+
+        fun backStarted(event: NavigationEvent) = dispatchOnBackStarted(event)
+        fun backProgressed(event: NavigationEvent) = dispatchOnBackProgressed(event)
+        fun backCancelled() = dispatchOnBackCancelled()
+        fun backCompleted() = dispatchOnBackCompleted()
     }
 }

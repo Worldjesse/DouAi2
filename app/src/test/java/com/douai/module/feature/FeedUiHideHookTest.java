@@ -307,6 +307,39 @@ public final class FeedUiHideHookTest {
     }
 
     @Test
+    public void aCustomHideRetainsPriorityOverTheSameCachedComponentOnStableFrames() throws Throwable {
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        FrameLayout root = new FrameLayout(activity);
+        View feedback = new View(activity);
+        feedback.setId(2131371909);
+        root.addView(feedback);
+        activity.setContentView(root);
+        CustomViewLocator locator = CustomViewLocator.capture(root.getRootView(), root, feedback);
+        assertNotNull(locator);
+        SharedPreferences preferences = componentPreferences();
+        preferences.edit().putString(Component.FEEDBACK.key, "128")
+                .putString(ComponentHideSettings.CUSTOM_VIEWS,
+                        CustomViewLocator.serialize(Collections.singletonList(locator))).commit();
+        Map<String, XposedInterface.Hooker> hooks = new HashMap<>();
+        FeedUiHideHook hook = install(hooks, ExtendedSettings.readFrom(preferences));
+        try {
+            intercept(hooks.get("DouAi.FeedUi.VideoResume"), holder(root));
+            idleMainLooper();
+            for (int frame = 0; frame < 12; frame++) {
+                feedback.setVisibility(View.VISIBLE);
+                root.getViewTreeObserver().dispatchOnPreDraw();
+                assertEquals("Custom hide must win even when the window observer runs before the card", View.GONE,
+                        feedback.getVisibility());
+            }
+            preferences.edit().remove(ComponentHideSettings.CUSTOM_VIEWS).commit();
+            hook.setSettings(ExtendedSettings.readFrom(preferences));
+            idleMainLooper();
+            assertEquals(View.VISIBLE, feedback.getVisibility());
+            assertEquals(128 / 255f, feedback.getAlpha(), 0.001f);
+        } finally { hook.close(); idleMainLooper(); activity.finish(); }
+    }
+
+    @Test
     public void largeStableTreeKeepsStructureWorkBoundedAcross300Frames() throws Throwable {
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         FrameLayout root = new FrameLayout(activity);
@@ -331,8 +364,8 @@ public final class FeedUiHideHookTest {
             System.out.println("Feed stable 300 frames: structureNodeChecks=" + checks
                     + ", discoveries=" + (hook.getViewSearches() - searches));
             assertEquals(searches, hook.getViewSearches());
-            assertTrue("Structure verification must do at most 256 node checks per frame; actual=" + checks,
-                    checks > 0 && checks <= 300L * 256);
+            assertTrue("Stable large trees retain the 16-frame fallback with far fewer checks; actual=" + checks,
+                    checks > 0 && checks <= 300L * 70);
         } finally { hook.close(); idleMainLooper(); activity.finish(); }
     }
 
@@ -399,8 +432,8 @@ public final class FeedUiHideHookTest {
                     + ", discoveries=" + stableDiscoveries + "; unchanged 30 layouts: discoveries=" + layoutDiscoveries);
             assertEquals(0, stableDiscoveries);
             assertEquals("Unchanged window layouts must not restart custom locator discovery", 0, layoutDiscoveries);
-            assertTrue("Card and window observers each have a 256-node frame budget; actual=" + checks,
-                    checks > 0 && checks <= 300L * 512);
+            assertTrue("Stable card and window checks must stay below their old per-frame budgets; actual=" + checks,
+                    checks > 0 && checks <= 300L * 80);
         } finally { hook.close(); idleMainLooper(); activity.finish(); }
     }
 

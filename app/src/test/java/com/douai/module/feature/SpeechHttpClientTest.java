@@ -26,6 +26,42 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 35)
 public final class SpeechHttpClientTest {
+    @Test public void streamedAudioKeepsOnlyItsProbeInMemoryAndPreservesExactFileBytes() throws Exception {
+        java.io.File target = java.io.File.createTempFile("douai-stream-audio", ".audio");
+        byte[] audio = new byte[2 * 1024 * 1024];
+        System.arraycopy("ID3".getBytes(java.nio.charset.StandardCharsets.US_ASCII), 0, audio, 0, 3);
+        try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            server.enqueue(new MockResponse().addHeader("Content-Type", "audio/mpeg").setBody(new Buffer().write(audio)));
+            server.start();
+            SpeechHttpClient.Resource resource = request.fetchResource(server.url("/large").toString(), "{}", target);
+            assertNull("streamed audio must not retain the full response array", resource.bytes);
+            assertSame(target, resource.file); assertEquals(audio.length, resource.sizeBytes());
+            assertTrue(resource.isAudio()); assertEquals(".mp3", resource.audioExtension());
+            assertArrayEquals(audio, java.nio.file.Files.readAllBytes(target.toPath()));
+        } finally { java.nio.file.Files.deleteIfExists(target.toPath()); }
+    }
+
+    @Test public void streamedJsonAndWhitespaceSniffingKeepTheExistingProviderSemantics() throws Exception {
+        java.io.File target = java.io.File.createTempFile("douai-stream-json", ".audio");
+        try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            String json = " ".repeat(20_000) + "{\"url\":\"https://example.test/audio.mp3\"}";
+            server.enqueue(new MockResponse().addHeader("Content-Type", "audio/mpeg").setBody(json));
+            server.start();
+            SpeechHttpClient.Resource resource = request.fetchResource(server.url("/json").toString(), "{}", target);
+            assertFalse(resource.isAudio()); assertEquals(json, resource.text());
+        } finally { java.nio.file.Files.deleteIfExists(target.toPath()); }
+    }
+
+    @Test public void rejectedStreamRemovesItsPartialOutput() throws Exception {
+        java.io.File target = java.io.File.createTempFile("douai-stream-failed", ".audio");
+        try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
+            server.enqueue(new MockResponse().setBody("x").setHeader("Content-Length", SpeechHttpClient.MAX_AUDIO_BYTES + 1));
+            server.start();
+            assertThrows(IllegalArgumentException.class,
+                    () -> request.fetchResource(server.url("/too-large").toString(), "{}", target));
+            assertFalse(target.exists());
+        } finally { java.nio.file.Files.deleteIfExists(target.toPath()); }
+    }
     @Test public void arbitraryParameterNamesBindTextAndVoiceWithFullUrlEncoding() throws Exception {
         try (MockWebServer server = new MockWebServer(); SpeechHttpClient.Request request = new SpeechHttpClient.Request()) {
             server.enqueue(new MockResponse().setBody("{\"url\":\"https://example.test/sound.mp3\"}"));

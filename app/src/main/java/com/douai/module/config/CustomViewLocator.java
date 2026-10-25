@@ -111,6 +111,7 @@ public final class CustomViewLocator {
     public View resolve(View windowRoot, View feedRoot) {
         View root = scope == Scope.FEED ? feedRoot : windowRoot;
         if (root == null || windowRoot == null || !isWithin(root, windowRoot)
+                || hasFinderAncestor(root, windowRoot)
                 || !rootClassName.equals(root.getClass().getName()) || path.isEmpty()) return null;
         if (uniqueId) return uniqueMatch(root, viewClassName, resourceName);
         View current = root;
@@ -160,6 +161,42 @@ public final class CustomViewLocator {
             if (segment.resourceName.isEmpty() || segment.peerCount > 1) {
                 result.append(':').append(segment.childIndex).append(':').append(segment.peerIndex)
                         .append(':').append(segment.peerCount);
+            }
+        }
+        return result.toString();
+    }
+
+    public String scopeDescription() {
+        return scope == Scope.FEED ? "当前信息流卡片" : "当前窗口";
+    }
+
+    public String matchingDescription() {
+        if (uniqueId) return "唯一资源 ID";
+        return anchorIndex >= 0 ? "命名祖先 + 结构路径" : "严格结构路径";
+    }
+
+    /** Describes only the metadata used by resolve(), without reading host text or descriptions. */
+    public String pathDescription() {
+        StringBuilder result = new StringBuilder(simpleName(rootClassName));
+        if (uniqueId) {
+            return result.append(" → … → ").append(simpleName(viewClassName))
+                    .append(" #").append(resourceName).toString();
+        }
+        int start = 0;
+        if (anchorIndex >= 0) {
+            Segment anchor = path.get(anchorIndex);
+            result.append(" → … → ").append(simpleName(anchor.className))
+                    .append(" #").append(anchor.resourceName);
+            start = anchorIndex + 1;
+        }
+        for (int index = start; index < path.size(); index++) {
+            Segment segment = path.get(index);
+            result.append(" → ").append(simpleName(segment.className));
+            if (!segment.resourceName.isEmpty()) result.append(" #").append(segment.resourceName);
+            if (segment.resourceName.isEmpty() || segment.peerCount > 1) {
+                result.append(" [子节点 ").append(segment.childIndex + 1)
+                        .append("，同类同 ID ").append(segment.peerIndex + 1)
+                        .append('/').append(segment.peerCount).append(']');
             }
         }
         return result.toString();

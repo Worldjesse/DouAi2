@@ -41,7 +41,8 @@ public final class LocalAnalyticsHookTest {
         public FrameLayout w;
         public Params A2 = new Params();
         public String aid = "one";
-        public Object getAweme() { return Map.of("aid", aid, "duration", 1000); }
+        public Object work;
+        public Object getAweme() { return work == null ? Map.of("aid", aid, "duration", 1000) : work; }
         public void pageSelected() { }
         public void selected(int index) { }
         public void bind() { }
@@ -76,6 +77,31 @@ public final class LocalAnalyticsHookTest {
             f.holder.aid = "two"; f.select(); assertEquals(2, f.count());
             f.holder.aid = "one"; f.select(); assertEquals(3, f.count());
         }
+    }
+
+    @Test public void duplicateSelectionDoesNotReparseMetadataButRecycledIdentityDoes() throws Throwable {
+        try (Fixture f = new Fixture()) {
+            CountingWork work = new CountingWork();
+            f.holder.work = work;
+            f.select(); assertEquals(1, f.count());
+            assertEquals(1, work.authorReads);
+            for (int i = 0; i < 100; i++) {
+                f.harness.invoke(Holder.class.getMethod("selected", int.class), f.holder, i);
+            }
+            assertEquals(1, f.count());
+            assertEquals("metadata is decoded once for one uninterrupted visit", 1, work.authorReads);
+            work.aid = "next";
+            f.select(); assertEquals(2, f.count());
+            assertEquals(2, work.authorReads);
+        }
+    }
+
+    public static final class CountingWork {
+        String aid = "counted";
+        int authorReads;
+        public String getAid() { return aid; }
+        public long getDuration() { return 1000; }
+        public Object getAuthor() { authorReads++; return Map.of("uid", "author"); }
     }
 
     @Test public void collectsLivePhotoThroughImageSelection() throws Throwable {

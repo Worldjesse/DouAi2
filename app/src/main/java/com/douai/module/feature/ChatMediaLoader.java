@@ -5,6 +5,8 @@ import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Rect;
 import android.graphics.pdf.PdfRenderer;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
@@ -128,11 +130,14 @@ public final class ChatMediaLoader {
             long[] times = sampleTimes(duration, maxFrames);
             for (long time : times) {
                 checkCancelled(cancellation);
-                Bitmap frame = retriever.getScaledFrameAtTime(time, MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
-                        size[0], size[1]);
-                if (frame == null) throw new IllegalArgumentException("无法读取视频画面");
-                try { checkCancelled(cancellation); images.add(encode(frame)); checkCancelled(cancellation); }
-                finally { frame.recycle(); }
+                try (MediaMemoryBudget.Reservation ignored = MediaMemoryBudget.acquire((long) size[0] * size[1] * 8, cancellation)) {
+                    checkCancelled(cancellation);
+                    Bitmap frame = retriever.getScaledFrameAtTime(time, MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                            size[0], size[1]);
+                    if (frame == null) throw new IllegalArgumentException("无法读取视频画面");
+                    try { checkCancelled(cancellation); images.add(encode(frame)); checkCancelled(cancellation); }
+                    finally { frame.recycle(); }
+                }
             }
             checkCancelled(cancellation);
             return new Document(safeName(name), videoDescription(duration, times), images);
@@ -296,12 +301,15 @@ public final class ChatMediaLoader {
                 checkCancelled();
                 try (PdfRenderer.Page page = renderer.openPage(index)) {
                     int[] size = boundedDimensions(page.getWidth(), page.getHeight());
-                    Bitmap bitmap = Bitmap.createBitmap(size[0], size[1], Bitmap.Config.ARGB_8888);
-                    try {
-                        bitmap.eraseColor(Color.WHITE);
-                        page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
-                        images.add(encode(bitmap));
-                    } finally { bitmap.recycle(); }
+                    try (MediaMemoryBudget.Reservation ignored = MediaMemoryBudget.acquire((long) size[0] * size[1] * 8, null)) {
+                        checkCancelled();
+                        Bitmap bitmap = Bitmap.createBitmap(size[0], size[1], Bitmap.Config.ARGB_8888);
+                        try {
+                            bitmap.eraseColor(Color.WHITE);
+                            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+                            images.add(encode(bitmap));
+                        } finally { bitmap.recycle(); }
+                    }
                 }
             }
         }
@@ -346,19 +354,17 @@ public final class ChatMediaLoader {
     private static ChatImage encode(Bitmap source) {
         checkCancelled();
         int[] size = boundedDimensions(source.getWidth(), source.getHeight());
-        Bitmap scaled = Bitmap.createScaledBitmap(source, size[0], size[1], true);
         Bitmap opaque = Bitmap.createBitmap(size[0], size[1], Bitmap.Config.ARGB_8888);
         try {
             Canvas canvas = new Canvas(opaque);
             canvas.drawColor(Color.WHITE);
-            canvas.drawBitmap(scaled, 0, 0, null);
+            canvas.drawBitmap(source, null, new Rect(0, 0, size[0], size[1]), new Paint(Paint.FILTER_BITMAP_FLAG));
             ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             if (!opaque.compress(Bitmap.CompressFormat.JPEG, 85, bytes)) throw new IllegalArgumentException("媒体画面转换失败");
             checkCancelled();
             return new ChatImage("image/jpeg", bytes.toByteArray());
         } finally {
             opaque.recycle();
-            if (scaled != source) scaled.recycle();
         }
     }
 

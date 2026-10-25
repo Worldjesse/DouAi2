@@ -51,6 +51,7 @@ import com.douai.module.config.CustomViewLocator
 import com.douai.module.config.SettingsStore
 import com.douai.module.ui.HostDialogBounds
 import com.douai.module.ui.ModuleTheme
+import com.douai.module.ui.ComponentHideSettingsPage
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
@@ -75,6 +76,7 @@ class MiuixComponentHidePage(
     private var dialog: Dialog? = null
     private var session: HostComposeEnvironment? = null
     private var pendingDelete by mutableStateOf<CustomViewLocator?>(null)
+    private var customDetails: Dialog? = null
 
     fun show() {
         if (isShowing()) return
@@ -88,6 +90,7 @@ class MiuixComponentHidePage(
         next.setOwnerActivity(activity)
         next.setCanceledOnTouchOutside(true)
         next.setOnDismissListener {
+            dismissCustomDetails()
             nextSession.close()
             if (dialog === next) {
                 dialog = null
@@ -118,6 +121,7 @@ class MiuixComponentHidePage(
     fun isShowing(): Boolean = dialog?.isShowing == true
 
     fun dismiss() {
+        dismissCustomDetails()
         val current = dialog
         dialog = null
         pendingDelete = null
@@ -130,7 +134,13 @@ class MiuixComponentHidePage(
     }
 
     private fun requestBack() {
-        if (pendingDelete != null) pendingDelete = null else dismiss()
+        if (customDetails?.isShowing == true) dismissCustomDetails()
+        else if (pendingDelete != null) pendingDelete = null else dismiss()
+    }
+
+    private fun dismissCustomDetails() {
+        customDetails?.dismiss()
+        customDetails = null
     }
 
     @Composable
@@ -157,7 +167,7 @@ class MiuixComponentHidePage(
                     )
                     Spacer(Modifier.width(48.dp))
                 }
-                LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
+                LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("component.list")) {
                     item(key = ComponentHideSettings.ENABLED) {
                         Toggle("隐藏总开关", ComponentHideSettings.ENABLED, settings.enabled, editor)
                     }
@@ -185,7 +195,14 @@ class MiuixComponentHidePage(
                         Alpha(component.title, if (component == Component.CARD) "作者昵称头顶的" else null,
                             component.key, settings.individualAlpha(component), editor)
                     }
-                    item(key = "component.custom.header") { SmallTitle("自定义视图") }
+                    item(key = "component.custom.header") {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) { SmallTitle("自定义视图") }
+                            Text("${settings.customViews.size} 个",
+                                modifier = Modifier.padding(end = 24.dp).testTag("component.custom.count"),
+                                fontSize = 13.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                        }
+                    }
                     if (settings.customViews.isEmpty()) {
                         item(key = "component.custom.empty") {
                             BasicComponent(title = "暂无自定义视图")
@@ -194,8 +211,13 @@ class MiuixComponentHidePage(
                     items(settings.customViews, key = { "custom.${it.identityKey()}" }) { locator ->
                         BasicComponent(
                             title = locator.label,
-                            summary = locator.viewClassName,
+                            summary = locator.scopeDescription() + " · " + locator.matchingDescription()
+                                + "\n" + locator.viewClassName,
                             modifier = Modifier.testTag("component.custom.${locator.identityKey()}"),
+                            onClick = {
+                                dismissCustomDetails()
+                                customDetails = ComponentHideSettingsPage.showCustomViewDetails(context, locator, true)
+                            },
                             endActions = {
                                 IconButton(
                                     onClick = { pendingDelete = locator },
@@ -217,11 +239,12 @@ class MiuixComponentHidePage(
                 onDismissRequest = { pendingDelete = null },
             ) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    TextButton("取消", onClick = { pendingDelete = null }, modifier = Modifier.weight(1f))
+                    TextButton("取消", onClick = { pendingDelete = null }, modifier = Modifier.weight(1f)
+                        .testTag("component.custom.confirm_cancel"))
                     TextButton("删除", onClick = {
                         pendingDelete?.let(editor::deleteCustomView)
                         pendingDelete = null
-                    }, modifier = Modifier.weight(1f))
+                    }, modifier = Modifier.weight(1f).testTag("component.custom.confirm_delete"))
                 }
             }
         }

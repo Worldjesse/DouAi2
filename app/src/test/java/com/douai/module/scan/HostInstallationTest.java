@@ -33,4 +33,18 @@ public final class HostInstallationTest {
             fail("Missing module archive must not silently reuse cached adaptation");
         } catch (java.io.IOException expected) { }
     }
+
+    @Test public void hostFreshnessIsOrderIndependentAndDoesNotDependOnModuleVersion() throws Exception {
+        File module = files.newFile("module.apk");
+        File host = files.newFile("host.apk");
+        File split = files.newFile("split.apk");
+        String original = HostInstallation.hostIdentity(Arrays.asList(host, split));
+        assertEquals(original, HostInstallation.hostIdentity(Arrays.asList(split, host)));
+        assertTrue(module.setLastModified(module.lastModified() + 10_000));
+        assertEquals(original, HostInstallation.hostIdentity(Arrays.asList(host, split)));
+        assertTrue(host.setLastModified(host.lastModified() + 10_000));
+        assertNotEquals(original, HostInstallation.hostIdentity(Arrays.asList(host, split)));
+        assertThrows(java.io.IOException.class, () -> HostInstallation.hostIdentity(
+                java.util.Collections.singletonList(new File(files.getRoot(), "missing-host"))));
+    }
 }

@@ -702,6 +702,46 @@ public final class AutoCommentHookTest {
         assertEquals("cancelled", entry("work").status);
     }
 
+    @Test public void disabledSelectionKeepsHotEnableAndRelationsWithoutCommentMetadataWork() throws Throwable {
+        setOptions(new LocalOptions(Collections.emptyMap()));
+        holder.work.author.uid = "987654321001";
+        holder.work.author.nickname = "observed while disabled";
+        holder.awemeReads = 0; holder.work.aidReads = 0;
+        for (int i = 0; i < 100; i++) {
+            framework.invoke(Holder.class.getMethod("selected", int.class), holder, i);
+        }
+        assertEquals("only relation observation needs the host work", 100, holder.awemeReads);
+        assertEquals("disabled comments never need the work ID", 0, holder.work.aidReads);
+        assertEquals("observed while disabled", AutomationScopePolicy.cachedName("987654321001"));
+        ShadowLooper.idleMainLooper();
+        assertEquals("disabled selection posts no second metadata read", 100, holder.awemeReads);
+        assertEquals(0, holder.work.aidReads);
+        assertEquals(0, Request.attempts);
+        setOptions(options(false));
+        advanceSeconds(3);
+        assertEquals("hot enable processes the retained current holder", 1, Request.attempts);
+        assertEquals("work", Request.models.get(0).y.work.id);
+    }
+
+    @Test public void disabledPlaybackAndResumeCallbacksDoNotReadTheRetainedWork() throws Throwable {
+        hook.close();
+        List<RuleScanResult> rules = new ArrayList<>(report().getRuleResults());
+        add(rules, "component_player_playing", Player.class.getMethod("playing", String.class));
+        hook = AutoCommentHook.install(framework.api, new HostScanReport("fixture", rules, false),
+                getClass().getClassLoader(), activity, new LocalOptions(Collections.emptyMap()),
+                dispatcher, logs::add, () -> mediaReads.get());
+        selectWork();
+        holder.awemeReads = 0;
+        Player player = new Player();
+        for (int i = 0; i < 100; i++) {
+            framework.invoke(Player.class.getMethod("playing", String.class), player, "work");
+            hook.onActivityResumed(activity);
+        }
+        ShadowLooper.idleMainLooper();
+        assertEquals(0, holder.awemeReads);
+        assertEquals(0, Request.attempts);
+    }
+
     @Test public void commentRunsWithInteractionAutomationOffAndKeepsItsOwnStopSwitch() throws Throwable {
         Map<String, Object> independent = baseOptions(false);
         independent.put("automation_enabled", false);
@@ -1704,7 +1744,8 @@ public final class AutoCommentHookTest {
         public String preview_title;
         public List<Picture> images;
         public Author author = new Author();
-        public String getAid() { return id; }
+        public int aidReads;
+        public String getAid() { aidReads++; return id; }
         public boolean getIsAdAweme() { return false; }
     }
     public static final class Author { public String uid = "200"; public String nickname = "作者"; }
@@ -1720,8 +1761,15 @@ public final class AutoCommentHookTest {
     }
     public static final class Gallery { public List<Picture> images = new ArrayList<>(); }
     public static final class Picture { public List<String> url_list; Picture(String url) { url_list = Collections.singletonList(url); } }
-    public static final class Holder { public View z; public Work work = new Work(); public Work getAweme() { return work; } public void selected(int index) { } }
+    public static final class Holder {
+        public View z;
+        public Work work = new Work();
+        public int awemeReads;
+        public Work getAweme() { awemeReads++; return work; }
+        public void selected(int index) { }
+    }
     public static final class PhotoHolder { public FrameLayout f; public Work getAweme() { return new Work(); } public void selected() { } }
+    public static final class Player { public void playing(String aid) { } }
     public static final class ContextState { public Work work; }
     public static final class Resolver {
         public static Work work(ContextState state) { return state.work; }

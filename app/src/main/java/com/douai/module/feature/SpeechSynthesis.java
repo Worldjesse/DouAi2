@@ -29,6 +29,7 @@ public final class SpeechSynthesis implements AutoCloseable {
                 thread.setDaemon(true);
                 return thread;
             });
+    static { WORKERS.allowCoreThreadTimeOut(true); }
     private final Handler main = new Handler(Looper.getMainLooper());
     private final AtomicBoolean finished = new AtomicBoolean();
     private final Object completionLock = new Object();
@@ -82,30 +83,35 @@ public final class SpeechSynthesis implements AutoCloseable {
 
     private void generate(Context context, String text, SpeechSettings settings) {
         try {
+            File cache = new File(context.getCacheDir(), "douai-tts");
+            if (!cache.isDirectory() && !cache.mkdirs()) throw new IllegalArgumentException("无法创建语音缓存");
+            cleanOldFiles(cache);
+            output = new File(cache, UUID.randomUUID() + ".audio");
             operation.stage("provider_request", "provider=" + (settings.minimax ? "minimax" : "third_party"));
             SpeechHttpClient.Resource response;
             if (settings.minimax) {
-                response = MiniMaxSpeechClient.synthesize(http, text, settings);
+                response = MiniMaxSpeechClient.synthesize(http, text, settings, output);
             } else {
                 String url = SpeechHttpClient.resolveTemplate(settings.getTemplate, text, settings.selectedVoice);
-                response = http.fetchResource(url, settings.headers);
+                response = http.fetchResource(url, settings.headers, output);
                 if (!response.isAudio()) {
                     operation.stage("audio_url_resolved", "response=non_audio; requires_audio_fetch=true");
                     String audioUrl = SpeechHttpClient.audioUrl(response.text(), settings.audioField);
                     // API authentication belongs to its origin, not an unrelated media/CDN host.
                     response = http.fetchResource(audioUrl,
-                            SpeechHttpClient.sameOrigin(url, audioUrl) ? settings.headers : "{}");
+                            SpeechHttpClient.sameOrigin(url, audioUrl) ? settings.headers : "{}", output);
                 }
             }
             http.ensureActive();
             if (!response.isAudio()) throw new IllegalArgumentException("第三方语音链接未返回音频文件");
-            operation.stage("audio_received", "bytes=" + response.bytes.length + "; business_result=validating");
-            File cache = new File(context.getCacheDir(), "douai-tts");
-            if (!cache.isDirectory() && !cache.mkdirs()) throw new IllegalArgumentException("无法创建语音缓存");
-            cleanOldFiles(cache);
-            output = new File(cache, UUID.randomUUID() + response.audioExtension());
+            operation.stage("audio_received", "bytes=" + response.sizeBytes() + "; business_result=validating");
             http.ensureActive();
-            try (FileOutputStream stream = new FileOutputStream(output)) { stream.write(response.bytes); }
+            if (response.file == null) {
+                try (FileOutputStream stream = new FileOutputStream(output)) { stream.write(response.bytes); }
+            }
+            File named = new File(cache, output.getName().replace(".audio", response.audioExtension()));
+            java.nio.file.Files.move(output.toPath(), named.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            output = named;
             http.ensureActive();
             long duration = audioDuration(output);
             operation.stage("audio_validated", "bytes=" + output.length() + "; duration_ms=" + duration

@@ -37,15 +37,23 @@ import java.util.zip.ZipFile;
 public final class HostScanner {
     private static final String DEX_PATTERN = "classes(?:[2-9]|[1-9][0-9]+)?\\.dex";
     private static final int MAX_DEX_BYTES = 256 * 1024 * 1024;
+    // Bump when matching/decoding semantics change. Unrelated module version changes are not a scan input.
+    private static final String SCANNER_SCHEMA = "douai-host-identity-v2\n";
     private static final DecodeObserver NO_OP_DECODE_OBSERVER = (classDescriptor, methodName) -> { };
     private final DecodeObserver decodeObserver;
+    private final ArchiveInspectionObserver inspectionObserver;
 
     public HostScanner() {
         this(NO_OP_DECODE_OBSERVER);
     }
 
     HostScanner(DecodeObserver decodeObserver) {
+        this(decodeObserver, dexCount -> { });
+    }
+
+    HostScanner(DecodeObserver decodeObserver, ArchiveInspectionObserver inspectionObserver) {
         this.decodeObserver = decodeObserver == null ? NO_OP_DECODE_OBSERVER : decodeObserver;
+        this.inspectionObserver = inspectionObserver == null ? dexCount -> { } : inspectionObserver;
     }
 
     public HostScanReport scan(List<File> apkArchives, HostRuleSet rules) throws IOException {
@@ -54,7 +62,7 @@ public final class HostScanner {
 
     public HostScanReport scan(List<File> apkArchives, HostRuleSet rules,
                                ProgressListener progressListener) throws IOException {
-        List<ArchiveDex> dexEntries = collectDexEntries(apkArchives);
+        List<ArchiveDex> dexEntries = inspectArchives(apkArchives);
         if (dexEntries.isEmpty()) throw new IOException("No classes*.dex entries found in host APK archives");
         String identity = createIdentity(dexEntries, rules);
         notifyScanStarted(progressListener, dexEntries.size());
@@ -75,12 +83,40 @@ public final class HostScanner {
     public HostScanReport scanCached(List<File> apkArchives, HostRuleSet rules,
                                      HostScanCache cache, ProgressListener progressListener,
                                      String installationIdentity) throws IOException {
-        List<ArchiveDex> dexEntries = collectDexEntries(apkArchives);
+        return scanCached(prepare(apkArchives, rules, installationIdentity), cache, progressListener);
+    }
+
+    /** Prepares one verified DEX inventory for both early cache validation and the background scan. */
+    public PreparedScan prepare(List<File> apkArchives, HostRuleSet rules) throws IOException {
+        return prepare(apkArchives, rules, "");
+    }
+
+    PreparedScan prepare(List<File> apkArchives, HostRuleSet rules, String installationIdentity) throws IOException {
+        String before = HostInstallation.hostIdentity(apkArchives);
+        List<ArchiveDex> dexEntries = inspectArchives(apkArchives);
         if (dexEntries.isEmpty()) throw new IOException("No classes*.dex entries found in host APK archives");
-        String identity = createIdentity(dexEntries, rules, installationIdentity);
+        if (!before.equals(HostInstallation.hostIdentity(apkArchives))) {
+            throw new IOException("Host installation changed while preparing DEX inventory");
+        }
+        return new PreparedScan(apkArchives, rules, dexEntries,
+                createIdentity(dexEntries, rules, installationIdentity), before, installationIdentity);
+    }
+
+    public HostScanReport scanCached(PreparedScan prepared, HostScanCache cache,
+                                     ProgressListener progressListener) throws IOException {
+        if (prepared == null) throw new IllegalArgumentException("Prepared scan is required");
+        if (!prepared.isCurrent()) prepared = prepare(prepared.archives, prepared.rules, prepared.installationIdentity);
+        List<ArchiveDex> dexEntries = prepared.dexEntries;
+        HostRuleSet rules = prepared.rules;
+        String identity = prepared.identity;
+        HostScanReport reusable = prepared.reusableReport;
+        if (reusable != null) {
+            notifyCacheHit(progressListener, dexEntries.size());
+            return reusable;
+        }
         if (cache != null) {
             try {
-                HostScanReport cached = cache.load(identity);
+                HostScanReport cached = prepared.loadCached(cache);
                 if (cached != null) {
                     notifyCacheHit(progressListener, dexEntries.size());
                     return cached;
@@ -93,8 +129,10 @@ public final class HostScanner {
                 }
             }
         }
+        if (!prepared.isCurrent()) throw new IOException("Host installation changed while validating scan cache");
         notifyScanStarted(progressListener, dexEntries.size());
         HostScanReport report = scanEntries(dexEntries, rules, identity, progressListener);
+        if (!prepared.isCurrent()) throw new IOException("Host installation changed during DEX scan");
         if (cache != null) {
             try {
                 cache.save(report);
@@ -102,6 +140,7 @@ public final class HostScanner {
                 notifyCacheSaveFailed(progressListener, exception);
             }
         }
+        prepared.rememberVerified(report);
         return report;
     }
 
@@ -111,10 +150,80 @@ public final class HostScanner {
 
     public String hostIdentity(List<File> apkArchives, HostRuleSet rules,
                                String installationIdentity) throws IOException {
-        List<ArchiveDex> dexEntries = collectDexEntries(apkArchives);
+        List<ArchiveDex> dexEntries = inspectArchives(apkArchives);
         if (dexEntries.isEmpty()) throw new IOException("No classes*.dex entries found in host APK archives");
         return createIdentity(dexEntries, rules, installationIdentity);
     }
+
+    private List<ArchiveDex> inspectArchives(List<File> archives) throws IOException {
+        List<ArchiveDex> entries = collectDexEntries(archives);
+        inspectionObserver.onArchivesInspected(entries.size());
+        return entries;
+    }
+
+    public static final class PreparedScan {
+        private final List<File> archives;
+        private final HostRuleSet rules;
+        private final List<ArchiveDex> dexEntries;
+        private final String identity;
+        private final String hostInstallation;
+        private final String installationIdentity;
+        private final Object cacheValidationLock = new Object();
+        private boolean cacheChecked;
+        private volatile HostScanReport reusableReport;
+
+        private PreparedScan(List<File> archives, HostRuleSet rules, List<ArchiveDex> dexEntries,
+                             String identity, String hostInstallation, String installationIdentity) {
+            this.archives = Collections.unmodifiableList(new ArrayList<>(archives));
+            this.rules = rules;
+            this.dexEntries = Collections.unmodifiableList(new ArrayList<>(dexEntries));
+            this.identity = identity;
+            this.hostInstallation = hostInstallation;
+            this.installationIdentity = installationIdentity;
+        }
+
+        public String getIdentity() { return identity; }
+
+        public boolean matches(List<File> archives, HostRuleSet rules) throws IOException {
+            return this.rules.getFingerprint().equals(rules.getFingerprint())
+                    && hostInstallation.equals(HostInstallation.hostIdentity(archives));
+        }
+
+        boolean isCurrent() throws IOException { return hostInstallation.equals(HostInstallation.hostIdentity(archives)); }
+        HostRuleSet rules() { return rules; }
+
+        HostScanReport loadCached(HostScanCache cache) throws IOException {
+            // The startup and scanner threads share this short I/O section, never a full DEX scan.
+            synchronized (cacheValidationLock) {
+                if (reusableReport != null) return reusableReport;
+                if (cacheChecked) return null;
+                try {
+                    HostScanReport cached = cache.load(identity);
+                    if (!StartupHostCache.matchesRules(cached, rules) || !isCurrent()) return null;
+                    rememberVerified(cached);
+                    return reusableReport;
+                } catch (IOException | RuntimeException corrupt) {
+                    // AtomicFile can retain a corrupt backup. Remove every cache generation before
+                    // the background scan writes its replacement, even when startup observed the error first.
+                    try { cache.delete(); } catch (RuntimeException ignored) { }
+                    throw corrupt;
+                } finally { cacheChecked = true; }
+            }
+        }
+
+        void rememberVerified(HostScanReport report) {
+            if (!identity.equals(report.getHostIdentity()) || !StartupHostCache.matchesRules(report, rules)) {
+                throw new IllegalArgumentException("Completed scan does not match its prepared inputs");
+            }
+            synchronized (cacheValidationLock) {
+                reusableReport = report.isCacheHit() ? report
+                        : new HostScanReport(identity, report.getRuleResults(), true);
+                cacheChecked = true;
+            }
+        }
+    }
+
+    interface ArchiveInspectionObserver { void onArchivesInspected(int dexCount); }
 
     private HostScanReport scanEntries(List<ArchiveDex> dexEntries, HostRuleSet rules,
                                        String identity, ProgressListener progressListener)
@@ -327,7 +436,7 @@ public final class HostScanner {
                                          String installationIdentity) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            update(digest, "douai-host-identity-v1\n");
+            update(digest, SCANNER_SCHEMA);
             update(digest, rules.getTargetPackage() + "\n");
             update(digest, "rules-sha256=" + rules.getFingerprint() + "\n");
             if (installationIdentity != null && !installationIdentity.isEmpty()) {
