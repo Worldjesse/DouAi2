@@ -323,8 +323,16 @@ public final class DownloadActionHook implements AutoCloseable {
             actions.add(new MenuAction("下载音频", MenuAction.AUDIO, audioUrl,
                     MediaNaming.forAweme(aweme, options, "audio", 0, "mp3")));
         }
+        VideoSource best = options.preferHighestQuality() ? findBestVideoSource(aweme) : null;
         String playbackUrl = findPlaybackVideoUrl(aweme);
-        if (playbackUrl != null) {
+        if (best != null && best.rendition) {
+            actions.add(new MenuAction(best.menuLabel(), MenuAction.PLAY_VIDEO, best.url,
+                    MediaNaming.forAweme(aweme, options, "video", 0, "mp4")));
+        }
+        if (playbackUrl != null && best != null && best.rendition && !playbackUrl.equals(best.url)) {
+            actions.add(new MenuAction("保存兼容播放源视频", MenuAction.PLAY_VIDEO, playbackUrl,
+                    MediaNaming.forAweme(aweme, options, "video", 0, "mp4")));
+        } else if (playbackUrl != null && (best == null || !best.rendition)) {
             actions.add(new MenuAction("保存播放源视频", MenuAction.PLAY_VIDEO, playbackUrl,
                     MediaNaming.forAweme(aweme, options, "video", 0, "mp4")));
         }
@@ -388,11 +396,50 @@ public final class DownloadActionHook implements AutoCloseable {
             if (video == null || !Boolean.FALSE.equals(fieldByJsonNameValue(video, "has_watermark"))) {
                 return null;
             }
-            String playback = playbackUrl(video);
+            VideoSource best = options.preferHighestQuality() ? bestVideoSource(video) : null;
+            String playback = best == null ? playbackUrl(video) : best.url;
             return playback != null ? playback : firstUrl(fieldByJsonName(video, "download_addr"));
         } catch (ReflectiveOperationException | RuntimeException failure) {
             safeLog("Could not resolve an explicitly unwatermarked video URL: " + failure.getMessage());
             return null;
+        }
+    }
+
+    static final class VideoSource {
+        final String url;
+        final long bitRate;
+        final int width;
+        final int height;
+        final int qualityType;
+        final long dataSize;
+        final String codec;
+        final boolean rendition;
+        final int order;
+
+        VideoSource(String url, long bitRate, int width, int height, int qualityType,
+                    long dataSize, String codec, boolean rendition, int order) {
+            this.url = url;
+            this.bitRate = bitRate;
+            this.width = width;
+            this.height = height;
+            this.qualityType = qualityType;
+            this.dataSize = dataSize;
+            this.codec = codec;
+            this.rendition = rendition;
+            this.order = order;
+        }
+
+        String menuLabel() {
+            StringBuilder label = new StringBuilder("保存最高画质（平台源");
+            if (width > 0 && height > 0) label.append(" · ").append(width).append('×').append(height);
+            if (bitRate > 0) {
+                if (bitRate >= 1_000_000L) label.append(" · ")
+                        .append(new java.math.BigDecimal(bitRate).divide(new java.math.BigDecimal(1_000_000L), 1,
+                                java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString()).append(" Mbps");
+                else label.append(" · ").append(Math.max(1L, bitRate / 1000L)).append(" Kbps");
+            }
+            if (codec != null && !codec.isEmpty()) label.append(" · ").append(codec);
+            return label.append('）').toString();
         }
     }
 
@@ -426,7 +473,8 @@ public final class DownloadActionHook implements AutoCloseable {
             }
         }
         if (!assets.isEmpty()) return assets;
-        String url = findPlaybackVideoUrl(aweme);
+        VideoSource best = options.preferHighestQuality() ? findBestVideoSource(aweme) : null;
+        String url = best == null ? findPlaybackVideoUrl(aweme) : best.url;
         if (url == null && !clean) {
             url = firstUrlValue(jsonValue(jsonValue(aweme, "video"), "download_addr"));
         }
@@ -485,6 +533,79 @@ public final class DownloadActionHook implements AutoCloseable {
         }
     }
 
+    static VideoSource findBestVideoSource(Object aweme) {
+        Object video = jsonValue(aweme, "video");
+        return video == null ? null : bestVideoSource(video);
+    }
+
+    private static VideoSource bestVideoSource(Object video) {
+        VideoSource best = null;
+        Object bitRates = jsonValue(video, "bit_rate");
+        int order = 0;
+        if (bitRates instanceof Iterable<?>) {
+            for (Object rendition : (Iterable<?>) bitRates) {
+                if (rendition == null) continue;
+                long bitRate = positiveLong(rendition, "bit_rate", "bitrate", "bps");
+                int qualityType = positiveInt(rendition, "quality_type", "qualityType");
+                for (String key : new String[]{"play_addr", "play_addr_h264", "play_addr_265", "play_addr_bytevc1"}) {
+                    Object address = jsonValue(rendition, key);
+                    String url = firstUrlValue(address);
+                    if (url == null) continue;
+                    int width = positiveInt(rendition, "width");
+                    int height = positiveInt(rendition, "height");
+                    if (width == 0) width = positiveInt(address, "width");
+                    if (height == 0) height = positiveInt(address, "height");
+                    long dataSize = positiveLong(rendition, "data_size", "file_size", "size");
+                    if (dataSize == 0) dataSize = positiveLong(address, "data_size", "file_size", "size");
+                    VideoSource candidate = new VideoSource(url, bitRate, width, height, qualityType,
+                            dataSize, codecLabel(key), true, order++);
+                    if (best == null || better(candidate, best)) best = candidate;
+                }
+            }
+        }
+        if (best != null) return best;
+        try {
+            String playback = playbackUrl(video);
+            return playback == null ? null : new VideoSource(playback, 0, 0, 0, 0,
+                    0, "", false, order);
+        } catch (ReflectiveOperationException ignored) {
+            return null;
+        }
+    }
+
+    private static boolean better(VideoSource candidate, VideoSource current) {
+        long candidatePixels = (long) candidate.width * candidate.height;
+        long currentPixels = (long) current.width * current.height;
+        if (candidatePixels != currentPixels) return candidatePixels > currentPixels;
+        if (candidate.bitRate != current.bitRate) return candidate.bitRate > current.bitRate;
+        if (candidate.qualityType != current.qualityType) return candidate.qualityType > current.qualityType;
+        if (candidate.dataSize != current.dataSize) return candidate.dataSize > current.dataSize;
+        return candidate.order < current.order;
+    }
+
+    private static int positiveInt(Object source, String... names) {
+        long value = positiveLong(source, names);
+        return value > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) value;
+    }
+
+    private static long positiveLong(Object source, String... names) {
+        for (String name : names) {
+            Object value = jsonValue(source, name);
+            if (value instanceof Number) return Math.max(0L, ((Number) value).longValue());
+            if (value instanceof String) {
+                try { return Math.max(0L, Long.parseLong((String) value)); }
+                catch (NumberFormatException ignored) { }
+            }
+        }
+        return 0L;
+    }
+
+    private static String codecLabel(String key) {
+        if ("play_addr_265".equals(key)) return "H.265";
+        if ("play_addr_bytevc1".equals(key)) return "ByteVC1";
+        return "H.264";
+    }
+
     private static String playbackUrl(Object video) throws ReflectiveOperationException {
         for (String key : new String[]{"play_addr", "play_addr_h264", "play_addr_265",
                 "play_addr_bytevc1", "play_addr_lowbr"}) {
@@ -496,7 +617,7 @@ public final class DownloadActionHook implements AutoCloseable {
         if (bitRates instanceof Iterable<?>) {
             for (Object bitRate : (Iterable<?>) bitRates) {
                 if (bitRate == null) continue;
-                for (String key : new String[]{"play_addr", "play_addr_265", "play_addr_bytevc1"}) {
+                for (String key : new String[]{"play_addr", "play_addr_h264", "play_addr_265", "play_addr_bytevc1"}) {
                     String url = firstUrl(fieldByJsonName(bitRate, key));
                     if (url != null) return url;
                 }

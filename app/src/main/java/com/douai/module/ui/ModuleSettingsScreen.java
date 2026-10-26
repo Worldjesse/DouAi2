@@ -723,6 +723,11 @@ public final class ModuleSettingsScreen {
     }
 
     private void buildOfficialDownloadControls(ToggleControl master) {
+        addSwitch("平台最高画质", "优先保存作品模型提供的最高分辨率档位；关闭后使用当前播放源",
+                repository.getBoolean(LocalOptions.PREFER_HIGHEST_QUALITY, true), true, value -> {
+                    if (value) master.setChecked(true);
+                    repository.putBoolean(LocalOptions.PREFER_HIGHEST_QUALITY, value);
+                });
         addSwitch("直接保存全部媒体", "",
                 repository.getBoolean(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, false), true, value -> {
                     if (value) master.setChecked(true);

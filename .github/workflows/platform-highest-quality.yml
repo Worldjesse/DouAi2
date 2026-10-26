@@ -1,0 +1,64 @@
+name: Platform highest quality build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/platform-highest-quality
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 37 packages
+        run: sdkmanager "platforms;android-37" "build-tools;37.0.0"
+
+      - name: Run download regression tests
+        run: >-
+          ./gradlew :app:testDebugUnitTest
+          --tests com.douai.module.feature.DownloadActionHookTest
+          --tests com.douai.module.feature.OfficialDownloadDialogTest
+          --tests com.douai.module.feature.OfficialDynamicVideoSelectionTest
+          --tests com.douai.module.feature.OfficialGalleryLiveSelectionTest
+          --tests com.douai.module.feature.OfficialLivePhotoDownloadTest
+          --tests com.douai.module.config.ConfigurationCatalogTest
+          --tests com.douai.module.ui.ModuleSettingsReferenceTest
+          --console=plain
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --console=plain
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: download-test-reports
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DouAi-platform-highest-quality-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

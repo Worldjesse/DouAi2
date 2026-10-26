@@ -83,12 +83,36 @@ public final class DownloadActionHookTest {
         public UrlFixture play_addr;
         public UrlFixture play_addr_h264;
         public UrlFixture play_addr_265;
+        public UrlFixture play_addr_bytevc1;
+        public List<BitRateFixture> bit_rate;
         public UrlFixture download_addr;
         public boolean has_watermark = true;
     }
 
+    public static final class BitRateFixture {
+        public long bit_rate;
+        public int width;
+        public int height;
+        public int quality_type;
+        public long data_size;
+        public UrlFixture play_addr;
+        public UrlFixture play_addr_265;
+        public UrlFixture play_addr_bytevc1;
+
+        BitRateFixture(long bitRate, int width, int height, long dataSize, UrlFixture address) {
+            this.bit_rate = bitRate;
+            this.width = width;
+            this.height = height;
+            this.data_size = dataSize;
+            this.play_addr = address;
+        }
+    }
+
     public static final class UrlFixture {
         public List<String> url_list;
+        public int width;
+        public int height;
+        public long data_size;
         UrlFixture(String... values) { url_list = Arrays.asList(values); }
     }
 
@@ -107,6 +131,65 @@ public final class DownloadActionHookTest {
         assertEquals("https://media.example/h265.mp4", DownloadActionHook.findPlaybackVideoUrl(aweme));
         aweme.video.play_addr_265 = null;
         org.junit.Assert.assertNull(DownloadActionHook.findPlaybackVideoUrl(aweme));
+    }
+
+    @Test
+    public void highestQualityRenditionDoesNotTrustListOrder() {
+        AwemeFixture aweme = new AwemeFixture();
+        aweme.video = new VideoFixture();
+        aweme.video.play_addr = new UrlFixture("https://media.example/compatible.mp4");
+        BitRateFixture low = new BitRateFixture(6_000_000L, 1280, 720, 8_000_000L,
+                new UrlFixture("https://media.example/720p.mp4"));
+        BitRateFixture high = new BitRateFixture(4_800_000L, 1920, 1080, 42_000_000L,
+                new UrlFixture("https://media.example/1080p.mp4"));
+        aweme.video.bit_rate = Arrays.asList(low, high);
+
+        DownloadActionHook.VideoSource selected = DownloadActionHook.findBestVideoSource(aweme);
+        assertNotNull(selected);
+        assertEquals("https://media.example/1080p.mp4", selected.url);
+        assertEquals(4_800_000L, selected.bitRate);
+        assertTrue(selected.rendition);
+        assertEquals("保存最高画质（平台源 · 1920×1080 · 4.8 Mbps · H.264）", selected.menuLabel());
+        assertEquals("https://media.example/compatible.mp4", DownloadActionHook.findPlaybackVideoUrl(aweme));
+        List<DownloadActionHook.MediaAsset> assets = DownloadActionHook.mediaAssets(aweme, true,
+                new com.douai.module.config.LocalOptions(java.util.Collections.emptyMap()));
+        assertEquals(1, assets.size());
+        assertEquals("https://media.example/1080p.mp4", assets.get(0).url);
+        List<DownloadActionHook.MediaAsset> compatibleAssets = DownloadActionHook.mediaAssets(aweme, true,
+                new com.douai.module.config.LocalOptions(java.util.Collections.singletonMap(
+                        com.douai.module.config.LocalOptions.PREFER_HIGHEST_QUALITY, false)));
+        assertEquals("https://media.example/compatible.mp4", compatibleAssets.get(0).url);
+    }
+
+    @Test
+    public void highestQualityUsesPixelsThenSizeWhenBitrateIsMissing() {
+        AwemeFixture aweme = new AwemeFixture();
+        aweme.video = new VideoFixture();
+        BitRateFixture small = new BitRateFixture(0, 1280, 720, 30_000_000L,
+                new UrlFixture("https://media.example/small.mp4"));
+        BitRateFixture largeShort = new BitRateFixture(0, 1920, 1080, 20_000_000L,
+                new UrlFixture("https://media.example/large-short.mp4"));
+        BitRateFixture largeLong = new BitRateFixture(0, 1920, 1080, 40_000_000L,
+                new UrlFixture("https://media.example/large-long.mp4"));
+        aweme.video.bit_rate = Arrays.asList(small, largeShort, largeLong);
+
+        DownloadActionHook.VideoSource selected = DownloadActionHook.findBestVideoSource(aweme);
+        assertNotNull(selected);
+        assertEquals("https://media.example/large-long.mp4", selected.url);
+    }
+
+    @Test
+    public void invalidRenditionsFallBackToCompatiblePlaybackSource() {
+        AwemeFixture aweme = new AwemeFixture();
+        aweme.video = new VideoFixture();
+        aweme.video.play_addr = new UrlFixture("https://media.example/compatible.mp4");
+        aweme.video.bit_rate = Arrays.asList(new BitRateFixture(9_000_000L, 3840, 2160, 80_000_000L,
+                new UrlFixture("file:///private/not-downloadable.mp4")));
+
+        DownloadActionHook.VideoSource selected = DownloadActionHook.findBestVideoSource(aweme);
+        assertNotNull(selected);
+        assertFalse(selected.rendition);
+        assertEquals("https://media.example/compatible.mp4", selected.url);
     }
 
     @Test public void galleryUsesCleanListThenDisplaySourceInOriginalOrder() {

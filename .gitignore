@@ -1,4 +1,9 @@
 .gradle/
+.gradle-user/
+.gradle-dist/
+.jdk/
+.android-user/
+.gh/
 .kotlin/
 __pycache__/
 *.py[cod]

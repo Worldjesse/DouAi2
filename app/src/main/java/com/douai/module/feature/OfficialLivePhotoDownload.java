@@ -97,7 +97,9 @@ final class OfficialLivePhotoDownload {
         if (imageUrl == null) imageUrl = DownloadActionHook.firstUrlValue(DownloadActionHook.jsonValue(image, "url_list"));
         if (imageUrl == null && !clean) imageUrl = DownloadActionHook.firstUrlValue(
                 DownloadActionHook.jsonValue(image, "download_url_list"));
-        String videoUrl = DownloadActionHook.findPlaybackVideoUrl(image);
+        DownloadActionHook.VideoSource best = options.preferHighestQuality()
+                ? DownloadActionHook.findBestVideoSource(image) : null;
+        String videoUrl = best == null ? DownloadActionHook.findPlaybackVideoUrl(image) : best.url;
         if (videoUrl == null && !clean) videoUrl = DownloadActionHook.firstUrlValue(DownloadActionHook.jsonValue(
                 DownloadActionHook.jsonValue(image, "video"), "download_addr"));
         if (imageUrl == null || videoUrl == null) throw new IllegalArgumentException("实况来源不完整");

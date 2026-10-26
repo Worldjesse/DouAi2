@@ -74,6 +74,7 @@ public final class ConfigurationCatalogTest {
         assertConsumers("component_alpha_like", EnumSet.of(FEED_UI));
         assertConsumers("long_press_left", EnumSet.of(GESTURE));
         assertConsumers("third_party_get_template", EnumSet.of(DOWNLOAD, GESTURE));
+        assertConsumers(LocalOptions.PREFER_HIGHEST_QUALITY, EnumSet.of(DOWNLOAD, GESTURE));
         assertConsumers("relation_lists_refresh_token", EnumSet.of(FOLLOW_LISTS));
         assertConsumers("streak_retry_unknown_token", EnumSet.of(REPLY, COMMENT_REPLY, AUTOMATION_DISPATCH));
         assertConsumers("unrelated_runtime_key", EnumSet.noneOf(ConfigurationCatalog.Feature.class));
@@ -84,6 +85,7 @@ public final class ConfigurationCatalogTest {
     @Test public void defaultsAndPlaybackValidationShareOneContractWithoutBreakingOldBackups() {
         assertEquals("2", ConfigurationCatalog.settings().get("playback_speed").defaultValue);
         assertEquals("official", ConfigurationCatalog.settings().get("download_method").defaultValue);
+        assertEquals(true, ConfigurationCatalog.settings().get(LocalOptions.PREFER_HIGHEST_QUALITY).defaultValue);
         for (ConfigurationCatalog.Setting setting : ConfigurationCatalog.settings().values()) {
             if (setting.defaultValue != null) ConfigKeys.validate(setting.key, setting.defaultValue);
         }

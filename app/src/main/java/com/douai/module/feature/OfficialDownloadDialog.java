@@ -83,11 +83,22 @@ final class OfficialDownloadDialog implements AutoCloseable {
             if (!liveIndexes.isEmpty()) choices.add(new Choice("实况（" + liveIndexes.size() + "）",
                     () -> showCategory(Category.LIVE, images, liveIndexes)));
         } else {
-            String video = motionUrl(aweme);
+            DownloadActionHook.VideoSource best = options.preferHighestQuality()
+                    ? DownloadActionHook.findBestVideoSource(aweme) : null;
+            String video = best == null ? motionUrl(aweme) : best.url;
             if (video != null) {
-                String source = video;
-                choices.add(new Choice("视频", () -> showChoices("视频", List.of(
-                        new Choice("保存视频", () -> saveVideo(source, 0))), this::show)));
+                ArrayList<Choice> videoChoices = new ArrayList<>();
+                if (best != null && best.rendition) {
+                    videoChoices.add(new Choice(best.menuLabel(), () -> saveVideo(best.url, 0)));
+                }
+                String compatible = DownloadActionHook.findPlaybackVideoUrl(aweme);
+                if (compatible != null && best != null && best.rendition && !compatible.equals(best.url)) {
+                    videoChoices.add(new Choice("保存兼容播放源视频", () -> saveVideo(compatible, 0)));
+                } else if (best == null || !best.rendition) {
+                    String source = video;
+                    videoChoices.add(new Choice("保存视频", () -> saveVideo(source, 0)));
+                }
+                choices.add(new Choice("视频", () -> showChoices("视频", videoChoices, this::show)));
             }
             String audio = DownloadActionHook.firstUrlValue(DownloadActionHook.jsonValue(
                     DownloadActionHook.jsonValue(aweme, "music"), "play_url"));
@@ -402,7 +413,9 @@ final class OfficialDownloadDialog implements AutoCloseable {
     }
 
     private String motionUrl(Object source) {
-        String video = DownloadActionHook.findPlaybackVideoUrl(source);
+        DownloadActionHook.VideoSource best = options.preferHighestQuality()
+                ? DownloadActionHook.findBestVideoSource(source) : null;
+        String video = best == null ? DownloadActionHook.findPlaybackVideoUrl(source) : best.url;
         if (video == null && !options.enabled("remove_watermark", true)) {
             video = DownloadActionHook.firstUrlValue(DownloadActionHook.jsonValue(
                     DownloadActionHook.jsonValue(source, "video"), "download_addr"));

@@ -17,6 +17,7 @@ import org.robolectric.shadows.ShadowLooper;
 
 import java.nio.file.Files;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -206,6 +207,49 @@ public final class OfficialDownloadDialogTest {
         }
     }
 
+    @Test public void highestQualityChoiceShowsMetadataAndDownloadsSelectedRendition() throws Exception {
+        try (MockWebServer server = new MockWebServer(); Screen screen = new Screen()) {
+            server.start();
+            server.enqueue(media("video/mp4", "highest-body"));
+            Work work = video(server);
+            work.video.bit_rate = List.of(
+                    new DownloadActionHookTest.BitRateFixture(900_000L, 1280, 720, 8_000_000L,
+                            new DownloadActionHookTest.UrlFixture(server.url("/720p.mp4").toString())),
+                    new DownloadActionHookTest.BitRateFixture(4_800_000L, 1920, 1080, 42_000_000L,
+                            new DownloadActionHookTest.UrlFixture(server.url("/1080p.mp4").toString())));
+            try (OfficialDownloadDialog session = screen.open(work)) {
+                OfficialDownloadTestUi.openGroup("视频");
+                String highest = "保存最高画质（平台源 · 1920×1080 · 4.8 Mbps · H.264）";
+                assertTrue(indexOf(highest) >= 0);
+                assertTrue(indexOf("保存兼容播放源视频") >= 0);
+                choose(highest);
+                assertEquals("/1080p.mp4", request(server).getPath());
+                awaitSaved(screen, 1);
+                assertEquals(Set.of("video.mp4"), new HashSet<>(screen.documents.names.values()));
+            }
+        }
+    }
+
+    @Test public void disablingHighestQualityRestoresCompatiblePlaybackChoice() throws Exception {
+        try (MockWebServer server = new MockWebServer(); Screen screen = new Screen(Map.of(
+                LocalOptions.PREFER_HIGHEST_QUALITY, false))) {
+            server.start();
+            server.enqueue(media("video/mp4", "compatible-body"));
+            Work work = video(server);
+            work.video.bit_rate = List.of(new DownloadActionHookTest.BitRateFixture(
+                    4_800_000L, 1920, 1080, 42_000_000L,
+                    new DownloadActionHookTest.UrlFixture(server.url("/1080p.mp4").toString())));
+            try (OfficialDownloadDialog session = screen.open(work)) {
+                OfficialDownloadTestUi.openGroup("视频");
+                assertEquals(-1, indexOf("保存最高画质（平台源 · 1920×1080 · 4.8 Mbps · H.264）"));
+                assertEquals(-1, indexOf("保存兼容播放源视频"));
+                choose("保存视频");
+                assertEquals("/video.mp4", request(server).getPath());
+                awaitSaved(screen, 1);
+            }
+        }
+    }
+
     @Test public void closePreventsAnOldDialogCallbackFromSubmittingARequest() throws Exception {
         try (MockWebServer server = new MockWebServer(); Screen screen = new Screen()) {
             server.start();
@@ -354,9 +398,17 @@ public final class OfficialDownloadDialogTest {
         final ActivityController<Activity> activity = Robolectric.buildActivity(Activity.class).setup();
         final DownloadDocumentTreeTest.RecordingDocuments documents = DownloadDocumentTreeTest.register();
         final AtomicBoolean valid = new AtomicBoolean(true);
-        final LocalOptions options = new LocalOptions(Map.of("download_method", "official",
-                LocalOptions.DOWNLOAD_SAVE_TREE, DownloadDocumentTreeTest.TREE,
-                "download_custom_name", true, "download_name_template", "#index#"));
+        final LocalOptions options;
+        Screen() { this(Map.of()); }
+        Screen(Map<String, ?> overrides) {
+            Map<String, Object> values = new HashMap<>();
+            values.put("download_method", "official");
+            values.put(LocalOptions.DOWNLOAD_SAVE_TREE, DownloadDocumentTreeTest.TREE);
+            values.put("download_custom_name", true);
+            values.put("download_name_template", "#index#");
+            values.putAll(overrides);
+            options = new LocalOptions(values);
+        }
         OfficialDownloadDialog open(Work work) {
             OfficialDownloadDialog session = new OfficialDownloadDialog(activity.get(), work, options,
                     ignored -> { }, valid::get);

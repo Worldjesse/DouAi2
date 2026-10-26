@@ -12,6 +12,7 @@ public final class LocalOptions {
     public static final String INTERCEPT_NATIVE_LONG_PRESS = "intercept_native_long_press";
     public static final String DOWNLOAD_SAVE_TREE = "download_directory_uri";
     public static final String OFFICIAL_DOWNLOAD_DIRECT = "download_official_direct";
+    public static final String PREFER_HIGHEST_QUALITY = "download_prefer_highest_quality";
     public static final String REPLY_VOICE = "reply_voice";
     public static final String REPLY_RECOGNIZE_IMAGES = "reply_recognize_images";
     public static final String REPLY_RECOGNIZE_VIDEO = "reply_recognize_video";
@@ -23,6 +24,7 @@ public final class LocalOptions {
 
     public String downloadSaveTree() { return text(DOWNLOAD_SAVE_TREE, "").trim(); }
     public boolean officialDownloadDirect() { return enabled(OFFICIAL_DOWNLOAD_DIRECT); }
+    public boolean preferHighestQuality() { return enabled(PREFER_HIGHEST_QUALITY, true); }
 
     public boolean samePrefix(LocalOptions other, String prefix) {
         Map<String, Object> left = new HashMap<>();
