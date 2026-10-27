@@ -244,8 +244,14 @@ public final class ModuleSettingsReferenceTest {
                 boolean globalHashVoice = "#长按发送转语音（全局）".contentEquals(control.getContentDescription());
                 boolean privateMessageVoice = "MESSAGE".equals(category)
                         && "自动文本转语音".contentEquals(control.getContentDescription());
+                boolean highestQuality = "DOWNLOAD".equals(category)
+                        && "平台最高画质".contentEquals(control.getContentDescription());
                 assertEquals(category + ": " + control.getContentDescription(),
-                        voiceComment || globalHashVoice || privateMessageVoice ? 2 : 1, visibleLabels);
+                        voiceComment || globalHashVoice || privateMessageVoice || highestQuality ? 2 : 1, visibleLabels);
+                if (highestQuality) {
+                    assertTrue(containsText(labels, "优先保存作品模型提供的最高分辨率档位"));
+                    assertTrue(containsText(labels, "关闭后使用当前播放源"));
+                }
                 if (globalHashVoice) {
                     assertTrue(containsText(labels, "适用于私信、群聊和评论"));
                     assertTrue(containsText(labels, "只发送语音，不发送文字"));

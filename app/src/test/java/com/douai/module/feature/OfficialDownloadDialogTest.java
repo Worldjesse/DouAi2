@@ -225,7 +225,7 @@ public final class OfficialDownloadDialogTest {
                 choose(highest);
                 assertEquals("/1080p.mp4", request(server).getPath());
                 awaitSaved(screen, 1);
-                assertEquals(Set.of("video.mp4"), new HashSet<>(screen.documents.names.values()));
+                assertEquals(Set.of("DouAi.mp4"), new HashSet<>(screen.documents.names.values()));
             }
         }
     }
