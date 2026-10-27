@@ -36,16 +36,32 @@ jobs:
         run: sdkmanager "platforms;android-37.0"
 
       - name: Run download regression tests
-        run: >-
-          ./gradlew :app:testDebugUnitTest
-          --tests com.douai.module.feature.DownloadActionHookTest
-          --tests com.douai.module.feature.OfficialDownloadDialogTest
-          --tests com.douai.module.feature.OfficialDynamicVideoSelectionTest
-          --tests com.douai.module.feature.OfficialGalleryLiveSelectionTest
-          --tests com.douai.module.feature.OfficialLivePhotoDownloadTest
-          --tests com.douai.module.config.ConfigurationCatalogTest
-          --tests com.douai.module.ui.ModuleSettingsReferenceTest
-          --console=plain
+        id: regression-tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :app:testDebugUnitTest \
+            --tests com.douai.module.feature.DownloadActionHookTest \
+            --tests com.douai.module.feature.OfficialDownloadDialogTest \
+            --tests com.douai.module.feature.OfficialDynamicVideoSelectionTest \
+            --tests com.douai.module.feature.OfficialGalleryLiveSelectionTest \
+            --tests com.douai.module.feature.OfficialLivePhotoDownloadTest \
+            --tests com.douai.module.config.ConfigurationCatalogTest \
+            --tests com.douai.module.ui.ModuleSettingsReferenceTest \
+            --console=plain 2>&1 | tee regression-tests.log
+
+      - name: Publish regression failure annotation
+        if: steps.regression-tests.outcome == 'failure'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path("regression-tests.log").read_text(errors="replace")
+          tail = "\n".join(text.splitlines()[-120:])
+          tail = tail.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print(f"::error file=regression-tests.log,line=1::{tail}")
+          PY
 
       - name: Build debug APK
         run: ./gradlew :app:assembleDebug --console=plain
@@ -64,3 +80,7 @@ jobs:
           name: DouAi-platform-highest-quality-debug
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      - name: Fail on regression test failure
+        if: steps.regression-tests.outcome == 'failure'
+        run: exit 1
