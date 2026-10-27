@@ -57,10 +57,17 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          text = Path("regression-tests.log").read_text(errors="replace")
-          tail = "\n".join(text.splitlines()[-120:])
-          tail = tail.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-          print(f"::error file=regression-tests.log,line=1::{tail}")
+          lines = Path("regression-tests.log").read_text(errors="replace").splitlines()
+          markers = (
+              "FAILED", "FAILURE:", "What went wrong:", "Execution failed for task",
+              "There were failing tests", "tests completed", "AssertionError",
+              "Caused by:", "No tests found", "Exception",
+          )
+          selected = [line for line in lines if any(marker in line for marker in markers)]
+          selected.extend(lines[-40:])
+          text = "\n".join(dict.fromkeys(selected))[-12000:]
+          text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print(f"::error file=regression-tests.log,line=1::{text}")
           PY
 
       - name: Build debug APK
