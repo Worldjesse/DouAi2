@@ -1,0 +1,96 @@
+name: Release APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android 37 packages
+        run: sdkmanager "platforms;android-37.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Restore release keystore
+        id: keystore
+        env:
+          STORE_BASE64: ${{ secrets.DOUAI_RELEASE_STORE_BASE64 }}
+        run: |
+          if [ -z "$STORE_BASE64" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::DOUAI_RELEASE_STORE_BASE64 is not configured; the Release APK will be unsigned."
+            exit 0
+          fi
+          printf '%s' "$STORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          test -s "$RUNNER_TEMP/release.jks"
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble Release APK
+        env:
+          DOUAI_RELEASE_STORE_FILE: ${{ steps.keystore.outputs.configured == 'true' && format('{0}/release.jks', runner.temp) || '' }}
+          DOUAI_RELEASE_STORE_PASSWORD: ${{ secrets.DOUAI_RELEASE_STORE_PASSWORD }}
+          DOUAI_RELEASE_KEY_ALIAS: ${{ secrets.DOUAI_RELEASE_KEY_ALIAS }}
+          DOUAI_RELEASE_KEY_PASSWORD: ${{ secrets.DOUAI_RELEASE_KEY_PASSWORD }}
+        run: |
+          if [ "${{ steps.keystore.outputs.configured }}" != "true" ]; then
+            unset DOUAI_RELEASE_STORE_FILE DOUAI_RELEASE_STORE_PASSWORD DOUAI_RELEASE_KEY_ALIAS DOUAI_RELEASE_KEY_PASSWORD
+          fi
+          ./gradlew :app:assembleRelease --console=plain
+
+      - name: Verify release signature
+        if: steps.keystore.outputs.configured == 'true'
+        run: |
+          APK=$(find app/build/outputs/apk/release -name 'app-release.apk' -print -quit)
+          test -n "$APK"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)
+          test -n "$APKSIGNER"
+          "$APKSIGNER" verify --print-certs "$APK" | tee apksigner.txt
+          CERT=$(grep -o 'certificate SHA-256 digest: [0-9a-f]*' apksigner.txt | head -1 | awk '{print toupper($NF)}')
+          EXPECTED=FAE67C134F4C4FA73B8E34487C47A8C7F3E7C34B840BC245AFAC51585B7DFD47
+          echo "certificate=$CERT"
+          if [ "$CERT" != "$EXPECTED" ]; then
+            echo "::warning::Signing certificate $CERT differs from the previous release certificate $EXPECTED; existing installs cannot upgrade in place."
+          fi
+
+      - name: Report artifact name
+        id: apk
+        run: |
+          APK=$(find app/build/outputs/apk/release -name '*.apk' -print -quit)
+          test -n "$APK"
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$APK")" >> "$GITHUB_OUTPUT"
+          sha256sum "$APK" | tee apk.sha256
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DouAi-0.9.99-release
+          path: |
+            app/build/outputs/apk/release/*.apk
+            apk.sha256
+            apksigner.txt
+          if-no-files-found: error
