@@ -13,6 +13,9 @@ public final class HostAdaptationTest {
     @Test public void versionEvidenceRequiresPackageNameAndActualVersionCode() {
         assertTrue(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.8.0", 400801L));
         assertTrue(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.6.0", 400601L));
+        assertTrue(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.5.0", 400501L));
+        assertFalse(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.5.0", 4005010L));
+        assertFalse(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.5.1", 400501L));
         assertFalse(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.6.0", 400801L));
         assertFalse(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.8.0", 400601L));
         assertFalse(HostAdaptation.matchesVersion(HostAdaptation.TARGET_PACKAGE, "40.8.0", 40809985L));
@@ -21,21 +24,30 @@ public final class HostAdaptationTest {
         assertFalse(HostAdaptation.matchesVersion(null, null, 0L));
     }
 
-    @Test public void bothProfilesKeepIndependentRulesAndImmutableResourceEvidence() throws Exception {
-        for (HostAdaptation.Profile profile : new HostAdaptation.Profile[]{
-                HostAdaptation.PROFILE_406, HostAdaptation.PROFILE_408}) {
+    @Test public void everyProfileKeepsIndependentRulesAndImmutableResourceEvidence() throws Exception {
+        for (HostAdaptation.Profile profile : HostAdaptation.PROFILES) {
             assertSame(profile, HostAdaptation.forVersion(profile.versionName, profile.versionCode));
             try (FileInputStream input = new FileInputStream(HostApkTestProfile.assetFile(profile.rulesAsset))) {
                 assertEquals(profile.fingerprint, HostRuleSet.parse(input).getFingerprint());
             }
-            assertEquals(51, profile.getFeedResources().size());
+            // 40.5.0 has one feed entry (w05) with no canonical counterpart in the newer builds.
+            int expectedFeed = profile == HostAdaptation.PROFILE_405 ? 50 : 51;
+            assertEquals(profile.versionName, expectedFeed, profile.getFeedResources().size());
             assertThrows(UnsupportedOperationException.class, () -> profile.getFeedResources().clear());
         }
+        assertEquals(3, HostAdaptation.PROFILES.length);
         assertNotEquals(HostAdaptation.PROFILE_406.rulesAsset, HostAdaptation.PROFILE_408.rulesAsset);
-        assertFalse(HostAdaptation.PROFILE_406.matchesRules(HostAdaptation.PROFILE_408.fingerprint));
-        assertFalse(HostAdaptation.PROFILE_408.matchesRules(HostAdaptation.PROFILE_406.fingerprint));
+        assertNotEquals(HostAdaptation.PROFILE_405.rulesAsset, HostAdaptation.PROFILE_406.rulesAsset);
+        assertNotEquals(HostAdaptation.PROFILE_405.rulesAsset, HostAdaptation.PROFILE_408.rulesAsset);
+        for (HostAdaptation.Profile first : HostAdaptation.PROFILES) {
+            for (HostAdaptation.Profile second : HostAdaptation.PROFILES) {
+                assertEquals(first.versionName + " vs " + second.versionName,
+                        first == second, first.matchesRules(second.fingerprint));
+            }
+        }
         assertEquals("d5s", HostAdaptation.PROFILE_406.getFeedResources().get(2131369826));
         assertEquals("d5w", HostAdaptation.PROFILE_408.getFeedResources().get(2131369833));
+        assertEquals("d5s", HostAdaptation.PROFILE_405.getFeedResources().get(2131369821));
     }
 
     @Test public void staticEvidenceBindsThePackagedRulesAndFeatureReferences() throws Exception {

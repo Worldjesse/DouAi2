@@ -25,8 +25,8 @@ android {
         applicationId = "io.github.yudigaga.douai"
         minSdk = 28
         targetSdk = 35
-        versionCode = 123
-        versionName = "0.2.22"
+        versionCode = 124
+        versionName = "0.2.23"
         require(versionName.orEmpty().matches(Regex("""[0-9]+\.[0-9]\.(?:0|[1-9][0-9]?)"""))) {
             "Version must carry at patch 100 and minor 10 (0.1.99 -> 0.2.0; 0.9.99 -> 1.0.0)."
         }

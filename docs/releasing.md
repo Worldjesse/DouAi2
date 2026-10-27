@@ -56,7 +56,7 @@ LSPosed 模块仓库：https://github.com/Xposed-Modules-Repo/io.github.yudigaga
 
 0.2.5 最终封存入口为 [`20261021T024248Z-5a07a8a2/manifest.json`](../artifacts/release-verification/20261021T024248Z-5a07a8a2/manifest.json)，状态 `verified-local`、`published=false`；canonical APK 为 [`DouAi-0.2.5-release.apk`](../artifacts/DouAi-0.2.5-release.apk)，4,665,556 字节。摘要、原证书及平台 APK 对应关系见 [0.2.5 本地签名归档](release-0.2.5.md#本地签名归档)。
 
-当前沿用正式包名、长期签名、libxposed API 102、抖音 `40.6.0 / 400601` 与 `40.8.0 / 400801` 独立适配与既有黑边回退结果。40.8 必须为真实 APK 内部构建 `40809900`，旧 `40809985` 与缺少构建号的同名版本不加载适配。新交付按下述进位规则递增 versionName，并独立递增 versionCode；同一批修复的重复验证不重复递增。
+当前沿用正式包名、长期签名、libxposed API 102、抖音 `40.5.0 / 400501`、`40.6.0 / 400601` 与 `40.8.0 / 400801` 独立适配与既有黑边回退结果。40.5 必须为真实 APK 内部构建 `40509900`；0.2.23 仅完成静态适配（209/229 条规则唯一命中、20 条显式未适配），未做真机验证，详见 [0.2.23](release-0.2.23.md)。40.8 必须为真实 APK 内部构建 `40809900`，旧 `40809985` 与缺少构建号的同名版本不加载适配。新交付按下述进位规则递增 versionName，并独立递增 versionCode；同一批修复的重复验证不重复递增。
 
 语音按用户最终要求在评论入口保留生成原文件，超过30秒仍继续尝试提交，不截断正文或音频。0.2.8新增MiniMax实验AAC选项，直接向接口请求而不做本地转换；不调整既有重试/回退策略，也不把较长音频视为必然失败。
 

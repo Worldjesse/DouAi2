@@ -178,6 +178,10 @@ final class OfficialLivePhotoDownload {
         private static boolean legacyHost() throws ReflectiveOperationException {
             HostAdaptation.Profile profile = HostAdaptation.currentProfile();
             if (profile == null) throw new ReflectiveOperationException("宿主实况编码适配版本未确认");
+            if (profile != HostAdaptation.PROFILE_406 && profile != HostAdaptation.PROFILE_408) {
+                // 40.5.0 encoder class is unverified; guessing another build's class could encode into the wrong host type.
+                throw new ReflectiveOperationException("宿主实况编码适配版本未验证");
+            }
             return profile == HostAdaptation.PROFILE_406;
         }
 

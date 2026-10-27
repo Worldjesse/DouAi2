@@ -24,6 +24,19 @@ public final class HostApkProfileTest {
                 HostAdaptation.TARGET_PACKAGE, "40.8.0", 400801, false))));
     }
 
+    @Test public void onlyTheReal4050BuildSelectsThe405Profile() throws Exception {
+        byte[] accepted = BinaryHostManifestFixture.manifest(HostAdaptation.TARGET_PACKAGE,
+                "40.5.0", 400501, true, 40509900L);
+        assertEquals(40509900L, HostApkProfile.parseManifest(accepted).updateVersionCode);
+        assertSame(HostAdaptation.PROFILE_405, HostApkProfile.read(apk(accepted)));
+        for (long build : new long[]{40509901L, 40509899L, 40609900L, -1L}) {
+            byte[] xml = BinaryHostManifestFixture.manifest(HostAdaptation.TARGET_PACKAGE,
+                    "40.5.0", 400501, false, build);
+            assertNull("Unsupported 40.5 build must not use 40509900 rules: " + build,
+                    HostApkProfile.read(apk(xml)));
+        }
+    }
+
     @Test public void unknownVersionsMismatchedCodesAndDifferentPackagesNeverSelectTheLatestProfile() throws Exception {
         assertNull(HostApkProfile.read(apk(manifest(HostAdaptation.TARGET_PACKAGE, "40.7.0", 400801, true))));
         assertNull(HostApkProfile.read(apk(manifest(HostAdaptation.TARGET_PACKAGE, "40.8.0", 400601, true))));

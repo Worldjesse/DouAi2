@@ -18,9 +18,13 @@ final class HostResourceCatalog {
 
     static HostAdaptation.Profile profile(Resources resources) {
         if (resources == null) return null;
-        boolean legacy = identifies(resources, HostAdaptation.PROFILE_406);
-        boolean latest = identifies(resources, HostAdaptation.PROFILE_408);
-        return legacy == latest ? null : legacy ? HostAdaptation.PROFILE_406 : HostAdaptation.PROFILE_408;
+        HostAdaptation.Profile found = null;
+        for (HostAdaptation.Profile candidate : HostAdaptation.PROFILES) {
+            if (!identifies(resources, candidate)) continue;
+            if (found != null) return null;
+            found = candidate;
+        }
+        return found;
     }
 
     private static boolean identifies(Resources resources, HostAdaptation.Profile profile) {
@@ -74,7 +78,11 @@ final class HostResourceCatalog {
     static String expectedName(int canonicalId) { return expectedName(HostAdaptation.PROFILE_408, canonicalId); }
 
     private static String expectedName(HostAdaptation.Profile profile, int canonicalId) {
-        if (canonicalId == CHAPTER_MOUNT) return HostResourceProfile.legacy(profile) ? "i=5" : "i_f";
+        if (canonicalId == CHAPTER_MOUNT) {
+            // The 40.5.0 build has no verified chapter mount entry; refusing beats binding another view.
+            if (HostResourceProfile.build405(profile)) return null;
+            return HostResourceProfile.legacy(profile) ? "i=5" : "i_f";
+        }
         if (!HostAdaptation.PROFILE_408.getFeedResources().containsKey(canonicalId)) return null;
         return profile.getFeedResources().get(HostResourceProfile.id(profile, canonicalId));
     }

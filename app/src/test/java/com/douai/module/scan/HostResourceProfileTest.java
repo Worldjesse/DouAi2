@@ -4,6 +4,19 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public final class HostResourceProfileTest {
+    @Test public void build405UsesItsOwnResourceTableAndRefusesUnverifiedHostClasses() {
+        assertEquals(0x7f0a1f5d, HostResourceProfile.id(HostAdaptation.PROFILE_405, 0x7f0a1f69));
+        assertEquals(0x7f0a1f69, HostResourceProfile.canonicalId(HostAdaptation.PROFILE_405, 0x7f0a1f5d));
+        // Entries without 40.5.0 evidence stay identity-mapped instead of borrowing another build's id.
+        assertEquals(0x7f0a3fd6, HostResourceProfile.id(HostAdaptation.PROFILE_405, 0x7f0a3fd6));
+        assertEquals("LJJ", HostResourceProfile.viewFactory(HostAdaptation.PROFILE_405));
+        assertEquals("LJIIIZ", HostResourceProfile.avatarLoader(HostAdaptation.PROFILE_405));
+        // Unresolved native-UI class names must never borrow another build's obfuscated name.
+        assertEquals("X.DouAiUnadapted405", HostResourceProfile.className(HostAdaptation.PROFILE_405, "X.0YVw"));
+        assertNotEquals(HostResourceProfile.className(HostAdaptation.PROFILE_406, "X.0YVw"),
+                HostResourceProfile.className(HostAdaptation.PROFILE_405, "X.0YVw"));
+    }
+
     @Test public void semanticIdentifiersResolveSeparatelyForBothOriginalResourceTables() {
         assertEquals(0x7f0a462d, HostResourceProfile.id(HostAdaptation.PROFILE_406, 0x7f0a463c));
         assertEquals(0x7f0a463c, HostResourceProfile.id(HostAdaptation.PROFILE_408, 0x7f0a463c));

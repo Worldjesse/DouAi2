@@ -11,6 +11,7 @@ public final class HostAdaptation {
     public static final String VERIFIED_VERSION_NAME = "40.8.0";
     public static final long VERIFIED_VERSION_CODE = 400801L;
     public static final long VERIFIED_UPDATE_VERSION_CODE = 40809900L;
+    public static final long UPDATE_VERSION_CODE_405 = 40509900L;
     public static final String VERIFIED_RULES_FINGERPRINT =
             "ab5215b527416778cf4a773880af43d9d073ce0512935ee99dfbd6e89c55a6f1";
     private static final Map<Integer, String> FEED_RESOURCES = feedResources();
@@ -20,8 +21,13 @@ public final class HostAdaptation {
     public static final Profile PROFILE_406 = new Profile("40.6.0", 400601L,
             "douyin-host-rules-40.6.0.tsv",
             "ed977e2ee39436476e4242f1db148d412377e50b256afc5408918a311a1b4e9b", legacyFeedResources());
+    public static final Profile PROFILE_405 = new Profile("40.5.0", 400501L,
+            "douyin-host-rules-40.5.0.tsv",
+            "35c76cd658ff0257a7516bd80def9a34a78b1ece5a4fbd04e375e8d33dcdde31", feedResources405());
     public static final Profile PROFILE_408 = new Profile("40.8.0", 400801L,
             RULES_ASSET, VERIFIED_RULES_FINGERPRINT, FEED_RESOURCES);
+    /** Every supported host build; selection always uses the real host identity. */
+    public static final Profile[] PROFILES = {PROFILE_405, PROFILE_406, PROFILE_408};
     private static volatile Profile currentProfile;
 
     public static final class Profile {
@@ -49,7 +55,7 @@ public final class HostAdaptation {
     }
 
     public static Profile forVersion(String versionName, long versionCode) {
-        for (Profile profile : new Profile[]{PROFILE_406, PROFILE_408}) {
+        for (Profile profile : PROFILES) {
             if (profile.versionName.equals(versionName) && profile.versionCode == versionCode) return profile;
         }
         return null;
@@ -63,7 +69,10 @@ public final class HostAdaptation {
     }
 
     public static boolean matchesRules(String fingerprint) {
-        return PROFILE_406.matchesRules(fingerprint) || PROFILE_408.matchesRules(fingerprint);
+        for (Profile profile : PROFILES) {
+            if (profile.matchesRules(fingerprint)) return true;
+        }
+        return false;
     }
 
     /** Latest profile for source/API callers; runtime selection must use the real host identity. */
@@ -122,6 +131,62 @@ public final class HostAdaptation {
         values.put(2131415983, "6h0");
         values.put(2131416121, "6ld");
         values.put(2131416122, "6le");
+        return Collections.unmodifiableMap(values);
+    }
+
+    /** Feed resource names for the 40.5.0 build, parsed from its resources.arsc. */
+    private static Map<Integer, String> feedResources405() {
+        Map<Integer, String> values = new LinkedHashMap<>();
+        values.put(2131362266, "i6");
+        values.put(2131366217, "b1g");
+        values.put(2131367340, "cmm");
+        values.put(2131369821, "d5s");
+        values.put(2131370683, "em6");
+        values.put(2131370894, "esb");
+        values.put(2131370896, "esd");
+        values.put(2131371065, "ewk");
+        values.put(2131371290, "e17");
+        values.put(2131371332, "comment_container");
+        values.put(2131371367, "e32");
+        values.put(2131371463, "comment_layout");
+        values.put(2131371594, "e9l");
+        values.put(2131371899, "fc7");
+        values.put(2131374329, "gw+");
+        values.put(2131374341, "gxl");
+        values.put(2131374342, "gxm");
+        values.put(2131374349, "gxt");
+        values.put(2131374363, "gx6");
+        values.put(2131378114, "i=8");
+        values.put(2131378139, "i_t");
+        values.put(2131378309, "jb1");
+        values.put(2131378353, "jc5");
+        values.put(2131378355, "jc7");
+        values.put(2131379739, "j=+");
+        values.put(2131379751, "j_l");
+        values.put(2131380041, "ket");
+        values.put(2131380042, "keu");
+        values.put(2131386244, "n80");
+        values.put(2131388592, "pm6");
+        values.put(2131393281, "si1");
+        values.put(2131393282, "si2");
+        values.put(2131394011, "s1c");
+        values.put(2131394014, "s1f");
+        values.put(2131394219, "s6v");
+        values.put(2131394224, "s60");
+        values.put(2131394654, "tdx");
+        values.put(2131398470, "title");
+        values.put(2131401772, "xr6");
+        values.put(2131401927, "share_container");
+        values.put(2131402145, "x1c");
+        values.put(2131405153, "zu2");
+        values.put(2131405367, "z0a");
+        values.put(2131410321, "22i");
+        values.put(2131415053, "5zd");
+        values.put(2131415066, "5zq");
+        values.put(2131415727, "user_avatar");
+        values.put(2131415974, "6h0");
+        values.put(2131416113, "6ld");
+        values.put(2131416114, "6le");
         return Collections.unmodifiableMap(values);
     }
 

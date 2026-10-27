@@ -8,6 +8,14 @@ import java.util.Map;
 public final class HostResourceProfile {
     private static final Map<Integer, Integer> LEGACY_IDS = legacyIds();
     private static final Map<Integer, Integer> CANONICAL_IDS = canonicalIds();
+    private static final Map<Integer, Integer> IDS_405 = ids405();
+    private static final Map<Integer, Integer> CANONICAL_IDS_405 = invert(IDS_405);
+    /**
+     * Obfuscated 40.5.0 names resolved from the real 400501/40509900 APK. Unresolved keys fall back to
+     * {@link #UNRESOLVED_405} so callers fail as "not adapted" instead of binding another build's class.
+     */
+    private static final Map<String, String> CLASS_NAMES_405 = classNames405();
+    private static final String UNRESOLVED_405 = "X.DouAiUnadapted405";
 
     private HostResourceProfile() { }
 
@@ -16,15 +24,25 @@ public final class HostResourceProfile {
         return profile.versionCode == 400601L;
     }
 
+    public static boolean build405(HostAdaptation.Profile profile) {
+        if (profile == null) throw new IllegalArgumentException("Host profile is required");
+        return profile.versionCode == 400501L;
+    }
+
     public static int id(HostAdaptation.Profile profile, int canonicalId) {
-        return legacy(profile) ? LEGACY_IDS.getOrDefault(canonicalId, canonicalId) : canonicalId;
+        if (legacy(profile)) return LEGACY_IDS.getOrDefault(canonicalId, canonicalId);
+        if (build405(profile)) return IDS_405.getOrDefault(canonicalId, canonicalId);
+        return canonicalId;
     }
 
     public static int canonicalId(HostAdaptation.Profile profile, int actualId) {
-        return legacy(profile) ? CANONICAL_IDS.getOrDefault(actualId, actualId) : actualId;
+        if (legacy(profile)) return CANONICAL_IDS.getOrDefault(actualId, actualId);
+        if (build405(profile)) return CANONICAL_IDS_405.getOrDefault(actualId, actualId);
+        return actualId;
     }
 
     public static String className(HostAdaptation.Profile profile, String latestName) {
+        if (build405(profile)) return CLASS_NAMES_405.getOrDefault(latestName, UNRESOLVED_405);
         boolean previous = legacy(profile);
         // The keys stay stable for callers. The latest targets are from build 40809900.
         switch (latestName) {
@@ -51,11 +69,80 @@ public final class HostResourceProfile {
     }
 
     public static String viewFactory(HostAdaptation.Profile profile) {
+        if (build405(profile)) return CLASS_NAMES_405.getOrDefault("viewFactory", UNRESOLVED_405);
         return legacy(profile) ? "LJJIIJ" : "LJJIIJZLJL";
     }
 
     public static String avatarLoader(HostAdaptation.Profile profile) {
+        if (build405(profile)) return CLASS_NAMES_405.getOrDefault("avatarLoader", UNRESOLVED_405);
         return legacy(profile) ? "LJIIIZ" : "LJIIJ";
+    }
+
+    /**
+     * Only names proven against the 40.5.0 APK belong here. An empty table is the honest state: native
+     * chat, avatar loading and the album picker then report "not adapted" on that build.
+     */
+    private static Map<String, String> classNames405() {
+        Map<String, String> values = new LinkedHashMap<>();
+        // Both names are unique in the 400501/40509900 APK with the exact reflective signatures used here.
+        values.put("viewFactory", "LJJ");
+        values.put("avatarLoader", "LJIIIZ");
+        return Collections.unmodifiableMap(values);
+    }
+
+    private static Map<Integer, Integer> ids405() {
+        Map<Integer, Integer> values = new LinkedHashMap<>();
+        values.put(0x7f0a01db, 0x7f0a01da); // i6
+        values.put(0x7f0a1160, 0x7f0a1149); // b1g
+        values.put(0x7f0a15bd, 0x7f0a15ac); // cmm
+        values.put(0x7f0a1f69, 0x7f0a1f5d); // d5s
+        values.put(0x7f0a22c4, 0x7f0a22bb); // em6
+        values.put(0x7f0a2396, 0x7f0a238e); // esb
+        values.put(0x7f0a2398, 0x7f0a2390); // esd
+        values.put(0x7f0a2441, 0x7f0a2439); // ewk
+        values.put(0x7f0a2515, 0x7f0a2544); // comment_container
+        values.put(0x7f0a2523, 0x7f0a251a); // e17
+        values.put(0x7f0a2570, 0x7f0a2567); // e32
+        values.put(0x7f0a2596, 0x7f0a25c7); // comment_layout
+        values.put(0x7f0a2655, 0x7f0a264a); // e9l
+        values.put(0x7f0a2785, 0x7f0a277b); // fc7
+        values.put(0x7f0a30f7, 0x7f0a30f9); // gw+
+        values.put(0x7f0a3103, 0x7f0a3105); // gxl
+        values.put(0x7f0a3104, 0x7f0a3106); // gxm
+        values.put(0x7f0a310b, 0x7f0a310d); // gxt
+        values.put(0x7f0a3118, 0x7f0a311b); // gx6
+        values.put(0x7f0a3fdb, 0x7f0a3fc2); // i=8
+        values.put(0x7f0a3ff3, 0x7f0a3fdb); // i_t
+        values.put(0x7f0a409c, 0x7f0a4085); // jb1
+        values.put(0x7f0a40c9, 0x7f0a40b1); // jc5
+        values.put(0x7f0a40cb, 0x7f0a40b3); // jc7
+        values.put(0x7f0a4631, 0x7f0a461b); // j=+
+        values.put(0x7f0a463c, 0x7f0a4627); // j_l
+        values.put(0x7f0a475e, 0x7f0a4749); // ket
+        values.put(0x7f0a475f, 0x7f0a474a); // keu
+        values.put(0x7f0a5f7e, 0x7f0a5f84); // n80
+        values.put(0x7f0a68ae, 0x7f0a68b0); // pm6
+        values.put(0x7f0a7afe, 0x7f0a7b01); // si1
+        values.put(0x7f0a7aff, 0x7f0a7b02); // si2
+        values.put(0x7f0a7ddb, 0x7f0a7ddb); // s1c
+        values.put(0x7f0a7ddf, 0x7f0a7dde); // s1f
+        values.put(0x7f0a7ea7, 0x7f0a7eab); // s6v
+        values.put(0x7f0a7eac, 0x7f0a7eb0); // s60
+        values.put(0x7f0a805d, 0x7f0a805e); // tdx
+        values.put(0x7f0a8f46, 0x7f0a8f46); // title
+        values.put(0x7f0a9c4d, 0x7f0a9c2c); // xr6
+        values.put(0x7f0a9cc7, 0x7f0a9cc7); // share_container
+        values.put(0x7f0a9dc6, 0x7f0a9da1); // x1c
+        values.put(0x7f0aa977, 0x7f0aa961); // zu2
+        values.put(0x7f0aaa4f, 0x7f0aaa37); // z0a
+        values.put(0x7f0abd9d, 0x7f0abd91); // 22i
+        values.put(0x7f0acff9, 0x7f0ad00d); // 5zd
+        values.put(0x7f0ad00f, 0x7f0ad01a); // 5zq
+        values.put(0x7f0ad2af, 0x7f0ad2af); // user_avatar
+        values.put(0x7f0ad39e, 0x7f0ad3a6); // 6h0
+        values.put(0x7f0ad428, 0x7f0ad431); // 6ld
+        values.put(0x7f0ad429, 0x7f0ad432); // 6le
+        return Collections.unmodifiableMap(values);
     }
 
     private static Map<Integer, Integer> legacyIds() {
@@ -140,11 +227,13 @@ public final class HostResourceProfile {
         return Collections.unmodifiableMap(values);
     }
 
-    private static Map<Integer, Integer> canonicalIds() {
+    private static Map<Integer, Integer> canonicalIds() { return invert(LEGACY_IDS); }
+
+    private static Map<Integer, Integer> invert(Map<Integer, Integer> source) {
         Map<Integer, Integer> values = new LinkedHashMap<>();
-        for (Map.Entry<Integer, Integer> entry : LEGACY_IDS.entrySet()) {
+        for (Map.Entry<Integer, Integer> entry : source.entrySet()) {
             if (values.put(entry.getValue(), entry.getKey()) != null) {
-                throw new IllegalStateException("Duplicate legacy host resource identifier");
+                throw new IllegalStateException("Duplicate host resource identifier");
             }
         }
         return Collections.unmodifiableMap(values);

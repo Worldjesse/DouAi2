@@ -26,6 +26,8 @@ public final class HostApkProfile {
                 identity.packageName, identity.versionName, identity.versionCode);
         if (profile == HostAdaptation.PROFILE_408
                 && identity.updateVersionCode != HostAdaptation.VERIFIED_UPDATE_VERSION_CODE) return null;
+        if (profile == HostAdaptation.PROFILE_405
+                && identity.updateVersionCode != HostAdaptation.UPDATE_VERSION_CODE_405) return null;
         return profile;
     }
 
