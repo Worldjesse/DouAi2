@@ -148,7 +148,7 @@ public final class ConfigurationCatalog {
         Map<String, Object> defaults = new LinkedHashMap<>();
         defaults.put(LocalOptions.DEBUG_LOGGING, false);
         defaults.put(LocalOptions.PREFER_HIGHEST_QUALITY, true);
-        defaults.put(LocalOptions.PROFILE_BATCH_DOWNLOAD, true);
+        defaults.put(LocalOptions.PROFILE_BATCH_DOWNLOAD, false);
         defaults.put(LocalOptions.HASH_LONG_PRESS_VOICE, false);
         defaults.put("hide_product_cards", false);
         defaults.put("hide_hotspot_rank_cards", false);

@@ -163,7 +163,7 @@ public final class ProfileBatchDownload implements AutoCloseable {
         void refreshVisibility(String nickname) {
             if (nickname != null && !nickname.isEmpty()) this.nickname = nickname;
             LocalOptions current = options;
-            boolean enabled = current != null && current.enabled("profile_batch_download", true);
+            boolean enabled = current != null && current.enabled("profile_batch_download", false);
             if (!enabled) { detach(); return; }
             View view = root.get();
             if (view == null || !view.isAttachedToWindow()) { detach(); return; }
