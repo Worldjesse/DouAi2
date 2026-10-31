@@ -43,7 +43,28 @@ jobs:
         run: python3 -B -m unittest discover -s tools/tests -v
 
       - name: Assemble unsigned minified Release APK
-        run: ./gradlew :app:assembleRelease --console=plain
+        id: release_build
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :app:assembleRelease --console=plain 2>&1 | tee release-build.log
+
+      - name: Publish release build failure
+        if: steps.release_build.outcome == 'failure'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          lines = Path("release-build.log").read_text(errors="replace").splitlines()
+          markers = ("error:", "e: ", "FAILURE:", "What went wrong:", "Execution failed", "Caused by:",
+                     "> Task", "Could not", "Unresolved reference", "cannot find symbol", "警告")
+          picked = [l for l in lines if any(m in l for m in markers)]
+          text = "\n".join(dict.fromkeys(picked + lines[-60:]))[-12000:]
+          text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print(f"::error file=release-build.log,line=1::{text}")
+          PY
+          exit 1
 
       - name: Run unit tests and Release APK contracts
         id: unit_tests
