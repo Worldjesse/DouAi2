@@ -164,12 +164,21 @@ public final class ProfileBatchDownload implements AutoCloseable {
                 button = created;
             }
             if (button.getParent() == parent) return;
-            ViewGroup.LayoutParams raw = parent.generateDefaultLayoutParams();
-            if (raw instanceof ViewGroup.MarginLayoutParams) {
-                ((ViewGroup.MarginLayoutParams) raw).setMargins(dp(12), dp(8), dp(12), dp(8));
+            try {
+                // Let the parent build its own layout params: generateDefaultLayoutParams() is protected.
+                parent.addView(button);
+                ViewGroup.LayoutParams params = button.getLayoutParams();
+                if (params != null) {
+                    params.width = ViewGroup.LayoutParams.WRAP_CONTENT;
+                    params.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+                    if (params instanceof ViewGroup.MarginLayoutParams) {
+                        ((ViewGroup.MarginLayoutParams) params).setMargins(dp(12), dp(8), dp(12), dp(8));
+                    }
+                    button.setLayoutParams(params);
+                }
+            } catch (RuntimeException failure) {
+                DouAiLog.event("profile_batch_download", "inject", "container_rejected", "reason=layout");
             }
-            try { parent.addView(button, raw); }
-            catch (RuntimeException failure) { DouAiLog.event("profile_batch_download", "inject", "container_rejected", "reason=layout"); }
         }
 
         void detach() {
