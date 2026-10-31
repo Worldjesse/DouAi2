@@ -76,7 +76,7 @@ public final class ProfileBatchDownload implements AutoCloseable {
             ProfileBatchDownload installed = hook;
             registration.add(framework, bind, chain -> {
                 Object result = chain.proceed();
-                if (!installed.closed) installed.attach(chain.getThisObject());
+                if (!installed.closed) installed.attach(chain.getThisObject(), nicknameOf(chain));
                 return result;
             });
             try { sink.accept("Feature registered: profile_batch_download"); }
@@ -87,6 +87,18 @@ public final class ProfileBatchDownload implements AutoCloseable {
             registration.fail(failure);
             if (failure instanceof Exception) throw (Exception) failure;
             throw failure;
+        }
+    }
+
+    /** Reads the rendered user's nickname from the hook argument, when the argument list is readable. */
+    private static String nicknameOf(io.github.libxposed.api.XposedInterface.Chain chain) {
+        try {
+            List<Object> args = chain.getArgs();
+            if (args == null || args.isEmpty()) return null;
+            Object value = DownloadActionHook.jsonValue(args.get(0), "nickname");
+            return value == null ? null : String.valueOf(value);
+        } catch (Throwable unavailable) {
+            return null;
         }
     }
 
@@ -110,7 +122,7 @@ public final class ProfileBatchDownload implements AutoCloseable {
         });
     }
 
-    private void attach(Object owner) {
+    private void attach(Object owner, String nickname) {
         if (owner == null) return;
         onMain(() -> {
             if (closed || !registration.isActive()) return;
@@ -123,7 +135,7 @@ public final class ProfileBatchDownload implements AutoCloseable {
                 host = new Host(root);
                 hosts.put(owner, host);
             }
-            host.refreshVisibility();
+            host.refreshVisibility(nickname);
         });
     }
 
@@ -141,17 +153,13 @@ public final class ProfileBatchDownload implements AutoCloseable {
             this.root = new WeakReference<>(root);
         }
 
-        void refreshVisibility() {
+        void refreshVisibility(String nickname) {
             LocalOptions current = options;
             boolean enabled = current != null && current.enabled("profile_batch_download", true);
             if (!enabled) { detach(); return; }
             View view = root.get();
             if (view == null || !view.isAttachedToWindow()) { detach(); return; }
-            if (button != null && button.isAttachedToWindow()) {
-                if (button.getParent() != null) return;
-            }
-            ViewGroup parent = view.getParent() instanceof ViewGroup ? (ViewGroup) view.getParent() : null;
-            if (parent == null) return;
+            if (button != null && button.getParent() != null) return;
             if (button == null) {
                 Button created = new Button(view.getContext());
                 created.setText("批量下载");
@@ -159,25 +167,98 @@ public final class ProfileBatchDownload implements AutoCloseable {
                 created.setTag("douai.profile.batch_download");
                 created.setTextColor(0xFFFFFFFF);
                 created.setBackgroundColor(0xFF20C08A);
-                created.setPadding(dp(18), dp(6), dp(18), dp(6));
+                created.setTextSize(12f);
+                created.setMinHeight(0);
+                created.setMinimumHeight(0);
+                created.setMinimumWidth(0);
+                created.setPadding(dp(14), dp(4), dp(14), dp(4));
                 created.setOnClickListener(v -> toggle());
                 button = created;
             }
-            if (button.getParent() == parent) return;
+            if (placeUnderNickname(view, nickname)) return;
+            placeInHeader(view);
+        }
+
+        /**
+         * Puts the button directly below the nickname, on the avatar's right side. The nickname column is
+         * located by text so the host layout above the statistics row is not disturbed.
+         */
+        private boolean placeUnderNickname(View root, String nickname) {
+            View nicknameView = nickname == null || nickname.isEmpty() ? null : findTextView(root, nickname);
+            if (nicknameView == null || !(nicknameView.getParent() instanceof ViewGroup)) return false;
+            ViewGroup column = (ViewGroup) nicknameView.getParent();
             try {
-                // Let the parent build its own layout params: generateDefaultLayoutParams() is protected.
-                parent.addView(button);
-                ViewGroup.LayoutParams params = button.getLayoutParams();
-                if (params != null) {
-                    params.width = ViewGroup.LayoutParams.WRAP_CONTENT;
-                    params.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-                    if (params instanceof ViewGroup.MarginLayoutParams) {
-                        ((ViewGroup.MarginLayoutParams) params).setMargins(dp(12), dp(8), dp(12), dp(8));
-                    }
-                    button.setLayoutParams(params);
+                ViewGroup.LayoutParams params = copyParams(nicknameView.getLayoutParams());
+                int index = Math.min(column.indexOfChild(nicknameView) + 1, column.getChildCount());
+                column.addView(button, index, params);
+                tuneSize();
+                DouAiLog.event("profile_batch_download", "inject", "below_nickname",
+                        "parent=" + column.getClass().getSimpleName());
+                return button.getParent() == column;
+            } catch (RuntimeException failure) {
+                return false;
+            }
+        }
+
+        /** Fallback for layouts without a readable nickname: insert just above the statistics row. */
+        private void placeInHeader(View view) {
+            ViewGroup parent = view.getParent() instanceof ViewGroup ? (ViewGroup) view.getParent() : null;
+            if (parent == null) return;
+            try {
+                int index = parent.indexOfChild(view);
+                if (index >= 0 && parent instanceof android.widget.LinearLayout
+                        && ((android.widget.LinearLayout) parent).getOrientation()
+                        == android.widget.LinearLayout.VERTICAL) {
+                    parent.addView(button, index, copyParams(view.getLayoutParams()));
+                    tuneSize();
+                    DouAiLog.event("profile_batch_download", "inject", "above_statistics",
+                            "parent=" + parent.getClass().getSimpleName());
+                    return;
                 }
+                parent.addView(button);
+                tuneSize();
             } catch (RuntimeException failure) {
                 DouAiLog.event("profile_batch_download", "inject", "container_rejected", "reason=layout");
+            }
+        }
+
+        /** Returns the first TextView inside the subtree whose text equals the nickname. */
+        private View findTextView(View root, String nickname) {
+            ArrayList<View> queue = new ArrayList<>();
+            queue.add(root);
+            for (int index = 0; index < queue.size() && index < 300; index++) {
+                View view = queue.get(index);
+                if (view instanceof android.widget.TextView) {
+                    CharSequence text = ((android.widget.TextView) view).getText();
+                    if (text != null && nickname.contentEquals(text.toString().trim())) return view;
+                }
+                if (view instanceof ViewGroup) {
+                    ViewGroup group = (ViewGroup) view;
+                    for (int child = 0; child < group.getChildCount(); child++) queue.add(group.getChildAt(child));
+                }
+            }
+            return null;
+        }
+
+        private void tuneSize() {
+            ViewGroup.LayoutParams params = button.getLayoutParams();
+            if (params == null) return;
+            params.width = ViewGroup.LayoutParams.WRAP_CONTENT;
+            params.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+            if (params instanceof ViewGroup.MarginLayoutParams) {
+                ((ViewGroup.MarginLayoutParams) params).setMargins(dp(2), dp(6), dp(12), dp(2));
+            }
+            button.setLayoutParams(params);
+        }
+
+        private ViewGroup.LayoutParams copyParams(ViewGroup.LayoutParams source) {
+            if (source == null) return new ViewGroup.MarginLayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            try {
+                return (ViewGroup.LayoutParams) source.getClass()
+                        .getConstructor(ViewGroup.LayoutParams.class).newInstance(source);
+            } catch (ReflectiveOperationException | RuntimeException unavailable) {
+                return new ViewGroup.MarginLayoutParams(source);
             }
         }
 
@@ -244,7 +325,7 @@ public final class ProfileBatchDownload implements AutoCloseable {
                     Context target = context;
                     if (target != null) {
                         String message = total == 0
-                                ? "未找到可下载作品"
+                                ? "未读取到作品列表：请先在主页下滑浏览几屏，再点批量下载"
                                 : "已加入下载 " + total + " 项" + (errors > 0 ? "，失败 " + errors : "")
                                 + (empty > 0 ? "，跳过 " + empty : "");
                         try { Toast.makeText(target, message, Toast.LENGTH_SHORT).show(); } catch (RuntimeException ignored) { }
@@ -320,7 +401,12 @@ public final class ProfileBatchDownload implements AutoCloseable {
     }
 
     private static Object adapterOf(View view) {
-        if (view == null || !view.getClass().getName().endsWith("RecyclerView")) return null;
+        if (view == null) return null;
+        String name = view.getClass().getName();
+        // Host builds ship RecyclerView subclasses and wrappers, so match the family, not one exact class.
+        boolean listLike = name.contains("RecyclerView") || name.contains("ViewPager2")
+                || name.endsWith("ListView") || name.endsWith("GridView");
+        if (!listLike) return null;
         try {
             Method getAdapter = view.getClass().getMethod("getAdapter");
             Object adapter = getAdapter.invoke(view);
