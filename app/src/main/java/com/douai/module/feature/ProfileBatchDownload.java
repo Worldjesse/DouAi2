@@ -90,13 +90,17 @@ public final class ProfileBatchDownload implements AutoCloseable {
         }
     }
 
-    /** Reads the rendered user's nickname from the hook argument, when the argument list is readable. */
-    private static String nicknameOf(io.github.libxposed.api.XposedInterface.Chain chain) {
+    /** Reads the rendered user's nickname from the intercepted call arguments when they are readable. */
+    private static String nicknameOf(Object chain) {
         try {
-            List<Object> args = chain.getArgs();
-            if (args == null || args.isEmpty()) return null;
-            Object value = DownloadActionHook.jsonValue(args.get(0), "nickname");
-            return value == null ? null : String.valueOf(value);
+            java.lang.reflect.Method args = chain.getClass().getMethod("getArgs");
+            Object value = args.invoke(chain);
+            if (!(value instanceof List)) return null;
+            List<?> list = (List<?>) value;
+            if (list.isEmpty()) return null;
+            Object user = list.get(0);
+            Object nickname = DownloadActionHook.jsonValue(user, "nickname");
+            return nickname == null ? null : String.valueOf(nickname);
         } catch (Throwable unavailable) {
             return null;
         }

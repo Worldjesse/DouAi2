@@ -58,7 +58,7 @@ jobs:
           from pathlib import Path
           lines = Path("release-build.log").read_text(errors="replace").splitlines()
           markers = ("error:", "e: ", "FAILURE:", "What went wrong:", "Execution failed", "Caused by:",
-                     "> Task", "Could not", "Unresolved reference", "cannot find symbol", "警告")
+                     "Could not", "Unresolved reference", "cannot find symbol")
           picked = [l for l in lines if any(m in l for m in markers)]
           text = "\n".join(dict.fromkeys(picked + lines[-60:]))[-12000:]
           text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
