@@ -432,12 +432,45 @@ public final class ProfileBatchDownload implements AutoCloseable {
         return items;
     }
 
+    /** Reads adapters that only expose an index accessor plus a count, without a backing collection. */
+    private static boolean collectIndexed(Object source, List<Object> sink) {
+        Integer count = null;
+        for (String name : new String[]{"getItemCount", "getCount", "size"}) {
+            try {
+                Method method = source.getClass().getMethod(name);
+                Object value = method.invoke(source);
+                if (value instanceof Integer) { count = (Integer) value; break; }
+            } catch (ReflectiveOperationException | RuntimeException ignored) { }
+        }
+        if (count == null || count <= 0) return false;
+        Method accessor = null;
+        for (String name : new String[]{"getItem", "get", "item"}) {
+            try {
+                Method candidate = source.getClass().getMethod(name, int.class);
+                if (candidate.getReturnType() != void.class) { accessor = candidate; break; }
+            } catch (ReflectiveOperationException | RuntimeException ignored) { }
+        }
+        if (accessor == null) return false;
+        int limit = Math.min(count, MAX_ITEMS);
+        try {
+            for (int index = 0; index < limit; index++) {
+                Object item = accessor.invoke(source, index);
+                if (item != null) sink.add(item);
+                if (sink.size() >= MAX_ITEMS) break;
+            }
+        } catch (ReflectiveOperationException | RuntimeException failure) {
+            return false;
+        }
+        return !sink.isEmpty();
+    }
+
     private static void collectItems(Object source, List<Object> sink, int depth) {
         if (source == null || depth > 2 || sink.size() >= MAX_ITEMS) return;
         if (source instanceof Collection<?>) {
             for (Object item : (Collection<?>) source) if (item != null) sink.add(item);
             return;
         }
+        if (collectIndexed(source, sink)) return;
         for (Class<?> type = source.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
             for (Method method : type.getDeclaredMethods()) {
                 if (method.getParameterCount() != 0 || !Collection.class.isAssignableFrom(method.getReturnType())) continue;
