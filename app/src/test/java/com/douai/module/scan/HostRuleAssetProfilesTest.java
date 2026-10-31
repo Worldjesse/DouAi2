@@ -16,7 +16,7 @@ public final class HostRuleAssetProfilesTest {
         HostRuleSet older = rules(HostAdaptation.PROFILE_406);
         HostRuleSet newer = rules(HostAdaptation.PROFILE_408);
         HostRuleSet build405 = rules(HostAdaptation.PROFILE_405);
-        assertEquals("99f7257bb5f1e533a9b99565b019d5ab978c9061bb77002db13ee2dd0d25e36f",
+        assertEquals("16a3f626c942f94e819c215ff69e5d810ff76ce9ffbbd4b459c034203e931ab3",
                 older.getFingerprint());
         assertEquals(HostAdaptation.PROFILE_406.fingerprint, older.getFingerprint());
         assertEquals(HostAdaptation.PROFILE_408.fingerprint, newer.getFingerprint());
@@ -24,8 +24,8 @@ public final class HostRuleAssetProfilesTest {
         assertNotEquals(older.getFingerprint(), newer.getFingerprint());
         assertNotEquals(older.getFingerprint(), build405.getFingerprint());
         assertNotEquals(newer.getFingerprint(), build405.getFingerprint());
-        assertEquals(231, older.getRules().size());
-        assertEquals(231, build405.getRules().size());
+        assertEquals(233, older.getRules().size());
+        assertEquals(233, build405.getRules().size());
         Set<String> olderIds = ids(older), newerIds = ids(newer), build405Ids = ids(build405);
         assertEquals(olderIds, newerIds);
         assertEquals(olderIds, build405Ids);

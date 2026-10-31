@@ -237,3 +237,5 @@ comment_reply_publish_root	comment_reply	METHOD	LX/0vJF;		LJ	(Lcom/ss/android/ug
 comment_reply_publish_direct	comment_reply	METHOD	LX/0vJF;		LJFF	(Lcom/ss/android/ugc/aweme/comment/model/Comment;LX/0vUl;)Ljava/lang/String;								
 profile_post_component_model	method_scan	method	Lcom/ss/android/ugc/aweme/profile/tab2/post_tab/component/basic/AbsPostTabComponent;		LJJLIIIJLLLLLLLZ	()Lcom/ss/android/ugc/aweme/profile/tab/model/PostAwemeModelV2;								
 profile_post_component_list	method_scan	method	Lcom/ss/android/ugc/aweme/profile/tab2/post_tab/component/basic/AbsPostTabComponent;		LJJLI	()Landroidx/recyclerview/widget/RecyclerView;								
+profile_post_model_append	method_scan	method	Lcom/ss/android/ugc/aweme/profile/tab/model/AbsPostAwemeModel;		LJII	(Lcom/ss/android/ugc/aweme/feed/model/Aweme;Ljava/lang/String;)V								
+profile_post_model_merge	method_scan	method	Lcom/ss/android/ugc/aweme/profile/tab/model/AbsPostAwemeModel;		LJIILJJIL	(Ljava/lang/String;Ljava/util/Collection;)V								

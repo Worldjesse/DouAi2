@@ -49,6 +49,9 @@ public final class ProfileBatchDownload implements AutoCloseable {
     private final Map<Object, Header> headers = new WeakHashMap<>();
     private final List<Object> models = new ArrayList<>();
     private WeakReference<View> listView = new WeakReference<>(null);
+    private final List<Object> awemes = new ArrayList<>();
+    private final Set<String> awemeIds = new LinkedHashSet<>();
+    private int appendHits;
     private final AtomicBoolean running = new AtomicBoolean();
     private volatile LocalOptions options;
     private volatile boolean closed;
@@ -69,6 +72,8 @@ public final class ProfileBatchDownload implements AutoCloseable {
             Method header = HostTargets.method(report, "adv_profile_root", loader);
             Method modelGetter = HostTargets.method(report, "profile_post_component_model", loader);
             Method listGetter = HostTargets.method(report, "profile_post_component_list", loader);
+            Method append = HostTargets.method(report, "profile_post_model_append", loader);
+            Method mergeRule = HostTargets.method(report, "profile_post_model_merge", loader);
             if (!View.class.isAssignableFrom(header.getReturnType()) || header.getParameterCount() != 0) {
                 throw new IllegalStateException("Profile header relationship changed");
             }
@@ -89,6 +94,16 @@ public final class ProfileBatchDownload implements AutoCloseable {
                 if (!installed.closed && result instanceof View) {
                     installed.listView = new WeakReference<>((View) result);
                 }
+                return result;
+            });
+            registration.add(framework, append, chain -> {
+                Object result = chain.proceed();
+                if (!installed.closed) installed.keepArgument(chain, 0);
+                return result;
+            });
+            registration.add(framework, mergeRule, chain -> {
+                Object result = chain.proceed();
+                if (!installed.closed) installed.keepArgument(chain, 1);
                 return result;
             });
             try { sink.accept("Feature registered: profile_batch_download"); }
@@ -123,6 +138,40 @@ public final class ProfileBatchDownload implements AutoCloseable {
         synchronized (models) { models.clear(); }
     }
 
+    /** Captures works straight from the host append arguments; no field or adapter reading needed. */
+    private void keepArgument(Object chain, int index) {
+        try {
+            java.lang.reflect.Method argsMethod = chain.getClass().getMethod("getArgs");
+            Object value = argsMethod.invoke(chain);
+            if (!(value instanceof List)) return;
+            List<?> args = (List<?>) value;
+            if (index >= args.size()) return;
+            Object argument = args.get(index);
+            if (argument instanceof Collection) {
+                for (Object item : (Collection<?>) argument) keepAweme(item);
+            } else {
+                keepAweme(argument);
+            }
+        } catch (Throwable unavailable) {
+            // Argument access is best effort; failure only means fewer captured items.
+        }
+    }
+
+    private void keepAweme(Object candidate) {
+        if (candidate == null) return;
+        String id = identity(candidate);
+        if (id == null) return;
+        synchronized (awemes) {
+            appendHits++;
+            if (!awemeIds.add(id)) return;
+            if (awemes.size() >= MAX_ITEMS) return;
+            awemes.add(candidate);
+        }
+    }
+
+    private int capturedCount() {
+        synchronized (awemes) { return awemes.size(); }
+    }
     private void keepModel(Object model) {
         if (model == null) return;
         synchronized (models) {
@@ -250,7 +299,7 @@ public final class ProfileBatchDownload implements AutoCloseable {
         try {
             List<Object> items = collect();
             DouAiLog.event("profile_batch_download", "collect", items.isEmpty() ? "no_items" : "items_found",
-                    "count=" + items.size() + ";models=" + modelCount());
+                    "count=" + items.size() + ";models=" + modelCount() + ";captured=" + capturedCount() + ";append_hits=" + appendHits);
             for (int index = 0; index < items.size(); index++) {
                 if (!running.get() || closed) break;
                 List<DownloadActionHook.MediaAsset> assets =
@@ -278,7 +327,7 @@ public final class ProfileBatchDownload implements AutoCloseable {
                 for (Header header : new ArrayList<>(headers.values())) header.setLabel("批量下载");
                 try {
                     Toast.makeText(context, total == 0
-                            ? "未读取到作品列表：请先在主页下滑浏览几屏，再点批量下载"
+                            ? "未读取到作品（追加回调 " + appendHits + " 次）：请先在主页下滑浏览几屏再试"
                             : "已加入下载 " + total + " 项" + (errors > 0 ? "，失败 " + errors : "")
                             + (empty > 0 ? "，跳过 " + empty : ""), Toast.LENGTH_SHORT).show();
                 } catch (RuntimeException ignored) { }
@@ -303,6 +352,7 @@ public final class ProfileBatchDownload implements AutoCloseable {
         for (int round = 0; round <= MAX_SCROLLS && stable < STABLE_ROUNDS; round++) {
             if (!running.get() || closed) break;
             int before = ordered.size();
+            mergeCaptured(ordered, seen);
             mergeModels(ordered, seen);
             mergeAdapter(ordered, seen);
             if (ordered.size() >= MAX_ITEMS) break;
@@ -313,6 +363,11 @@ public final class ProfileBatchDownload implements AutoCloseable {
         return ordered.size() > MAX_ITEMS ? new ArrayList<>(ordered.subList(0, MAX_ITEMS)) : ordered;
     }
 
+    private void mergeCaptured(List<Object> ordered, Set<String> seen) {
+        ArrayList<Object> snapshot;
+        synchronized (awemes) { snapshot = new ArrayList<>(awemes); }
+        mergeAll(snapshot, ordered, seen);
+    }
     private void mergeModels(List<Object> ordered, Set<String> seen) {
         ArrayList<Object> snapshot = new ArrayList<>();
         synchronized (models) {
