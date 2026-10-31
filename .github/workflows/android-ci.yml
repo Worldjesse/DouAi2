@@ -68,9 +68,29 @@ jobs:
 
       - name: Run unit tests and Release APK contracts
         id: unit_tests
+        continue-on-error: true
+        shell: bash
         env:
           DOUAI_VERIFY_RELEASE_APK: ${{ github.workspace }}/app/build/outputs/apk/release/app-release-unsigned.apk
-        run: ./gradlew :app:testDebugUnitTest --console=plain
+        run: |
+          set -o pipefail
+          ./gradlew :app:testDebugUnitTest --console=plain 2>&1 | tee unit-tests.log
+
+      - name: Publish unit test failure
+        if: steps.unit_tests.outcome == 'failure'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          lines = Path("unit-tests.log").read_text(errors="replace").splitlines()
+          markers = ("FAILED", "FAILURE:", "What went wrong:", "Execution failed", "Caused by:",
+                     "tests completed", "AssertionError", "Exception", "error:")
+          picked = [l for l in lines if any(m in l for m in markers)]
+          text = "\n".join(dict.fromkeys(picked + lines[-60:]))[-12000:]
+          text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print(f"::error file=unit-tests.log,line=1::{text}")
+          PY
+          exit 1
 
       - name: Report all host contracts
         if: always() && steps.unit_tests.outcome != 'skipped'
