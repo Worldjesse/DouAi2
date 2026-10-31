@@ -728,6 +728,11 @@ public final class ModuleSettingsScreen {
                     if (value) master.setChecked(true);
                     repository.putBoolean(LocalOptions.PREFER_HIGHEST_QUALITY, value);
                 });
+        addSwitch("主页批量下载", "在作者主页显示批量下载按钮；读取已加载作品并自动翻页，按当前画质与命名设置逐条保存",
+                repository.getBoolean(LocalOptions.PROFILE_BATCH_DOWNLOAD, true), true, value -> {
+                    if (value) master.setChecked(true);
+                    repository.putBoolean(LocalOptions.PROFILE_BATCH_DOWNLOAD, value);
+                });
         addSwitch("直接保存全部媒体", "",
                 repository.getBoolean(LocalOptions.OFFICIAL_DOWNLOAD_DIRECT, false), true, value -> {
                     if (value) master.setChecked(true);

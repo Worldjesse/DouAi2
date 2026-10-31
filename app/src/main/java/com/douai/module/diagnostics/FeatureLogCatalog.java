@@ -41,6 +41,8 @@ public final class FeatureLogCatalog {
         add(entries, "gesture", "九宫格手势及工具栏", "FeedGestureToolsHook", Feature.GESTURE, "feature.long_press_action.installed", "gesture_enabled");
         add(entries, "prevent_message_recall", "消息防撤回", "NativeMessagingHooks", Feature.MESSAGE_RECALL, "feature.prevent_message_recall.installed", "prevent_message_recall");
         add(entries, "spoof_profile", "本地个人资料数量", "ProfileSpoofHook", Feature.SPOOF, "feature.spoof_profile.installed", "spoof_profile");
+        add(entries, "profile_batch_download", "主页批量下载", "ProfileBatchDownload", Feature.DOWNLOAD,
+                "feature.profile_batch_download.installed", "profile_batch_download");
         add(entries, "follow_lists", "好友关注粉丝及群成员列表", "NativeFollowLists", Feature.FOLLOW_LISTS, "follow_lists_installed", "always");
         add(entries, "automation_dispatch", "自动化调度提示及历史", "AutomationDispatcher", Feature.AUTOMATION_DISPATCH, "automation_dispatch_installed", "automation_dispatch_enabled");
         for (String key : new String[]{"remove_splash_ads", "remove_update_dialog", "remove_teen_dialog", "hide_video_black_edges", "hide_camera_plus", "disable_double_tap_like", "prevent_skip_hidden", "prevent_insert_video", "block_long_press_speed"}) {

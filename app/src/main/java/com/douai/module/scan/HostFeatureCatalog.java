@@ -13,6 +13,8 @@ public final class HostFeatureCatalog {
                     "main_feed_response_model", "aweme_feed_attributes", "aweme_statistics_digg_count"),
             feature("download", "原生下载扩展", "download_hook_installed",
                     "download_native_module_name", "download_native_view_factory", "download_native_click"),
+            feature("profile_batch_download", "主页批量下载", "feature.profile_batch_download.installed",
+                    "adv_profile_render", "adv_profile_root"),
             feature("top_tabs", "顶部标签", "top_tab_hook_installed",
                     "home_tab_list_provider", "home_tab_model"),
             feature("feed_ui_video", "视频组件隐藏", "feed_ui_video_hook_installed",

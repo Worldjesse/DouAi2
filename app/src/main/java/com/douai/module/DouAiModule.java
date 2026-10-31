@@ -41,6 +41,7 @@ import com.douai.module.config.ExtendedSettings;
 import com.douai.module.config.LocalOptions;
 import com.douai.module.feature.HostBehaviorHooks;
 import com.douai.module.feature.PlaybackBehaviorHooks;
+import com.douai.module.feature.ProfileBatchDownload;
 import com.douai.module.feature.ProfileSpoofHook;
 import com.douai.module.feature.NativeMessagingHooks;
 import com.douai.module.feature.NativeFollowLists;
@@ -114,6 +115,7 @@ public final class DouAiModule extends XposedModule {
     private volatile HostBehaviorHooks hostBehaviorHooks;
     private volatile PlaybackBehaviorHooks playbackBehaviorHooks;
     private volatile ProfileSpoofHook profileSpoofHook;
+    private volatile ProfileBatchDownload profileBatchDownload;
     private volatile NativeMessagingHooks nativeMessagingHooks;
     private volatile NativeFollowLists nativeFollowLists;
     private volatile AutomationDispatcher automationDispatcher;
@@ -693,6 +695,9 @@ public final class DouAiModule extends XposedModule {
             if (hostBehaviorHooks != null && (initial || changes.affects(Feature.HOST_BEHAVIOR))) hostBehaviorHooks.setOptions(options);
             if (playbackBehaviorHooks != null && playbackChanged) playbackBehaviorHooks.setOptions(options);
             if (profileSpoofHook != null && spoofChanged) profileSpoofHook.setOptions(options);
+            if (profileBatchDownload != null && (initial || changes.affects(Feature.DOWNLOAD))) {
+                profileBatchDownload.setOptions(options);
+            }
             if (nativeMessagingHooks != null && (replyChanged || messageRecallChanged)) nativeMessagingHooks.setOptions(options);
             if (recallHighlightHook != null && messageRecallChanged) recallHighlightHook.setOptions(options);
             if (feedGestureToolsHook != null && gestureChanged) feedGestureToolsHook.setOptions(options);
@@ -1083,6 +1088,15 @@ public final class DouAiModule extends XposedModule {
                         targetContext, localOptions, message -> moduleLog(3, TAG, message));
             } catch (Throwable failure) { moduleLog(6, TAG, "Profile display hook failed", failure); }
         }
+        if (profileBatchDownload == null) {
+            try {
+                profileBatchDownload = ProfileBatchDownload.install(hookFramework(), hostScanReport,
+                        hostClassLoader, localOptions, message -> moduleLog(3, TAG, message));
+            } catch (Throwable failure) {
+                DouAiLog.failure("profile_batch_download", "installation", failure);
+                moduleLog(6, TAG, "Profile batch download hook failed", failure);
+            }
+        }
         if (nativeMessagingHooks == null) {
             try {
                 nativeMessagingHooks = NativeMessagingHooks.install(hookFramework(), hostScanReport, hostClassLoader,
@@ -1243,6 +1257,8 @@ public final class DouAiModule extends XposedModule {
                     autoPlayHook != null && autoPlayHook.supports(key));
         }
         snapshot.putBoolean("feature.spoof_profile.installed", profileSpoofHook != null && profileSpoofHook.isActive());
+        snapshot.putBoolean("feature.profile_batch_download.installed",
+                profileBatchDownload != null && profileBatchDownload.isActive());
         snapshot.putBoolean("feature.prevent_message_recall.installed", nativeMessagingHooks != null
                 && nativeMessagingHooks.supports("prevent_message_recall"));
         snapshot.putBoolean("feature.native_auto_reply.installed", nativeMessagingHooks != null

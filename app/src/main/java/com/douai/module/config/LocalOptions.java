@@ -13,6 +13,7 @@ public final class LocalOptions {
     public static final String DOWNLOAD_SAVE_TREE = "download_directory_uri";
     public static final String OFFICIAL_DOWNLOAD_DIRECT = "download_official_direct";
     public static final String PREFER_HIGHEST_QUALITY = "download_prefer_highest_quality";
+    public static final String PROFILE_BATCH_DOWNLOAD = "profile_batch_download";
     public static final String REPLY_VOICE = "reply_voice";
     public static final String REPLY_RECOGNIZE_IMAGES = "reply_recognize_images";
     public static final String REPLY_RECOGNIZE_VIDEO = "reply_recognize_video";

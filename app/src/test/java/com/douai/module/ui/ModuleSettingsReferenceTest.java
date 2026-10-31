@@ -87,7 +87,7 @@ public final class ModuleSettingsReferenceTest {
                 {"FILTER", "过滤总开关", "整页筛空时保留原列表", "去广告开关", "去直播开关", "去推荐卡片开关",
                         "去推荐商家开关", "去商品/购物卡片开关", "去热点榜单卡开关", "去小游戏开关", "去长视频开关", "最长时长（秒）",
                         "最低点赞数（0不限制）", "去图集开关", "屏蔽关键词", "过滤短视频", "最短时长（秒）"},
-                {"DOWNLOAD", "启用下载菜单", "下载方式", "保存位置", "下载任务", "平台最高画质", "直接保存全部媒体", "自定义文件名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
+                {"DOWNLOAD", "启用下载菜单", "下载方式", "保存位置", "下载任务", "平台最高画质", "主页批量下载", "直接保存全部媒体", "自定义文件名", "文件名模板", "去除下载限制", "无水印下载图集或者视频"},
                 {"AUTOPLAY", "自动滑动到下一个视频", "自动倍速播放", "倍速数值", "打开评论时,不滑动视频",
                         "滑动智能判断上下", "互动自动化"},
                 {"AUTO_REPLY", "开启自动回复", "回复模式", "回复内容", "素材识别", "语音回复", "接收私聊", "私聊范围", "接收群聊", "群聊范围",
@@ -246,8 +246,15 @@ public final class ModuleSettingsReferenceTest {
                         && "自动文本转语音".contentEquals(control.getContentDescription());
                 boolean highestQuality = "DOWNLOAD".equals(category)
                         && "平台最高画质".contentEquals(control.getContentDescription());
+                boolean batchDownload = "DOWNLOAD".equals(category)
+                        && "主页批量下载".contentEquals(control.getContentDescription());
                 assertEquals(category + ": " + control.getContentDescription(),
-                        voiceComment || globalHashVoice || privateMessageVoice || highestQuality ? 2 : 1, visibleLabels);
+                        voiceComment || globalHashVoice || privateMessageVoice || highestQuality || batchDownload
+                                ? 2 : 1, visibleLabels);
+                if (batchDownload) {
+                    assertTrue(containsText(labels, "在作者主页显示批量下载按钮"));
+                    assertTrue(containsText(labels, "自动翻页"));
+                }
                 if (highestQuality) {
                     assertTrue(containsText(labels, "优先保存作品模型提供的最高分辨率档位"));
                     assertTrue(containsText(labels, "关闭后使用当前播放源"));
