@@ -83,10 +83,10 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           lines = Path("unit-tests.log").read_text(errors="replace").splitlines()
-          markers = ("FAILED", "FAILURE:", "What went wrong:", "Execution failed", "Caused by:",
-                     "tests completed", "AssertionError", "Exception", "error:")
-          picked = [l for l in lines if any(m in l for m in markers)]
-          text = "\n".join(dict.fromkeys(picked + lines[-60:]))[-12000:]
+          markers = ("FAILED", "AssertionError", "expected:", "There were failing tests",
+                     "tests completed", "Execution failed for task")
+          picked = [l for l in lines if any(m in l for m in markers) and not l.startswith("w: ")]
+          text = "\n".join(dict.fromkeys(picked))[-3500:]
           text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
           print(f"::error file=unit-tests.log,line=1::{text}")
           PY
