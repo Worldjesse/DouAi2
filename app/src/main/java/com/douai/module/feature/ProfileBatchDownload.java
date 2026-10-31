@@ -152,12 +152,16 @@ public final class ProfileBatchDownload implements AutoCloseable {
     private final class Host {
         private final WeakReference<View> root;
         private Button button;
+        private String nickname;
 
         Host(View root) {
             this.root = new WeakReference<>(root);
         }
 
+        void refreshVisibility() { refreshVisibility(nickname); }
+
         void refreshVisibility(String nickname) {
+            if (nickname != null && !nickname.isEmpty()) this.nickname = nickname;
             LocalOptions current = options;
             boolean enabled = current != null && current.enabled("profile_batch_download", true);
             if (!enabled) { detach(); return; }
