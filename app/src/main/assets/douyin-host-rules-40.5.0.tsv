@@ -235,3 +235,5 @@ comment_reply_task_error	comment_reply	METHOD	Lbolts/Task;		LJIIL	()Ljava/lang/E
 comment_reply_task_cancelled	comment_reply	METHOD	Lbolts/Task;		isCancelled	()Z								
 comment_reply_publish_root	comment_reply	METHOD	LX/0vJF;		LJ	(Lcom/ss/android/ugc/aweme/comment/model/Comment;LX/0vUl;)Ljava/lang/String;								
 comment_reply_publish_direct	comment_reply	METHOD	LX/0vJF;		LJFF	(Lcom/ss/android/ugc/aweme/comment/model/Comment;LX/0vUl;)Ljava/lang/String;								
+profile_post_component_model	method_scan	method	Lcom/ss/android/ugc/aweme/profile/tab2/post_tab/component/basic/AbsPostTabComponent;		LJJLIIIJLLLLLLLZ	()Lcom/ss/android/ugc/aweme/profile/tab/model/PostAwemeModelV2;								
+profile_post_component_list	method_scan	method	Lcom/ss/android/ugc/aweme/profile/tab2/post_tab/component/basic/AbsPostTabComponent;		LJJLI	()Landroidx/recyclerview/widget/RecyclerView;								

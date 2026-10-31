@@ -236,3 +236,5 @@ comment_reply_task_error	comment_reply	method	Lbolts/Task;		LJIIL	()Ljava/lang/E
 comment_reply_task_cancelled	comment_reply	method	Lbolts/Task;		isCancelled	()Z								
 comment_reply_publish_root	comment_reply	method	LX/13Ju;		LJ	(Lcom/ss/android/ugc/aweme/comment/model/Comment;LX/13Zi;)Ljava/lang/String;								
 comment_reply_publish_direct	comment_reply	method	LX/13Ju;		LJFF	(Lcom/ss/android/ugc/aweme/comment/model/Comment;LX/13Zi;)Ljava/lang/String;								
+profile_post_component_model	method_scan	method	Lcom/ss/android/ugc/aweme/profile/tab2/post_tab/component/basic/AbsPostTabComponent;		LJJLIIIJLLLLLLLZ	()Lcom/ss/android/ugc/aweme/profile/tab/model/PostAwemeModelV2;								
+profile_post_component_list	method_scan	method	Lcom/ss/android/ugc/aweme/profile/tab2/post_tab/component/basic/AbsPostTabComponent;		LJJLI	()Landroidx/recyclerview/widget/RecyclerView;								

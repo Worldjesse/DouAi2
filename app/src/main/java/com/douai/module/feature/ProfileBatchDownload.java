@@ -19,8 +19,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -31,31 +31,32 @@ import java.util.function.Consumer;
 /**
  * Batch download of one author's works from the profile page.
  *
- * <p>The button is injected into the existing verified profile header, so no new host rule is
- * required. Work items are read from the profile list adapter by reflection and the list is scrolled
- * until it stops producing new items. Only read-only access to the host list is performed; every
- * download goes through the same verified {@link MediaStoreDownloader} path as single-work saves.
+ * <p>The work list is taken from the host post-tab model ({@code PostAwemeModelV2}) captured through a
+ * verified hook, so enumeration no longer depends on the adapter exposing its items. The RecyclerView
+ * instance is captured through the same component, which lets the batch page the list by scrolling the
+ * host's own widget. Downloads reuse the verified single-work path, so quality and naming settings apply.
  */
 public final class ProfileBatchDownload implements AutoCloseable {
-    /** Items are capped so a very large profile cannot queue an unbounded download burst. */
     static final int MAX_ITEMS = 300;
     static final int MAX_SCROLLS = 40;
     static final int STABLE_ROUNDS = 3;
-    static final long SCROLL_DELAY_MS = 600L;
+    static final long SCROLL_DELAY_MS = 700L;
     static final long ITEM_DELAY_MS = 250L;
 
     private final BehaviorHookGroup registration;
-    private final Method rootView;
+    private final Method headerRoot;
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final Map<Object, Host> hosts = new WeakHashMap<>();
+    private final Map<Object, Header> headers = new WeakHashMap<>();
+    private final List<Object> models = new ArrayList<>();
+    private WeakReference<View> listView = new WeakReference<>(null);
     private final AtomicBoolean running = new AtomicBoolean();
     private volatile LocalOptions options;
     private volatile boolean closed;
 
-    private ProfileBatchDownload(LocalOptions options, BehaviorHookGroup registration, Method rootView) {
+    private ProfileBatchDownload(LocalOptions options, BehaviorHookGroup registration, Method headerRoot) {
         this.options = options;
         this.registration = registration;
-        this.rootView = rootView;
+        this.headerRoot = headerRoot;
     }
 
     public static ProfileBatchDownload install(XposedInterface framework, HostScanReport report,
@@ -65,18 +66,29 @@ public final class ProfileBatchDownload implements AutoCloseable {
         BehaviorHookGroup registration = new BehaviorHookGroup("profile_batch_download", sink);
         ProfileBatchDownload hook = null;
         try {
-            Method bind = HostTargets.method(report, "adv_profile_render", loader);
-            Method root = HostTargets.method(report, "adv_profile_root", loader);
-            if (!bind.getDeclaringClass().equals(root.getDeclaringClass())
-                    || !View.class.isAssignableFrom(root.getReturnType())
-                    || root.getParameterCount() != 0) {
+            Method header = HostTargets.method(report, "adv_profile_root", loader);
+            Method modelGetter = HostTargets.method(report, "profile_post_component_model", loader);
+            Method listGetter = HostTargets.method(report, "profile_post_component_list", loader);
+            if (!View.class.isAssignableFrom(header.getReturnType()) || header.getParameterCount() != 0) {
                 throw new IllegalStateException("Profile header relationship changed");
             }
-            hook = new ProfileBatchDownload(options, registration, root);
+            hook = new ProfileBatchDownload(options, registration, header);
             ProfileBatchDownload installed = hook;
-            registration.add(framework, bind, chain -> {
+            registration.add(framework, header, chain -> {
                 Object result = chain.proceed();
-                if (!installed.closed) installed.attach(chain.getThisObject(), nicknameOf(chain));
+                if (!installed.closed) installed.attach(chain.getThisObject());
+                return result;
+            });
+            registration.add(framework, modelGetter, chain -> {
+                Object result = chain.proceed();
+                if (!installed.closed) installed.keepModel(result);
+                return result;
+            });
+            registration.add(framework, listGetter, chain -> {
+                Object result = chain.proceed();
+                if (!installed.closed && result instanceof View) {
+                    installed.listView = new WeakReference<>((View) result);
+                }
                 return result;
             });
             try { sink.accept("Feature registered: profile_batch_download"); }
@@ -90,29 +102,13 @@ public final class ProfileBatchDownload implements AutoCloseable {
         }
     }
 
-    /** Reads the rendered user's nickname from the intercepted call arguments when they are readable. */
-    private static String nicknameOf(Object chain) {
-        try {
-            java.lang.reflect.Method args = chain.getClass().getMethod("getArgs");
-            Object value = args.invoke(chain);
-            if (!(value instanceof List)) return null;
-            List<?> list = (List<?>) value;
-            if (list.isEmpty()) return null;
-            Object user = list.get(0);
-            Object nickname = DownloadActionHook.jsonValue(user, "nickname");
-            return nickname == null ? null : String.valueOf(nickname);
-        } catch (Throwable unavailable) {
-            return null;
-        }
-    }
-
     public boolean isActive() { return !closed && registration.isActive(); }
 
     public void setOptions(LocalOptions options) {
         if (closed) return;
         this.options = options;
         onMain(() -> {
-            for (Host host : new ArrayList<>(hosts.values())) host.refreshVisibility();
+            for (Header header : new ArrayList<>(headers.values())) header.refresh();
         });
     }
 
@@ -121,25 +117,42 @@ public final class ProfileBatchDownload implements AutoCloseable {
         closed = true;
         registration.close();
         onMain(() -> {
-            for (Host host : new ArrayList<>(hosts.values())) host.detach();
-            hosts.clear();
+            for (Header header : new ArrayList<>(headers.values())) header.detach();
+            headers.clear();
         });
+        synchronized (models) { models.clear(); }
     }
 
-    private void attach(Object owner, String nickname) {
+    private void keepModel(Object model) {
+        if (model == null) return;
+        synchronized (models) {
+            for (Object known : models) if (known == model) return;
+            models.add(new WeakHolder(model));
+            if (models.size() > 8) models.remove(0);
+        }
+    }
+
+    /** Keeps a weak reference so repeated renders cannot pin host models forever. */
+    private static final class WeakHolder {
+        private final WeakReference<Object> reference;
+        WeakHolder(Object value) { reference = new WeakReference<>(value); }
+        Object get() { return reference.get(); }
+    }
+
+    private void attach(Object owner) {
         if (owner == null) return;
         onMain(() -> {
             if (closed || !registration.isActive()) return;
-            Host host = hosts.get(owner);
-            if (host == null) {
+            Header header = headers.get(owner);
+            if (header == null) {
                 View root;
-                try { root = (View) rootView.invoke(owner); }
+                try { root = (View) headerRoot.invoke(owner); }
                 catch (ReflectiveOperationException | RuntimeException failure) { return; }
                 if (root == null || !root.isAttachedToWindow()) return;
-                host = new Host(root);
-                hosts.put(owner, host);
+                header = new Header(root);
+                headers.put(owner, header);
             }
-            host.refreshVisibility(nickname);
+            header.refresh();
         });
     }
 
@@ -148,26 +161,19 @@ public final class ProfileBatchDownload implements AutoCloseable {
         else main.post(action);
     }
 
-    /** One injected button per observed profile header. */
-    private final class Host {
-        private final WeakReference<View> root;
+    private final class Header {
+        private final WeakReference<View> stats;
         private Button button;
-        private String nickname;
+        private ViewGroup host;
 
-        Host(View root) {
-            this.root = new WeakReference<>(root);
-        }
+        Header(View stats) { this.stats = new WeakReference<>(stats); }
 
-        void refreshVisibility() { refreshVisibility(nickname); }
-
-        void refreshVisibility(String nickname) {
-            if (nickname != null && !nickname.isEmpty()) this.nickname = nickname;
+        void refresh() {
             LocalOptions current = options;
-            boolean enabled = current != null && current.enabled("profile_batch_download", false);
-            if (!enabled) { detach(); return; }
-            View view = root.get();
+            if (current == null || !current.enabled("profile_batch_download", false)) { detach(); return; }
+            View view = stats.get();
             if (view == null || !view.isAttachedToWindow()) { detach(); return; }
-            if (button != null && button.getParent() != null) return;
+            if (button != null && button.isAttachedToWindow()) { reposition(); return; }
             if (button == null) {
                 Button created = new Button(view.getContext());
                 created.setText("批量下载");
@@ -179,207 +185,173 @@ public final class ProfileBatchDownload implements AutoCloseable {
                 created.setMinHeight(0);
                 created.setMinimumHeight(0);
                 created.setMinimumWidth(0);
-                created.setPadding(dp(14), dp(4), dp(14), dp(4));
+                created.setPadding(dp(view, 14), dp(view, 3), dp(view, 14), dp(view, 3));
                 created.setOnClickListener(v -> toggle());
                 button = created;
             }
-            if (placeUnderNickname(view, nickname)) return;
-            placeInHeader(view);
-        }
-
-        /**
-         * Puts the button directly below the nickname, on the avatar's right side. The nickname column is
-         * located by text so the host layout above the statistics row is not disturbed.
-         */
-        private boolean placeUnderNickname(View root, String nickname) {
-            View nicknameView = nickname == null || nickname.isEmpty() ? null : findTextView(root, nickname);
-            if (nicknameView == null || !(nicknameView.getParent() instanceof ViewGroup)) return false;
-            ViewGroup column = (ViewGroup) nicknameView.getParent();
+            // Draw above the statistics row inside the header, so the host layout is never reflowed.
+            host = view.getParent() instanceof ViewGroup ? (ViewGroup) view.getParent() : null;
+            if (host == null) return;
             try {
-                ViewGroup.LayoutParams params = copyParams(nicknameView.getLayoutParams());
-                int index = Math.min(column.indexOfChild(nicknameView) + 1, column.getChildCount());
-                column.addView(button, index, params);
-                tuneSize();
-                DouAiLog.event("profile_batch_download", "inject", "below_nickname",
-                        "parent=" + column.getClass().getSimpleName());
-                return button.getParent() == column;
+                if (button.getParent() == null) host.getOverlay().add(button);
+                button.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+                reposition();
+                DouAiLog.event("profile_batch_download", "inject", "overlay_above_statistics",
+                        "host=" + host.getClass().getSimpleName());
             } catch (RuntimeException failure) {
-                return false;
+                DouAiLog.event("profile_batch_download", "inject", "overlay_rejected", "reason=runtime");
             }
         }
 
-        /** Fallback for layouts without a readable nickname: insert just above the statistics row. */
-        private void placeInHeader(View view) {
-            ViewGroup parent = view.getParent() instanceof ViewGroup ? (ViewGroup) view.getParent() : null;
-            if (parent == null) return;
-            try {
-                int index = parent.indexOfChild(view);
-                if (index >= 0 && parent instanceof android.widget.LinearLayout
-                        && ((android.widget.LinearLayout) parent).getOrientation()
-                        == android.widget.LinearLayout.VERTICAL) {
-                    parent.addView(button, index, copyParams(view.getLayoutParams()));
-                    tuneSize();
-                    DouAiLog.event("profile_batch_download", "inject", "above_statistics",
-                            "parent=" + parent.getClass().getSimpleName());
-                    return;
-                }
-                parent.addView(button);
-                tuneSize();
-            } catch (RuntimeException failure) {
-                DouAiLog.event("profile_batch_download", "inject", "container_rejected", "reason=layout");
-            }
-        }
-
-        /** Returns the first TextView inside the subtree whose text equals the nickname. */
-        private View findTextView(View root, String nickname) {
-            ArrayList<View> queue = new ArrayList<>();
-            queue.add(root);
-            for (int index = 0; index < queue.size() && index < 300; index++) {
-                View view = queue.get(index);
-                if (view instanceof android.widget.TextView) {
-                    CharSequence text = ((android.widget.TextView) view).getText();
-                    if (text != null && nickname.contentEquals(text.toString().trim())) return view;
-                }
-                if (view instanceof ViewGroup) {
-                    ViewGroup group = (ViewGroup) view;
-                    for (int child = 0; child < group.getChildCount(); child++) queue.add(group.getChildAt(child));
-                }
-            }
-            return null;
-        }
-
-        private void tuneSize() {
-            ViewGroup.LayoutParams params = button.getLayoutParams();
-            if (params == null) return;
-            params.width = ViewGroup.LayoutParams.WRAP_CONTENT;
-            params.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-            if (params instanceof ViewGroup.MarginLayoutParams) {
-                ((ViewGroup.MarginLayoutParams) params).setMargins(dp(2), dp(6), dp(12), dp(2));
-            }
-            button.setLayoutParams(params);
-        }
-
-        private ViewGroup.LayoutParams copyParams(ViewGroup.LayoutParams source) {
-            if (source == null) return new ViewGroup.MarginLayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            try {
-                return (ViewGroup.LayoutParams) source.getClass()
-                        .getConstructor(ViewGroup.LayoutParams.class).newInstance(source);
-            } catch (ReflectiveOperationException | RuntimeException unavailable) {
-                return new ViewGroup.MarginLayoutParams(source);
-            }
+        private void reposition() {
+            View view = stats.get();
+            if (button == null || host == null || view == null) return;
+            int height = button.getMeasuredHeight() > 0 ? button.getMeasuredHeight() : dp(view, 28);
+            int width = button.getMeasuredWidth();
+            float x = Math.max(0, host.getWidth() - width - dp(view, 12));
+            float y = Math.max(0, view.getTop() - height - dp(view, 2));
+            button.setX(x);
+            button.setY(y);
         }
 
         void detach() {
             Button view = button;
             button = null;
-            if (view != null && view.getParent() instanceof ViewGroup) {
-                try { ((ViewGroup) view.getParent()).removeView(view); } catch (RuntimeException ignored) { }
+            if (view != null && host != null) {
+                try { host.getOverlay().remove(view); } catch (RuntimeException ignored) { }
             }
+            host = null;
         }
 
-        private int dp(int value) {
-            View view = root.get();
-            float density = view == null ? 1f : view.getResources().getDisplayMetrics().density;
+        private int dp(View view, int value) {
+            float density = view.getResources().getDisplayMetrics().density;
             return Math.round(value * density);
         }
 
         private void toggle() {
             if (running.get()) { running.set(false); return; }
             LocalOptions current = options;
-            View view = root.get();
+            View view = stats.get();
             if (current == null || view == null) return;
             if (!running.compareAndSet(false, true)) return;
             button.setText("正在收集…");
             Context context = view.getContext().getApplicationContext();
-            View decor = view.getRootView();
             String tree = current.downloadSaveTree();
-            Thread worker = new Thread(() -> run(context, decor, current, tree), "DouAi-ProfileBatch");
+            Thread worker = new Thread(() -> run(context, current, tree), "DouAi-ProfileBatch");
             worker.setDaemon(true);
             worker.start();
         }
 
-        private void run(Context context, View decor, LocalOptions current, String tree) {
-            int saved = 0, failed = 0, skipped = 0;
-            try {
-                List<Object> items = collect(decor);
-                DouAiLog.event("profile_batch_download", "collect", items.isEmpty() ? "no_items" : "items_found",
-                        "count=" + items.size());
-                for (int index = 0; index < items.size(); index++) {
-                    if (!running.get() || closed) break;
-                    Object aweme = items.get(index);
-                    List<DownloadActionHook.MediaAsset> assets =
-                            DownloadActionHook.mediaAssets(aweme, true, current);
-                    if (assets.isEmpty()) { skipped++; continue; }
-                    for (DownloadActionHook.MediaAsset asset : assets) {
-                        if (!running.get() || closed) break;
-                        boolean accepted = asset.image
-                                ? MediaStoreDownloader.downloadImage(context, asset.url, asset.name, tree, this::log)
-                                : MediaStoreDownloader.download(context, asset.url, asset.name, false, tree, this::log);
-                        if (accepted) saved++; else failed++;
-                        sleep(ITEM_DELAY_MS);
-                    }
-                    int position = index + 1;
-                    onMain(() -> setLabel(progressLabel(position, items.size())));
-                }
-            } catch (RuntimeException failure) {
-                DouAiLog.event("profile_batch_download", "run", "failed", "reason=runtime");
-                main.post(() -> { if (button != null) button.setText("批量下载"); });
-            } finally {
-                running.set(false);
-                int total = saved, errors = failed, empty = skipped;
-                main.post(() -> {
-                    if (button != null) button.setText("批量下载");
-                    Context target = context;
-                    if (target != null) {
-                        String message = total == 0
-                                ? "未读取到作品列表：请先在主页下滑浏览几屏，再点批量下载"
-                                : "已加入下载 " + total + " 项" + (errors > 0 ? "，失败 " + errors : "")
-                                + (empty > 0 ? "，跳过 " + empty : "");
-                        try { Toast.makeText(target, message, Toast.LENGTH_SHORT).show(); } catch (RuntimeException ignored) { }
-                    }
-                });
-                DouAiLog.event("profile_batch_download", "finish", "completed",
-                        "queued=" + saved + ";failed=" + failed + ";empty=" + skipped);
-            }
-        }
-
         private void setLabel(String text) { if (button != null) button.setText(text); }
+    }
 
-        private void log(String message) {
-            try { DouAiLog.event("profile_batch_download", "transfer", "message", "text=" + DouAiLog.reference(message)); }
-            catch (Throwable ignored) { }
+    private void run(Context context, LocalOptions current, String tree) {
+        int queued = 0, failed = 0, skipped = 0;
+        try {
+            List<Object> items = collect();
+            DouAiLog.event("profile_batch_download", "collect", items.isEmpty() ? "no_items" : "items_found",
+                    "count=" + items.size() + ";models=" + modelCount());
+            for (int index = 0; index < items.size(); index++) {
+                if (!running.get() || closed) break;
+                List<DownloadActionHook.MediaAsset> assets =
+                        DownloadActionHook.mediaAssets(items.get(index), true, current);
+                if (assets.isEmpty()) { skipped++; continue; }
+                for (DownloadActionHook.MediaAsset asset : assets) {
+                    if (!running.get() || closed) break;
+                    boolean accepted = asset.image
+                            ? MediaStoreDownloader.downloadImage(context, asset.url, asset.name, tree, this::log)
+                            : MediaStoreDownloader.download(context, asset.url, asset.name, false, tree, this::log);
+                    if (accepted) queued++; else failed++;
+                    sleep(ITEM_DELAY_MS);
+                }
+                int position = index + 1;
+                onMain(() -> {
+                    for (Header header : new ArrayList<>(headers.values())) header.setLabel(progressLabel(position, items.size()));
+                });
+            }
+        } catch (RuntimeException failure) {
+            DouAiLog.event("profile_batch_download", "run", "failed", "reason=runtime");
+        } finally {
+            running.set(false);
+            int total = queued, errors = failed, empty = skipped;
+            onMain(() -> {
+                for (Header header : new ArrayList<>(headers.values())) header.setLabel("批量下载");
+                try {
+                    Toast.makeText(context, total == 0
+                            ? "未读取到作品列表：请先在主页下滑浏览几屏，再点批量下载"
+                            : "已加入下载 " + total + " 项" + (errors > 0 ? "，失败 " + errors : "")
+                            + (empty > 0 ? "，跳过 " + empty : ""), Toast.LENGTH_SHORT).show();
+                } catch (RuntimeException ignored) { }
+            });
+            DouAiLog.event("profile_batch_download", "finish", "completed",
+                    "queued=" + queued + ";failed=" + failed + ";empty=" + skipped);
         }
     }
 
+    private int modelCount() {
+        synchronized (models) { return models.size(); }
+    }
+
     /**
-     * Collects the author's works from the profile list. The adapter is read reflectively because the
-     * host adapter type changes between builds; unknown shapes simply yield no items.
+     * Collects works from the captured host models first; the list adapter is only a fallback. The host
+     * list widget is scrolled between rounds so later pages are loaded by the host itself.
      */
-    private List<Object> collect(View decor) {
-        Object list = findList(decor);
+    private List<Object> collect() {
         List<Object> ordered = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
         int stable = 0;
         for (int round = 0; round <= MAX_SCROLLS && stable < STABLE_ROUNDS; round++) {
             if (!running.get() || closed) break;
             int before = ordered.size();
-            merge(list, ordered, seen);
+            mergeModels(ordered, seen);
+            mergeAdapter(ordered, seen);
             if (ordered.size() >= MAX_ITEMS) break;
-            if (ordered.size() == before) stable++;
-            else stable = 0;
-            if (!scroll(decor)) break;
+            if (ordered.size() == before) stable++; else stable = 0;
+            if (!scroll()) break;
             sleep(SCROLL_DELAY_MS);
         }
         return ordered.size() > MAX_ITEMS ? new ArrayList<>(ordered.subList(0, MAX_ITEMS)) : ordered;
     }
 
-    private void merge(Object list, List<Object> ordered, Set<String> seen) {
-        for (Object candidate : readItems(list)) {
+    private void mergeModels(List<Object> ordered, Set<String> seen) {
+        ArrayList<Object> snapshot = new ArrayList<>();
+        synchronized (models) {
+            for (Object holder : models) {
+                if (holder instanceof WeakHolder) {
+                    Object value = ((WeakHolder) holder).get();
+                    if (value != null) snapshot.add(value);
+                }
+            }
+        }
+        for (Object model : snapshot) mergeAll(readItems(model), ordered, seen);
+    }
+
+    private void mergeAdapter(List<Object> ordered, Set<String> seen) {
+        View list = listView.get();
+        if (list == null) list = findListView();
+        Object adapter = adapterOf(list);
+        if (adapter != null) mergeAll(readItems(adapter), ordered, seen);
+    }
+
+    private void mergeAll(List<Object> source, List<Object> ordered, Set<String> seen) {
+        for (Object candidate : source) {
             String id = identity(candidate);
             if (id == null || !seen.add(id)) continue;
             ordered.add(candidate);
             if (ordered.size() >= MAX_ITEMS) return;
+        }
+    }
+
+    private boolean scroll() {
+        View list = listView.get();
+        if (list == null) list = findListView();
+        if (list == null) return false;
+        try {
+            Method smooth = list.getClass().getMethod("smoothScrollBy", int.class, int.class);
+            smooth.invoke(list, 0, Math.max(1, list.getHeight()));
+            return true;
+        } catch (ReflectiveOperationException | RuntimeException failure) {
+            return false;
         }
     }
 
@@ -391,21 +363,33 @@ public final class ProfileBatchDownload implements AutoCloseable {
         return text.isEmpty() || "null".equals(text) ? null : text;
     }
 
-    /** Finds the vertical list that holds profile items, without depending on a host class name. */
-    private Object findList(View decor) {
-        if (decor == null) return null;
-        ArrayList<View> queue = new ArrayList<>();
-        queue.add(decor);
-        for (int index = 0; index < queue.size() && index < 400; index++) {
-            View view = queue.get(index);
-            Object adapter = adapterOf(view);
-            if (adapter != null) return adapter;
-            if (view instanceof ViewGroup) {
-                ViewGroup group = (ViewGroup) view;
-                for (int child = 0; child < group.getChildCount(); child++) queue.add(group.getChildAt(child));
+    /** Finds a list widget in the current window as a fallback when the hook has not fired yet. */
+    private View findListView() {
+        for (Header header : new ArrayList<>(headers.values())) {
+            View root = header.stats.get();
+            if (root == null) continue;
+            ArrayList<View> queue = new ArrayList<>();
+            queue.add(root.getRootView());
+            for (int index = 0; index < queue.size() && index < 400; index++) {
+                View view = queue.get(index);
+                if (isListLike(view) && adapterOf(view) != null) return view;
+                if (view instanceof ViewGroup) {
+                    ViewGroup group = (ViewGroup) view;
+                    for (int child = 0; child < group.getChildCount(); child++) queue.add(group.getChildAt(child));
+                }
             }
         }
         return null;
+    }
+
+    private static boolean isListLike(View view) {
+        for (Class<?> type = view.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
+            String name = type.getName();
+            if ("androidx.recyclerview.widget.RecyclerView".equals(name)
+                    || "androidx.viewpager2.widget.ViewPager2".equals(name)) return true;
+        }
+        String name = view.getClass().getName();
+        return name.contains("RecyclerView") || name.endsWith("ListView") || name.endsWith("GridView");
     }
 
     private static Object adapterOf(View view) {
@@ -419,29 +403,43 @@ public final class ProfileBatchDownload implements AutoCloseable {
         }
     }
 
-    /**
-     * The host ships obfuscated subclasses of RecyclerView, so the family is detected from the
-     * superclass chain instead of the class name.
-     */
-    private static boolean isListLike(View view) {
-        for (Class<?> type = view.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
-            String name = type.getName();
-            if ("androidx.recyclerview.widget.RecyclerView".equals(name)
-                    || "androidx.viewpager2.widget.ViewPager2".equals(name)) return true;
-        }
-        String name = view.getClass().getName();
-        return name.contains("RecyclerView") || name.endsWith("ListView") || name.endsWith("GridView");
-    }
-
-    /** Reads list items from an adapter, an adapter-provided collection, or an adapter data field. */
-    static List<Object> readItems(Object adapter) {
+    static List<Object> readItems(Object source) {
         ArrayList<Object> items = new ArrayList<>();
-        if (adapter == null) return items;
-        collectItems(adapter, items, 0);
+        if (source == null) return items;
+        collectItems(source, items, 0);
         return items;
     }
 
-    /** Reads adapters that only expose an index accessor plus a count, without a backing collection. */
+    private static void collectItems(Object source, List<Object> sink, int depth) {
+        if (source == null || depth > 3 || sink.size() >= MAX_ITEMS) return;
+        if (source instanceof Collection<?>) {
+            for (Object item : (Collection<?>) source) if (item != null) sink.add(item);
+            return;
+        }
+        if (collectIndexed(source, sink)) return;
+        for (Class<?> type = source.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                if (!Collection.class.isAssignableFrom(field.getType())) continue;
+                try {
+                    field.setAccessible(true);
+                    collectItems(field.get(source), sink, depth + 1);
+                    if (!sink.isEmpty()) return;
+                } catch (ReflectiveOperationException | RuntimeException ignored) { }
+            }
+            for (Method method : type.getDeclaredMethods()) {
+                if (method.getParameterCount() != 0 || !Collection.class.isAssignableFrom(method.getReturnType())) continue;
+                String name = method.getName();
+                if (!(name.equals("getItems") || name.equals("getData") || name.equals("getList")
+                        || name.equals("getValues"))) continue;
+                try {
+                    method.setAccessible(true);
+                    collectItems(method.invoke(source), sink, depth + 1);
+                    if (!sink.isEmpty()) return;
+                } catch (ReflectiveOperationException | RuntimeException ignored) { }
+            }
+        }
+    }
+
     private static boolean collectIndexed(Object source, List<Object> sink) {
         Integer count = null;
         for (String name : new String[]{"getItemCount", "getCount", "size"}) {
@@ -473,63 +471,9 @@ public final class ProfileBatchDownload implements AutoCloseable {
         return !sink.isEmpty();
     }
 
-    private static void collectItems(Object source, List<Object> sink, int depth) {
-        if (source == null || depth > 2 || sink.size() >= MAX_ITEMS) return;
-        if (source instanceof Collection<?>) {
-            for (Object item : (Collection<?>) source) if (item != null) sink.add(item);
-            return;
-        }
-        if (collectIndexed(source, sink)) return;
-        for (Class<?> type = source.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
-            for (Method method : type.getDeclaredMethods()) {
-                if (method.getParameterCount() != 0 || !Collection.class.isAssignableFrom(method.getReturnType())) continue;
-                String name = method.getName();
-                if (!(name.equals("getItems") || name.equals("getData") || name.equals("getList")
-                        || name.equals("getValues"))) continue;
-                try {
-                    method.setAccessible(true);
-                    collectItems(method.invoke(source), sink, depth + 1);
-                    if (!sink.isEmpty()) return;
-                } catch (ReflectiveOperationException | RuntimeException ignored) { }
-            }
-            for (Field field : type.getDeclaredFields()) {
-                if (!Collection.class.isAssignableFrom(field.getType())) continue;
-                try {
-                    field.setAccessible(true);
-                    collectItems(field.get(source), sink, depth + 1);
-                    if (!sink.isEmpty()) return;
-                } catch (ReflectiveOperationException | RuntimeException ignored) { }
-            }
-        }
-    }
-
-    /** Scrolls the profile list by one viewport; returns false when no scrollable list exists. */
-    private static boolean scroll(View decor) {
-        View list = findListView(decor);
-        if (list == null) return false;
-        try {
-            Method smooth = list.getClass().getMethod("smoothScrollBy", int.class, int.class);
-            smooth.invoke(list, 0, Math.max(1, list.getHeight()));
-            return true;
-        } catch (ReflectiveOperationException | RuntimeException failure) {
-            return false;
-        }
-    }
-
-    /** Breadth-first search for the profile list view, including obfuscated RecyclerView subclasses. */
-    private static View findListView(View decor) {
-        if (decor == null) return null;
-        ArrayList<View> queue = new ArrayList<>();
-        queue.add(decor);
-        for (int index = 0; index < queue.size() && index < 400; index++) {
-            View view = queue.get(index);
-            if (isListLike(view) && adapterOf(view) != null) return view;
-            if (view instanceof ViewGroup) {
-                ViewGroup group = (ViewGroup) view;
-                for (int child = 0; child < group.getChildCount(); child++) queue.add(group.getChildAt(child));
-            }
-        }
-        return null;
+    private void log(String message) {
+        try { DouAiLog.event("profile_batch_download", "transfer", "message", "text=" + DouAiLog.reference(message)); }
+        catch (Throwable ignored) { }
     }
 
     private static void sleep(long millis) {

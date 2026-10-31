@@ -13,17 +13,17 @@ public final class HostAdaptation {
     public static final long VERIFIED_UPDATE_VERSION_CODE = 40809900L;
     public static final long UPDATE_VERSION_CODE_405 = 40509900L;
     public static final String VERIFIED_RULES_FINGERPRINT =
-            "ab5215b527416778cf4a773880af43d9d073ce0512935ee99dfbd6e89c55a6f1";
+            "16170513f5cd610971e1daab6f80f33ee4499b59170187dc70ae604366db4c75";
     private static final Map<Integer, String> FEED_RESOURCES = feedResources();
 
     private HostAdaptation() { }
 
     public static final Profile PROFILE_406 = new Profile("40.6.0", 400601L,
             "douyin-host-rules-40.6.0.tsv",
-            "ed977e2ee39436476e4242f1db148d412377e50b256afc5408918a311a1b4e9b", legacyFeedResources());
+            "99f7257bb5f1e533a9b99565b019d5ab978c9061bb77002db13ee2dd0d25e36f", legacyFeedResources());
     public static final Profile PROFILE_405 = new Profile("40.5.0", 400501L,
             "douyin-host-rules-40.5.0.tsv",
-            "35c76cd658ff0257a7516bd80def9a34a78b1ece5a4fbd04e375e8d33dcdde31", feedResources405());
+            "92eeb9b0939ff2d8cd24fdec91e77cca21b9b8c0fff3d6fc5989dbaebd8a9edf", feedResources405());
     public static final Profile PROFILE_408 = new Profile("40.8.0", 400801L,
             RULES_ASSET, VERIFIED_RULES_FINGERPRINT, FEED_RESOURCES);
     /** Every supported host build; selection always uses the real host identity. */
