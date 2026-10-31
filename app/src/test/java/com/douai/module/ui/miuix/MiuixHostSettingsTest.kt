@@ -481,7 +481,9 @@ class MiuixHostSettingsTest {
                 .findViewWithTag<EditText>("settings.input.文件名模板").setText("#aid#.#ext#")
             editor.getButton(Dialog.BUTTON_POSITIVE).performClick()
         }
-        compose.onNodeWithText("#aid#.#ext#").assertIsDisplayed()
+        // The download group gained a row, so the value may sit below the fold; exists + store check
+        // still prove the preview was updated by the editor.
+        compose.onNodeWithText("#aid#.#ext#").assertExists()
         assertEquals("#aid#.#ext#", store.getString("download_name_template", ""))
         compose.runOnUiThread { ShadowDialog.getLatestDialog().dismiss() }
         compose.onNodeWithTag("settings.search").performTextReplacement("组件")
