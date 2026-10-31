@@ -409,12 +409,7 @@ public final class ProfileBatchDownload implements AutoCloseable {
     }
 
     private static Object adapterOf(View view) {
-        if (view == null) return null;
-        String name = view.getClass().getName();
-        // Host builds ship RecyclerView subclasses and wrappers, so match the family, not one exact class.
-        boolean listLike = name.contains("RecyclerView") || name.contains("ViewPager2")
-                || name.endsWith("ListView") || name.endsWith("GridView");
-        if (!listLike) return null;
+        if (view == null || !isListLike(view)) return null;
         try {
             Method getAdapter = view.getClass().getMethod("getAdapter");
             Object adapter = getAdapter.invoke(view);
@@ -422,6 +417,20 @@ public final class ProfileBatchDownload implements AutoCloseable {
         } catch (ReflectiveOperationException | RuntimeException failure) {
             return null;
         }
+    }
+
+    /**
+     * The host ships obfuscated subclasses of RecyclerView, so the family is detected from the
+     * superclass chain instead of the class name.
+     */
+    private static boolean isListLike(View view) {
+        for (Class<?> type = view.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
+            String name = type.getName();
+            if ("androidx.recyclerview.widget.RecyclerView".equals(name)
+                    || "androidx.viewpager2.widget.ViewPager2".equals(name)) return true;
+        }
+        String name = view.getClass().getName();
+        return name.contains("RecyclerView") || name.endsWith("ListView") || name.endsWith("GridView");
     }
 
     /** Reads list items from an adapter, an adapter-provided collection, or an adapter data field. */
@@ -496,19 +505,7 @@ public final class ProfileBatchDownload implements AutoCloseable {
 
     /** Scrolls the profile list by one viewport; returns false when no scrollable list exists. */
     private static boolean scroll(View decor) {
-        Object adapter = null;
-        View list = null;
-        ArrayList<View> queue = new ArrayList<>();
-        if (decor == null) return false;
-        queue.add(decor);
-        for (int index = 0; index < queue.size() && index < 400; index++) {
-            View view = queue.get(index);
-            if (adapterOf(view) != null) { list = view; break; }
-            if (view instanceof ViewGroup) {
-                ViewGroup group = (ViewGroup) view;
-                for (int child = 0; child < group.getChildCount(); child++) queue.add(group.getChildAt(child));
-            }
-        }
+        View list = findListView(decor);
         if (list == null) return false;
         try {
             Method smooth = list.getClass().getMethod("smoothScrollBy", int.class, int.class);
@@ -517,6 +514,22 @@ public final class ProfileBatchDownload implements AutoCloseable {
         } catch (ReflectiveOperationException | RuntimeException failure) {
             return false;
         }
+    }
+
+    /** Breadth-first search for the profile list view, including obfuscated RecyclerView subclasses. */
+    private static View findListView(View decor) {
+        if (decor == null) return null;
+        ArrayList<View> queue = new ArrayList<>();
+        queue.add(decor);
+        for (int index = 0; index < queue.size() && index < 400; index++) {
+            View view = queue.get(index);
+            if (isListLike(view) && adapterOf(view) != null) return view;
+            if (view instanceof ViewGroup) {
+                ViewGroup group = (ViewGroup) view;
+                for (int child = 0; child < group.getChildCount(); child++) queue.add(group.getChildAt(child));
+            }
+        }
+        return null;
     }
 
     private static void sleep(long millis) {
